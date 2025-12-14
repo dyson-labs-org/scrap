@@ -19,71 +19,71 @@ A commercial satellite operator extends the operational life of a fuel-depleted 
 
 ### Context
 
-Intelsat 10-02, a 4,500 kg C/Ku-band communications satellite at 1°W, is running low on station-keeping fuel. Rather than decommission the satellite (which has functional transponders worth $400M), Intelsat contracts with Northrop Grumman for a Mission Extension Vehicle docking.
+Intelsat 10-02, a 4,500 kg C/Ku-band communications satellite at 1degW, is running low on station-keeping fuel. Rather than decommission the satellite (which has functional transponders worth $400M), Intelsat contracts with Northrop Grumman for a Mission Extension Vehicle docking.
 
 MEV-3 will dock with Intelsat 10-02 and take over attitude control and station-keeping for 5+ years.
 
 ### Servicing Mission Architecture
 
 ```
-Phase 1: Approach (500 km → 1 km)
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│    GEO Belt (35,786 km altitude)                                   │
-│                                                                     │
-│    MEV-3 ○──────────────────────────────────►● Intelsat 10-02      │
-│    (servicer)                                 (client)              │
-│                                                                     │
-│    Phasing maneuvers over 2 weeks                                  │
-│    Ground-commanded with SDA coordination                          │
-└─────────────────────────────────────────────────────────────────────┘
+Phase 1: Approach (500 km -> 1 km)
++---------------------------------------------------------------------+
+|                                                                     |
+|    GEO Belt (35,786 km altitude)                                   |
+|                                                                     |
+|    MEV-3 o---------------------------------->* Intelsat 10-02      |
+|    (servicer)                                 (client)              |
+|                                                                     |
+|    Phasing maneuvers over 2 weeks                                  |
+|    Ground-commanded with SDA coordination                          |
++---------------------------------------------------------------------+
 
-Phase 2: Proximity Operations (1 km → 10 m)
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│                    Inspection Arc                                   │
-│                  ╭─────────────────╮                                │
-│    MEV-3 ───────►(       ●         )  Intelsat 10-02               │
-│                  ╰─────────────────╯                                │
-│                                                                     │
-│    Client characterization and docking readiness                   │
-│    Autonomous with ground oversight                                │
-└─────────────────────────────────────────────────────────────────────┘
+Phase 2: Proximity Operations (1 km -> 10 m)
++---------------------------------------------------------------------+
+|                                                                     |
+|                    Inspection Arc                                   |
+|                  +-----------------+                                |
+|    MEV-3 ------->(       *         )  Intelsat 10-02               |
+|                  +-----------------+                                |
+|                                                                     |
+|    Client characterization and docking readiness                   |
+|    Autonomous with ground oversight                                |
++---------------------------------------------------------------------+
 
 Phase 3: Docking
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│                         Liquid Apogee Engine                        │
-│                              Nozzle                                 │
-│                                │                                    │
-│    MEV-3 Capture ┌─────────────┴─────────────┐                      │
-│    System ────────►          ●               │  Intelsat 10-02     │
-│    (LAE dock)    │    (capture interface)    │                      │
-│                  └───────────────────────────┘                      │
-│                                                                     │
-│    Final approach: 0.01 m/s contact velocity                       │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+|                                                                     |
+|                         Liquid Apogee Engine                        |
+|                              Nozzle                                 |
+|                                |                                    |
+|    MEV-3 Capture +-------------+-------------+                      |
+|    System -------->          *               |  Intelsat 10-02     |
+|    (LAE dock)    |    (capture interface)    |                      |
+|                  +---------------------------+                      |
+|                                                                     |
+|    Final approach: 0.01 m/s contact velocity                       |
++---------------------------------------------------------------------+
 
 Phase 4: Servicing Operations
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│              ┌─────────────────────────────────┐                    │
-│              │   Combined Stack                │                    │
-│              │   MEV-3 + Intelsat 10-02        │                    │
-│              │                                 │                    │
-│              │   ● MEV provides:               │                    │
-│              │     - Station-keeping           │                    │
-│              │     - Attitude control          │                    │
-│              │     - Orbit adjustments         │                    │
-│              │                                 │                    │
-│              │   ● Intelsat provides:          │                    │
-│              │     - Transponder payload       │                    │
-│              │     - Power generation          │                    │
-│              │     - Thermal control           │                    │
-│              └─────────────────────────────────┘                    │
-│                                                                     │
-│    Mission life extended 5+ years                                  │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+|                                                                     |
+|              +---------------------------------+                    |
+|              |   Combined Stack                |                    |
+|              |   MEV-3 + Intelsat 10-02        |                    |
+|              |                                 |                    |
+|              |   * MEV provides:               |                    |
+|              |     - Station-keeping           |                    |
+|              |     - Attitude control          |                    |
+|              |     - Orbit adjustments         |                    |
+|              |                                 |                    |
+|              |   * Intelsat provides:          |                    |
+|              |     - Transponder payload       |                    |
+|              |     - Power generation          |                    |
+|              |     - Thermal control           |                    |
+|              +---------------------------------+                    |
+|                                                                     |
+|    Mission life extended 5+ years                                  |
++---------------------------------------------------------------------+
 ```
 
 ### Capability Token for Docking Authorization
@@ -328,7 +328,7 @@ Intelsat pre-authorizes MEV-3 docking:
 - [ ] Safe approach within regulatory guidelines
 - [ ] Docking achieved with <0.05 m/s contact velocity
 - [ ] Attitude handover within 1 hour of dock
-- [ ] Station-keeping accuracy maintained at ±0.05°
+- [ ] Station-keeping accuracy maintained at +/-0.05deg
 - [ ] Client transponders operational post-dock
 - [ ] 5-year mission extension achieved
 
@@ -347,7 +347,7 @@ Intelsat pre-authorizes MEV-3 docking:
 - **Transponders**: 24 C-band, 14 Ku-band
 - **Coverage**: Europe, Middle East, Africa
 - **Original design life**: 15 years
-- **Station**: 1.0°W
+- **Station**: 1.0degW
 
 ### Docking Interface (LAE Nozzle)
 - Most GEO satellites use Liquid Apogee Engine for orbit raising

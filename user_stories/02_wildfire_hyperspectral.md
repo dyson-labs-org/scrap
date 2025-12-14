@@ -31,35 +31,35 @@ Multiple hyperspectral satellites have capability; an auction determines the opt
 ### Auction Flow
 
 ```
-┌──────────────┐     ┌─────────────┐
-│   CAL FIRE   │────►│ AWS Ground  │
-│   Dispatch   │     │   Station   │
-└──────────────┘     └──────┬──────┘
-                            │
++--------------+     +-------------+
+|   CAL FIRE   |---->| AWS Ground  |
+|   Dispatch   |     |   Station   |
++--------------+     +------+------+
+                            |
                     Upload task to
                     orbiting coordinator
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │    Starlink-8192        │
-              │  (Auction Coordinator)  │
-              └───────────┬─────────────┘
-                          │
-            ┌─────────────┼─────────────┐
-            │             │             │
-            ▼             ▼             ▼
-      ┌──────────┐  ┌──────────┐  ┌──────────┐
-      │  PRISMA  │  │  EnMAP   │  │INTUITION │
-      │  (bid 12)│  │  (bid 8) │  │  (bid 15)│
-      └──────────┘  └────┬─────┘  └──────────┘
-                         │
+                            |
+                            v
+              +-------------------------+
+              |    Starlink-8192        |
+              |  (Auction Coordinator)  |
+              +-----------+-------------+
+                          |
+            +-------------+-------------+
+            |             |             |
+            v             v             v
+      +----------+  +----------+  +----------+
+      |  PRISMA  |  |  EnMAP   |  |INTUITION |
+      |  (bid 12)|  |  (bid 8) |  |  (bid 15)|
+      +----------+  +----+-----+  +----------+
+                         |
                     Winner: EnMAP
-                         │
-                         ▼
-              ┌─────────────────────────┐
-              │   DLR Neustrelitz GS    │
-              │   ──► CAL FIRE          │
-              └─────────────────────────┘
+                         |
+                         v
+              +-------------------------+
+              |   DLR Neustrelitz GS    |
+              |   --> CAL FIRE          |
+              +-------------------------+
 ```
 
 ### Task Broadcast
@@ -247,7 +247,7 @@ EnMAP wins with the lowest bid (8.1) due to:
 ## Technical Notes
 
 ### EnMAP Specifications
-- **Orbit**: 653 km, sun-synchronous, 97.96° inclination
+- **Orbit**: 653 km, sun-synchronous, 97.96deg inclination
 - **HSI spectral range**: 420-2450 nm
 - **Spectral bands**: 228 (VNIR: 88, SWIR: 140)
 - **Spatial resolution**: 30 m
@@ -256,7 +256,7 @@ EnMAP wins with the lowest bid (8.1) due to:
 
 ### Fire Detection Algorithm
 - **Active fire**: SWIR bands (1600-2500nm) detect thermal anomalies
-- **Burn severity**: Normalized Burn Ratio (NBR) = (NIR - SWIR) / (NIR + SWIR)
+- **Burn severity**: Normalized Burn Ratio $NBR = \frac{NIR - SWIR}{NIR + SWIR}$
 - **Fuel classification**: Spectral unmixing for vegetation types
 
 ## Value Proposition

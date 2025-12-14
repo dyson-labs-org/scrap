@@ -28,49 +28,49 @@ GNSS Radio Occultation (GNSS-RO) can provide vertical profiles from surface to 4
 ### Coordinated Collection Strategy
 
 ```
-                         ┌─────────────────────────────────────┐
-                         │     Hurricane Maria AOI             │
-                         │   (15-22°N, 60-70°W)                │
-                         │   200km radius coverage needed      │
-                         └───────────────┬─────────────────────┘
-                                         │
+                         +-------------------------------------+
+                         |     Hurricane Maria AOI             |
+                         |   (15-22degN, 60-70degW)                |
+                         |   200km radius coverage needed      |
+                         +---------------+---------------------+
+                                         |
                     Required: >50 occultation profiles in 6 hours
-                                         │
-              ┌──────────────────────────┼──────────────────────────┐
-              │                          │                          │
-              ▼                          ▼                          ▼
-       ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
-       │ LEMUR-2     │            │ LEMUR-2     │            │ LEMUR-2     │
-       │ PETERG      │            │ ZACHARY     │            │ BROWNCOW    │
-       │ (42841)     │            │ (42845)     │            │ (43125)     │
-       └──────┬──────┘            └──────┬──────┘            └──────┬──────┘
-              │                          │                          │
-              │    GNSS signal bends     │                          │
-              │    through atmosphere    │                          │
-              │                          │                          │
-       ┌──────┴──────┐            ┌──────┴──────┐            ┌──────┴──────┐
-       │    GPS      │            │   GLONASS   │            │   Galileo   │
-       │  Satellites │            │  Satellites │            │  Satellites │
-       └─────────────┘            └─────────────┘            └─────────────┘
-              │                          │                          │
-              └──────────────────────────┼──────────────────────────┘
-                                         │
+                                         |
+              +--------------------------+--------------------------+
+              |                          |                          |
+              v                          v                          v
+       +-------------+            +-------------+            +-------------+
+       | LEMUR-2     |            | LEMUR-2     |            | LEMUR-2     |
+       | PETERG      |            | ZACHARY     |            | BROWNCOW    |
+       | (42841)     |            | (42845)     |            | (43125)     |
+       +------+------+            +------+------+            +------+------+
+              |                          |                          |
+              |    GNSS signal bends     |                          |
+              |    through atmosphere    |                          |
+              |                          |                          |
+       +------+------+            +------+------+            +------+------+
+       |    GPS      |            |   GLONASS   |            |   Galileo   |
+       |  Satellites |            |  Satellites |            |  Satellites |
+       +-------------+            +-------------+            +-------------+
+              |                          |                          |
+              +--------------------------+--------------------------+
+                                         |
                               Occultation Profiles
-                                         │
-              ┌──────────────────────────┼──────────────────────────┐
-              │                          │                          │
-              ▼                          ▼                          ▼
-       ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
-       │ AWS GS      │            │ AWS GS      │            │ AWS GS      │
-       │ Ohio        │            │ Oregon      │            │ Singapore   │
-       └──────┬──────┘            └──────┬──────┘            └──────┬──────┘
-              │                          │                          │
-              └──────────────────────────┼──────────────────────────┘
-                                         │
-                              ┌──────────┴──────────┐
-                              │  NOAA NCEP GFS      │
-                              │  Data Assimilation  │
-                              └─────────────────────┘
+                                         |
+              +--------------------------+--------------------------+
+              |                          |                          |
+              v                          v                          v
+       +-------------+            +-------------+            +-------------+
+       | AWS GS      |            | AWS GS      |            | AWS GS      |
+       | Ohio        |            | Oregon      |            | Singapore   |
+       +------+------+            +------+------+            +------+------+
+              |                          |                          |
+              +--------------------------+--------------------------+
+                                         |
+                              +----------+----------+
+                              |  NOAA NCEP GFS      |
+                              |  Data Assimilation  |
+                              +---------------------+
 ```
 
 ### Constellation Coordination Task
@@ -326,11 +326,11 @@ Each occultation produces a vertical atmospheric profile:
 
 ## Acceptance Criteria
 
-- [ ] ≥50 occultation profiles within target region
+- [ ] >=50 occultation profiles within target region
 - [ ] Profiles span surface to 40km altitude
 - [ ] Data latency < 3 hours from collection to assimilation
 - [ ] Warm core structure detected in composite analysis
-- [ ] Track forecast improvement ≥15km at 48hr
+- [ ] Track forecast improvement >=15km at 48hr
 
 ## Technical Notes
 
@@ -340,11 +340,11 @@ Each occultation produces a vertical atmospheric profile:
 - **Sampling rate**: 50 Hz
 - **Vertical resolution**: ~200 m
 - **Profiles per day**: 750-1000 per satellite
-- **Accuracy**: Temperature ±0.5 K, Pressure ±0.5%
+- **Accuracy**: Temperature +/-0.5 K, Pressure +/-0.5%
 
 ### GNSS-RO Physics
 - GPS signal bends as it passes through atmosphere
-- Bending angle α ∝ refractivity gradient dN/dr
+- Bending angle alpha proportional to refractivity gradient dN/dr
 - Refractivity N = f(pressure, temperature, water vapor)
 - Abel inversion retrieves vertical profiles
 

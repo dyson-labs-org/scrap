@@ -29,41 +29,41 @@ Astroscale's ADRAS-J inspector satellite is tasked for Rendezvous and Proximity 
 ### RPO Mission Profile
 
 ```
-Phase 1: Far-Range Rendezvous (100 km → 1 km)
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│    ADRAS-J                                    Envisat               │
-│       ○────────────────────────────────────────●                    │
-│    Inspector                              Target (defunct)          │
-│                                                                     │
-│    Δv burns to reduce relative distance                             │
-│    Duration: ~24 hours                                              │
-└─────────────────────────────────────────────────────────────────────┘
+Phase 1: Far-Range Rendezvous (100 km -> 1 km)
++---------------------------------------------------------------------+
+|                                                                     |
+|    ADRAS-J                                    Envisat               |
+|       o----------------------------------------*                    |
+|    Inspector                              Target (defunct)          |
+|                                                                     |
+|    Deltav burns to reduce relative distance                             |
+|    Duration: ~24 hours                                              |
++---------------------------------------------------------------------+
 
-Phase 2: Close-Range Inspection (1 km → 50 m)
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│                          Inspection arc                             │
-│                        ╭───────────────╮                            │
-│    ADRAS-J ─────────►( ○     Envisat   ● )                          │
-│                        ╰───────────────╯                            │
-│                                                                     │
-│    Station-keeping at safe distance                                 │
-│    Multi-angle imaging                                              │
-└─────────────────────────────────────────────────────────────────────┘
+Phase 2: Close-Range Inspection (1 km -> 50 m)
++---------------------------------------------------------------------+
+|                                                                     |
+|                          Inspection arc                             |
+|                        +---------------+                            |
+|    ADRAS-J --------->( o     Envisat   * )                          |
+|                        +---------------+                            |
+|                                                                     |
+|    Station-keeping at safe distance                                 |
+|    Multi-angle imaging                                              |
++---------------------------------------------------------------------+
 
 Phase 3: Debris Field Characterization (circumnavigation)
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│                  ╭──────────────────────╮                           │
-│               ╭──┤                      ├──╮                        │
-│            ○──┘  │      Envisat ●       │  └──○                     │
-│               ╰──┤                      ├──╯                        │
-│                  ╰──────────────────────╯                           │
-│                                                                     │
-│    Circumnavigation at 100m distance                                │
-│    LIDAR + optical debris detection                                 │
-└─────────────────────────────────────────────────────────────────────┘
++---------------------------------------------------------------------+
+|                                                                     |
+|                  +----------------------+                           |
+|               +--+                      +--+                        |
+|            o--+  |      Envisat *       |  +--o                     |
+|               +--+                      +--+                        |
+|                  +----------------------+                           |
+|                                                                     |
+|    Circumnavigation at 100m distance                                |
+|    LIDAR + optical debris detection                                 |
++---------------------------------------------------------------------+
 ```
 
 ### Capability Token
@@ -329,7 +329,7 @@ LeoLabs pre-negotiated authorization with Astroscale for debris inspection:
 ## Acceptance Criteria
 
 - [ ] Approach within 100m without collision
-- [ ] Tumble rate characterized to ±0.1 deg/s
+- [ ] Tumble rate characterized to +/-0.1 deg/s
 - [ ] Debris >1cm detected within 500m radius
 - [ ] 3D LIDAR model with 5cm resolution
 - [ ] Assessment report within 48 hours
@@ -348,8 +348,8 @@ LeoLabs pre-negotiated authorization with Astroscale for debris inspection:
 - **Launch**: 2002
 - **Failure**: 2012 (contact lost)
 - **Mass**: 8,211 kg
-- **Size**: 26m × 10m × 5m
-- **Orbit**: 773 km, 98.5° inclination
+- **Size**: 26m x 10m x 5m
+- **Orbit**: 773 km, 98.5deg inclination
 - **Tumble**: ~2.5 deg/s (post-failure)
 
 ### RPO Safety Requirements

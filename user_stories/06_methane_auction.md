@@ -33,60 +33,60 @@ Phase 1: Wide-area screening (MethaneSAT wins)
 Phase 2: Point-source quantification (GHGSat wins)
 
 ```
-┌──────────────┐     ┌─────────────┐
-│    CATF      │────►│ AWS Ground  │
-│  Request     │     │   Station   │
-└──────────────┘     └──────┬──────┘
-                            │
++--------------+     +-------------+
+|    CATF      |---->| AWS Ground  |
+|  Request     |     |   Station   |
++--------------+     +------+------+
+                            |
                     Upload auction task
-                            │
-                            ▼
-              ┌─────────────────────────┐
-              │    OneWeb-0142          │
-              │  (Auction Coordinator)  │
-              └───────────┬─────────────┘
-                          │
-            ╔═════════════╧═════════════╗
-            ║    PHASE 1: Wide-Area     ║
-            ╚═════════════╤═════════════╝
-                          │
-            ┌─────────────┼─────────────┐
-            │             │             │
-            ▼             ▼             ▼
-      ┌──────────┐  ┌──────────┐  ┌──────────┐
-      │Sentinel-5P│  │MethaneSAT│  │ GHGSat  │
-      │ (bid: 18) │  │ (bid: 9) │  │(bid: 25)│
-      │   N/A     │  │  WINNER  │  │   N/A   │
-      └──────────┘  └────┬─────┘  └──────────┘
-                         │
+                            |
+                            v
+              +-------------------------+
+              |    OneWeb-0142          |
+              |  (Auction Coordinator)  |
+              +-----------+-------------+
+                          |
+            +===========================+
+            |    PHASE 1: Wide-Area     |
+            +===========================+
+                          |
+            +-------------+-------------+
+            |             |             |
+            v             v             v
+      +----------+  +----------+  +----------+
+      |Sentinel-5P|  |MethaneSAT|  | GHGSat  |
+      | (bid: 18) |  | (bid: 9) |  |(bid: 25)|
+      |   N/A     |  |  WINNER  |  |   N/A   |
+      +----------+  +----+-----+  +----------+
+                         |
                     Wide-area scan
-                         │
-                         ▼
-              ┌─────────────────────────┐
-              │  7 Active Emitters      │
-              │  Detected               │
-              └───────────┬─────────────┘
-                          │
-            ╔═════════════╧═════════════╗
-            ║  PHASE 2: Point-Source    ║
-            ╚═════════════╤═════════════╝
-                          │
-            ┌─────────────┼─────────────┐
-            │             │             │
-            ▼             ▼             ▼
-      ┌──────────┐  ┌──────────┐  ┌──────────┐
-      │MethaneSAT│  │ GHGSat-C2│  │Sentinel-5P│
-      │ (bid: 15)│  │ (bid: 8) │  │(unsuitable)│
-      │  N/A     │  │  WINNER  │  │           │
-      └──────────┘  └────┬─────┘  └──────────┘
-                         │
+                         |
+                         v
+              +-------------------------+
+              |  7 Active Emitters      |
+              |  Detected               |
+              +-----------+-------------+
+                          |
+            +===========================+
+            |  PHASE 2: Point-Source    |
+            +===========================+
+                          |
+            +-------------+-------------+
+            |             |             |
+            v             v             v
+      +----------+  +----------+  +----------+
+      |MethaneSAT|  | GHGSat-C2|  |Sentinel-5P|
+      | (bid: 15)|  | (bid: 8) |  |(unsuitable)|
+      |  N/A     |  |  WINNER  |  |           |
+      +----------+  +----+-----+  +----------+
+                         |
                     Point measurements
-                         │
-                         ▼
-              ┌─────────────────────────┐
-              │  Emission Rates for     │
-              │  7 Super-Emitters       │
-              └─────────────────────────┘
+                         |
+                         v
+              +-------------------------+
+              |  Emission Rates for     |
+              |  7 Super-Emitters       |
+              +-------------------------+
 ```
 
 ### Phase 1 Task Broadcast
@@ -303,7 +303,7 @@ GHGSat provides facility-level quantification:
 ## Acceptance Criteria
 
 - [ ] Phase 1 survey detects plumes > 100 kg/hr
-- [ ] Phase 2 quantifies emissions within ±25% uncertainty
+- [ ] Phase 2 quantifies emissions within +/-25% uncertainty
 - [ ] Auction converges within 15 minutes per phase
 - [ ] Attribution identifies specific emission sources
 - [ ] Data delivered within 4 hours of initial request
@@ -313,7 +313,7 @@ GHGSat provides facility-level quantification:
 ### MethaneSAT Specifications
 - **Orbit**: 525 km, sun-synchronous
 - **Spectrometer**: SWIR (1630-1680 nm)
-- **Spatial resolution**: 400 m × 100 m (along × across track)
+- **Spatial resolution**: 400 m x 100 m (along x across track)
 - **Swath width**: 200 km
 - **Precision**: 3 ppb CH4
 - **Detection limit**: ~100 kg/hr
@@ -327,8 +327,8 @@ GHGSat provides facility-level quantification:
 - **Quantification accuracy**: 10-20%
 
 ### Methane Global Warming Potential
-- **GWP-20**: 84× CO2 (20-year horizon)
-- **GWP-100**: 28× CO2 (100-year horizon)
+- **GWP-20**: 84x CO2 (20-year horizon)
+- **GWP-100**: 28x CO2 (100-year horizon)
 - **Super-emitter threshold**: >100 kg/hr (~876 tonnes/year)
 
 ## Value Proposition

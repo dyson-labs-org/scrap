@@ -20,7 +20,7 @@ An airline operations center needs urgent aerosol profiling to assess volcanic a
 
 ### Context
 
-The Grímsvötn volcano in Iceland has begun erupting, ejecting ash into the stratosphere. EUROCONTROL needs vertical aerosol profiles along the North Atlantic Organized Track System (NAT OTS) to determine safe flight levels.
+The Grimsvotn volcano in Iceland has begun erupting, ejecting ash into the stratosphere. EUROCONTROL needs vertical aerosol profiles along the North Atlantic Organized Track System (NAT OTS) to determine safe flight levels.
 
 CALIPSO's orbit will cross the ash plume in 45 minutes, but the next ground contact is 2 hours away. An Iridium satellite will pass within 8 km of CALIPSO in 20 minutes.
 
@@ -29,26 +29,26 @@ CALIPSO's orbit will cross the ash plume in 45 minutes, but the next ground cont
 NASA (CALIPSO operator) has pre-issued capability tokens to Iridium for emergency atmospheric hazard observations:
 
 ```
-┌──────────────┐     ┌─────────────┐     ┌─────────────────────────────┐
-│ EUROCONTROL  │────►│  Iridium    │────►│         CALIPSO             │
-│ Network Mgr  │     │    155      │     │   CALIOP + WFC instruments  │
-└──────────────┘     └─────────────┘     └───────────────┬─────────────┘
-                                                         │
++--------------+     +-------------+     +-----------------------------+
+| EUROCONTROL  |---->|  Iridium    |---->|         CALIPSO             |
+| Network Mgr  |     |    155      |     |   CALIOP + WFC instruments  |
++--------------+     +-------------+     +---------------+-------------+
+                                                         |
                                                     TDRSS Relay
-                                                         │
-                                                         ▼
-                                         ┌─────────────────────────────┐
-                                         │        TDRS-13              │
-                                         │   (GEO relay satellite)     │
-                                         └───────────────┬─────────────┘
-                                                         │
+                                                         |
+                                                         v
+                                         +-----------------------------+
+                                         |        TDRS-13              |
+                                         |   (GEO relay satellite)     |
+                                         +---------------+-------------+
+                                                         |
                                                     Ku-band Downlink
-                                                         │
-                                                         ▼
-                                         ┌─────────────────────────────┐
-                                         │   NASA GSFC Ground Station  │
-                                         │   ──► EUROCONTROL           │
-                                         └─────────────────────────────┘
+                                                         |
+                                                         v
+                                         +-----------------------------+
+                                         |   NASA GSFC Ground Station  |
+                                         |   --> EUROCONTROL           |
+                                         +-----------------------------+
 ```
 
 ### Capability Token
@@ -148,26 +148,26 @@ Pre-issued by NASA for atmospheric emergency observations:
 
 CALIOP discriminates volcanic ash using:
 
-1. **Depolarization ratio**: Ash particles are non-spherical (δ > 0.3)
+1. **Depolarization ratio**: Ash particles are non-spherical ($\delta > 0.3$)
 2. **Color ratio**: 1064/532 backscatter ratio indicates particle size
 3. **Attenuated backscatter**: Signal strength indicates concentration
 4. **Layer geometry**: Volcanic plumes have distinct altitude structure
 
-```
-Depolarization Ratio vs. Aerosol Type:
-┌─────────────────────────────────────┐
-│ δ < 0.1  │ Sulfate, water droplets │
-│ 0.1-0.3  │ Mixed aerosol, dust     │
-│ δ > 0.3  │ Volcanic ash, ice       │
-└─────────────────────────────────────┘
+**Depolarization Ratio vs. Aerosol Type:**
 
-Color Ratio for Particle Size:
-┌─────────────────────────────────────┐
-│ χ < 0.5  │ Small particles (<1 μm) │
-│ 0.5-1.0  │ Medium (1-5 μm)         │
-│ χ > 1.0  │ Large particles (>5 μm) │
-└─────────────────────────────────────┘
-```
+| $\delta$ Range | Aerosol Type |
+|----------------|--------------|
+| $\delta < 0.1$ | Sulfate, water droplets |
+| $0.1 \leq \delta \leq 0.3$ | Mixed aerosol, dust |
+| $\delta > 0.3$ | Volcanic ash, ice |
+
+**Color Ratio for Particle Size:**
+
+| $\chi$ Range | Particle Size |
+|--------------|---------------|
+| $\chi < 0.5$ | Small particles ($< 1 \mu m$) |
+| $0.5 \leq \chi \leq 1.0$ | Medium ($1$-$5 \mu m$) |
+| $\chi > 1.0$ | Large particles ($> 5 \mu m$) |
 
 ### Timeline
 
@@ -224,7 +224,7 @@ Final delivery to EUROCONTROL includes:
     }
   ],
   "safe_flight_levels": {
-    "FL300_plus": "AVOID - ash concentration >200 μg/m³",
+    "FL300_plus": "AVOID - ash concentration >200 ug/m^3",
     "FL250_300": "CAUTION - marginal conditions",
     "FL250_below": "CLEAR - no detected ash"
   },
@@ -247,7 +247,7 @@ Final delivery to EUROCONTROL includes:
 ## Technical Notes
 
 ### CALIOP Specifications
-- **Orbit**: 705 km, sun-synchronous (A-Train), 98.2° inclination
+- **Orbit**: 705 km, sun-synchronous (A-Train), 98.2deg inclination
 - **Laser wavelengths**: 532 nm (polarized), 1064 nm
 - **Pulse energy**: 110 mJ
 - **Pulse rate**: 20.16 Hz

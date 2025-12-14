@@ -20,41 +20,41 @@ A maritime distress signal triggers an urgent request for SAR (Synthetic Apertur
 
 ### Context
 
-A cargo vessel transmits a MAYDAY signal in the North Atlantic (52.3°N, 35.7°W). Weather conditions include heavy cloud cover and 40-knot winds, making optical imaging useless. The nearest ground station to Sentinel-1C is 47 minutes away. The Coast Guard needs imagery within 15 minutes.
+A cargo vessel transmits a MAYDAY signal in the North Atlantic (52.3degN, 35.7degW). Weather conditions include heavy cloud cover and 40-knot winds, making optical imaging useless. The nearest ground station to Sentinel-1C is 47 minutes away. The Coast Guard needs imagery within 15 minutes.
 
 ### Task Flow
 
 ```
-┌──────────────┐     ┌─────────────┐     ┌─────────────────────────────────┐
-│    USCG      │────►│  Iridium    │────►│      Starlink ISL Mesh          │
-│   MRCC       │     │    180      │     │   (laser crosslinks, 200 Gbps)  │
-└──────────────┘     └─────────────┘     └───────────────┬─────────────────┘
-                                                         │
++--------------+     +-------------+     +---------------------------------+
+|    USCG      |---->|  Iridium    |---->|      Starlink ISL Mesh          |
+|   MRCC       |     |    180      |     |   (laser crosslinks, 200 Gbps)  |
++--------------+     +-------------+     +---------------+-----------------+
+                                                         |
                                                     Close Approach
-                                                         │
-                                                         ▼
-                                         ┌─────────────────────────────┐
-                                         │      Sentinel-1C            │
-                                         │   SAR-C Imaging Radar       │
-                                         │   (NORAD 62261)             │
-                                         └───────────────┬─────────────┘
-                                                         │
+                                                         |
+                                                         v
+                                         +-----------------------------+
+                                         |      Sentinel-1C            |
+                                         |   SAR-C Imaging Radar       |
+                                         |   (NORAD 62261)             |
+                                         +---------------+-------------+
+                                                         |
                                                     Laser ISL
-                                                         │
-                                                         ▼
-                                         ┌─────────────────────────────┐
-                                         │        EDRS-C               │
-                                         │   GEO Data Relay            │
-                                         │   (NORAD 44475)             │
-                                         └───────────────┬─────────────┘
-                                                         │
+                                                         |
+                                                         v
+                                         +-----------------------------+
+                                         |        EDRS-C               |
+                                         |   GEO Data Relay            |
+                                         |   (NORAD 44475)             |
+                                         +---------------+-------------+
+                                                         |
                                                     Ka-band Downlink
-                                                         │
-                                                         ▼
-                                         ┌─────────────────────────────┐
-                                         │   ESA Redu Ground Station   │
-                                         │   ──► USCG MRCC             │
-                                         └─────────────────────────────┘
+                                                         |
+                                                         v
+                                         +-----------------------------+
+                                         |   ESA Redu Ground Station   |
+                                         |   --> USCG MRCC             |
+                                         +-----------------------------+
 ```
 
 ### Capability Token
@@ -159,14 +159,14 @@ The token authorizes Starlink satellites to relay tasking commands to Sentinel-1
 ## Technical Notes
 
 ### Sentinel-1C Specifications
-- **Orbit**: 693 km, sun-synchronous, 98.2° inclination
+- **Orbit**: 693 km, sun-synchronous, 98.2deg inclination
 - **SAR-C band**: 5.405 GHz (C-band)
 - **Swath modes**: Strip Map (80km), IW (250km), EW (400km)
 - **Resolution**: 5m (IW mode)
 - **On-board storage**: 1.4 Tb
 
 ### EDRS-C Specifications
-- **Orbit**: GEO, 31°E
+- **Orbit**: GEO, 31degE
 - **Laser ISL**: 1.8 Gbps bidirectional
 - **Coverage**: Europe, Atlantic, Africa
 - **Latency**: Near-real-time (< 2 second propagation)

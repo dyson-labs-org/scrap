@@ -26,37 +26,37 @@ EDRS-C provides near-real-time relay capability via 1.8 Gbps laser ISL.
 ### Relay Architecture
 
 ```
-┌──────────────────┐     ┌─────────────────────────────────────────────┐
-│      OCHA        │     │                                             │
-│  Geneva HQ       │     │           ┌─────────────────────┐           │
-└────────┬─────────┘     │           │    Pleiades Neo 3   │           │
-         │               │           │    30cm resolution  │           │
-    Emergency            │           │    (NORAD 48904)    │           │
-    Request              │           └──────────┬──────────┘           │
-         │               │                      │                      │
-         ▼               │                  705 km                     │
-┌─────────────────┐      │               Laser ISL                     │
-│  ESA Emergency  │      │                1.8 Gbps                     │
-│  Response       │      │                      │                      │
-└────────┬────────┘      │                      ▼                      │
-         │               │           ┌─────────────────────┐           │
-    Tasking              │           │      EDRS-C         │           │
-    Command              │           │   GEO Relay (31°E)  │           │
-         │               │           │   (NORAD 44475)     │           │
-         ▼               │           └──────────┬──────────┘           │
-┌─────────────────┐      │                      │                      │
-│  DLR Weilheim   │      │               35,786 km                     │
-│  Ground Station │◄─────┼──────────────────────┘                      │
-└────────┬────────┘      │              Ka-band                        │
-         │               │              Downlink                       │
-    Imagery              │                                             │
-    Products             │                                             │
-         │               └─────────────────────────────────────────────┘
-         ▼
-┌─────────────────┐
-│      OCHA       │
-│  Damage Map     │
-└─────────────────┘
++------------------+     +---------------------------------------------+
+|      OCHA        |     |                                             |
+|  Geneva HQ       |     |           +---------------------+           |
++--------+---------+     |           |    Pleiades Neo 3   |           |
+         |               |           |    30cm resolution  |           |
+    Emergency            |           |    (NORAD 48904)    |           |
+    Request              |           +----------+----------+           |
+         |               |                      |                      |
+         v               |                  705 km                     |
++-----------------+      |               Laser ISL                     |
+|  ESA Emergency  |      |                1.8 Gbps                     |
+|  Response       |      |                      |                      |
++--------+--------+      |                      v                      |
+         |               |           +---------------------+           |
+    Tasking              |           |      EDRS-C         |           |
+    Command              |           |   GEO Relay (31degE)  |           |
+         |               |           |   (NORAD 44475)     |           |
+         v               |           +----------+----------+           |
++-----------------+      |                      |                      |
+|  DLR Weilheim   |      |               35,786 km                     |
+|  Ground Station |<-----+----------------------+                      |
++--------+--------+      |              Ka-band                        |
+         |               |              Downlink                       |
+    Imagery              |                                             |
+    Products             |                                             |
+         |               +---------------------------------------------+
+         v
++-----------------+
+|      OCHA       |
+|  Damage Map     |
++-----------------+
 ```
 
 ### Tasking Command (via ground station to Pleiades Neo)
@@ -112,22 +112,22 @@ T+0:35   ESA coordinates Pleiades Neo tasking
 T+0:55   Tasking command uploaded to Pleiades Neo 3
 
 T+1:10   Pleiades Neo 3 begins imaging pass
-T+1:18   50km × 50km strip acquired (2500 km²)
+T+1:18   50km x 50km strip acquired (2500 km^2)
 T+1:20   On-board compression (JPEG2000 lossless)
 T+1:22   Laser terminal acquisition initiated
 T+1:23   Bidirectional laser link established with EDRS-C
-         └── Distance: 38,500 km
-         └── Link budget: +3 dB margin
-         └── Data rate: 1.8 Gbps
+         +-- Distance: 38,500 km
+         +-- Link budget: +3 dB margin
+         +-- Data rate: 1.8 Gbps
 
 T+1:25   Image data transfer begins
-         └── Raw data: 12 GB
-         └── Transfer time: 54 seconds
+         +-- Raw data: 12 GB
+         +-- Transfer time: 54 seconds
 
 T+1:26   EDRS-C stores data, begins Ka-band downlink
-         └── Ka-band rate: 600 Mbps
-         └── Ground station: Weilheim
-         └── Downlink time: 160 seconds
+         +-- Ka-band rate: 600 Mbps
+         +-- Ground station: Weilheim
+         +-- Downlink time: 160 seconds
 
 T+1:30   Data received at ground station
 T+1:35   Orthorectification and georeferencing
@@ -245,9 +245,9 @@ Total latency: 32 minutes from acquisition to delivery
 ## Acceptance Criteria
 
 - [ ] EDRS laser link established within 3 minutes of acquisition
-- [ ] Data transfer at ≥1.5 Gbps sustained
+- [ ] Data transfer at >=1.5 Gbps sustained
 - [ ] End-to-end latency < 45 minutes
-- [ ] Damage classification accuracy ≥85%
+- [ ] Damage classification accuracy >=85%
 - [ ] Products in OCHA hands within 2 hours of event
 
 ## Technical Notes
@@ -256,28 +256,29 @@ Total latency: 32 minutes from acquisition to delivery
 - **Orbit**: 620 km, sun-synchronous
 - **Resolution**: 0.30 m (PAN), 1.2 m (MS)
 - **Swath width**: 14 km
-- **Agility**: 32°/s slew rate
+- **Agility**: 32deg/s slew rate
 - **On-board storage**: 1 Tb
 - **EDRS compatibility**: LCT-135 laser terminal
 
 ### EDRS-C Specifications
-- **Orbit**: GEO, 31°E
+- **Orbit**: GEO, 31degE
 - **Laser ISL**: 1.8 Gbps bidirectional
 - **Ka-band downlink**: 600 Mbps
 - **Coverage**: Europe, Atlantic, Africa
 - **Operational since**: 2019
 
 ### Laser Link Budget
-```
-Transmit power:     +0 dBW (1 W)
-Antenna gain:       +108 dB
-Path loss:          -289 dB (38,500 km)
-Receive gain:       +106 dB
-Pointing loss:      -2 dB
-System margin:      +3 dB
-Receiver sensitivity: -31 dBW
-Link margin:        +3 dB (positive)
-```
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Transmit power | $+0$ dBW | 1 W |
+| Antenna gain | $+108$ dB | |
+| Path loss | $-289$ dB | 38,500 km |
+| Receive gain | $+106$ dB | |
+| Pointing loss | $-2$ dB | |
+| System margin | $+3$ dB | |
+| Receiver sensitivity | $-31$ dBW | |
+| **Link margin** | $+3$ dB | positive |
 
 ## Value Proposition
 

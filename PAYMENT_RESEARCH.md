@@ -24,27 +24,27 @@ Satellite-to-satellite payments differ fundamentally from terrestrial transactio
 ### 1.2 Payment Flow Requirements
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     TASK PAYMENT LIFECYCLE                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  1. PREPAYMENT (Ground)                                                     │
-│     Customer deposits BTC → Receives eCash tokens                           │
-│     Tokens uploaded to commanding satellite                                 │
-│                                                                             │
-│  2. TASK SUBMISSION (Space)                                                 │
-│     Commanding satellite submits task + eCash tokens                        │
-│     Target satellite accepts task, holds tokens in escrow                   │
-│                                                                             │
-│  3. EXECUTION (Space)                                                       │
-│     Target executes task, generates proof-of-execution                      │
-│     Signs token release                                                     │
-│                                                                             │
-│  4. SETTLEMENT (Ground)                                                     │
-│     Tokens relayed to ground via any available path                         │
-│     Target operator redeems eCash → Lightning → BTC                        │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                     TASK PAYMENT LIFECYCLE                                   |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  1. PREPAYMENT (Ground)                                                     |
+|     Customer deposits BTC -> Receives eCash tokens                           |
+|     Tokens uploaded to commanding satellite                                 |
+|                                                                             |
+|  2. TASK SUBMISSION (Space)                                                 |
+|     Commanding satellite submits task + eCash tokens                        |
+|     Target satellite accepts task, holds tokens in escrow                   |
+|                                                                             |
+|  3. EXECUTION (Space)                                                       |
+|     Target executes task, generates proof-of-execution                      |
+|     Signs token release                                                     |
+|                                                                             |
+|  4. SETTLEMENT (Ground)                                                     |
+|     Tokens relayed to ground via any available path                         |
+|     Target operator redeems eCash -> Lightning -> BTC                        |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 ---
@@ -58,25 +58,25 @@ The [Lightning Network](https://lightning.network/lightning-network-paper.pdf) e
 **How HTLCs Work:**
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           HTLC PAYMENT FLOW                                  │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  Sender                    Routing Node                    Receiver         │
-│    │                           │                              │             │
-│    │   HTLC(hash(R), 100sat)  │                              │             │
-│    │ ─────────────────────────►                              │             │
-│    │                           │  HTLC(hash(R), 99sat)       │             │
-│    │                           │ ────────────────────────────►             │
-│    │                           │                              │             │
-│    │                           │         R (preimage)        │             │
-│    │                           │ ◄────────────────────────────             │
-│    │         R (preimage)      │                              │             │
-│    │ ◄─────────────────────────                              │             │
-│                                                                             │
-│  Payment succeeds atomically: either all hops complete or none do           │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                           HTLC PAYMENT FLOW                                  |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  Sender                    Routing Node                    Receiver         |
+|    |                           |                              |             |
+|    |   HTLC(hash(R), 100sat)  |                              |             |
+|    | ------------------------->                              |             |
+|    |                           |  HTLC(hash(R), 99sat)       |             |
+|    |                           | ---------------------------->             |
+|    |                           |                              |             |
+|    |                           |         R (preimage)        |             |
+|    |                           | <----------------------------             |
+|    |         R (preimage)      |                              |             |
+|    | <-------------------------                              |             |
+|                                                                             |
+|  Payment succeeds atomically: either all hops complete or none do           |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 **Satellite Limitations:**
@@ -118,17 +118,17 @@ The [Lightning Network](https://lightning.network/lightning-network-paper.pdf) e
 
 **Offline Capabilities:**
 > "Pretty much all Cashu wallets allow you to send tokens offline. This is because all that the wallet needs to do is look if it can create the desired amount from the proofs stored locally."
-> — [Cashu Documentation](https://docs.cashu.space/)
+> -- [Cashu Documentation](https://docs.cashu.space/)
 
 **P2PK Locking for Satellite Use:**
 Tokens can be locked to a satellite's public key, ensuring only that satellite can redeem them:
 
 ```
-Sender (ground) → mint.lock(amount, satellite_pubkey) → locked_token
-                                                              │
-Satellite receives locked_token                               │
-Satellite signs redemption with private key                   │
-                                                              ▼
+Sender (ground) -> mint.lock(amount, satellite_pubkey) -> locked_token
+                                                              |
+Satellite receives locked_token                               |
+Satellite signs redemption with private key                   |
+                                                              v
                                               Only valid holder can redeem
 ```
 
@@ -142,27 +142,27 @@ Satellite signs redemption with private key                   │
 
 **Architecture:**
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        FEDIMINT FEDERATION                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│     Guardian 1          Guardian 2          Guardian 3          Guardian 4  │
-│        │                    │                   │                   │       │
-│        └────────────────────┼───────────────────┼───────────────────┘       │
-│                             │                   │                           │
-│                      ┌──────┴───────────────────┴──────┐                    │
-│                      │    3-of-4 Multisig Custody      │                    │
-│                      │    Byzantine Fault Tolerant     │                    │
-│                      └──────────────────────────────────┘                   │
-│                                      │                                      │
-│                             eCash Token Issuance                            │
-│                                      │                                      │
-│                      ┌───────────────┼───────────────┐                      │
-│                      ▼               ▼               ▼                      │
-│                   User A          User B          User C                    │
-│                 (satellite)     (satellite)     (ground)                    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                        FEDIMINT FEDERATION                                   |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|     Guardian 1          Guardian 2          Guardian 3          Guardian 4  |
+|        |                    |                   |                   |       |
+|        +--------------------+-------------------+-------------------+       |
+|                             |                   |                           |
+|                      +------+-------------------+------+                    |
+|                      |    3-of-4 Multisig Custody      |                    |
+|                      |    Byzantine Fault Tolerant     |                    |
+|                      +----------------------------------+                   |
+|                                      |                                      |
+|                             eCash Token Issuance                            |
+|                                      |                                      |
+|                      +---------------+---------------+                      |
+|                      v               v               v                      |
+|                   User A          User B          User C                    |
+|                 (satellite)     (satellite)     (ground)                    |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 **Advantages for Satellite Operations:**
@@ -181,26 +181,26 @@ Satellite signs redemption with private key                   │
 
 **How It Works:**
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         ARK VIRTUAL UTXO MODEL                               │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│                    On-chain UTXO (Shared Pool)                              │
-│                              │                                              │
-│           ┌──────────────────┼──────────────────┐                           │
-│           ▼                  ▼                  ▼                           │
-│      ┌─────────┐        ┌─────────┐        ┌─────────┐                      │
-│      │ vTXO-A  │        │ vTXO-B  │        │ vTXO-C  │                      │
-│      │ 10,000  │        │ 50,000  │        │ 25,000  │                      │
-│      │  sats   │        │  sats   │        │  sats   │                      │
-│      └─────────┘        └─────────┘        └─────────┘                      │
-│                                                                             │
-│   • vTXOs expire after 4 weeks (must be refreshed or spent)                 │
-│   • Payments credited every 5 seconds                                       │
-│   • Users can unilaterally exit to mainchain                               │
-│   • No channel liquidity management required                                │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                         ARK VIRTUAL UTXO MODEL                               |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|                    On-chain UTXO (Shared Pool)                              |
+|                              |                                              |
+|           +------------------+------------------+                           |
+|           v                  v                  v                           |
+|      +---------+        +---------+        +---------+                      |
+|      | vTXO-A  |        | vTXO-B  |        | vTXO-C  |                      |
+|      | 10,000  |        | 50,000  |        | 25,000  |                      |
+|      |  sats   |        |  sats   |        |  sats   |                      |
+|      +---------+        +---------+        +---------+                      |
+|                                                                             |
+|   * vTXOs expire after 4 weeks (must be refreshed or spent)                 |
+|   * Payments credited every 5 seconds                                       |
+|   * Users can unilaterally exit to mainchain                               |
+|   * No channel liquidity management required                                |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 **Satellite Relevance:**
@@ -221,29 +221,29 @@ Satellite signs redemption with private key                   │
 
 **Statechain Transfer Model:**
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      MERCURY LAYER STATECHAIN                                │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  On-chain UTXO: 100,000 sats                                               │
-│  Key: 2-of-2 (User + Mercury Server)                                       │
-│                                                                             │
-│  Transfer 1: Alice → Bob                                                    │
-│  ┌────────────────────────────────────────────────────────────────┐        │
-│  │ Alice's backup tx: nLocktime = 1,000,000 (far future)         │        │
-│  │ Bob's backup tx:   nLocktime =   999,000 (sooner)             │        │
-│  │ Mercury updates key share, Alice's key invalidated            │        │
-│  └────────────────────────────────────────────────────────────────┘        │
-│                                                                             │
-│  Transfer 2: Bob → Carol                                                    │
-│  ┌────────────────────────────────────────────────────────────────┐        │
-│  │ Carol's backup tx: nLocktime = 998,000 (soonest)              │        │
-│  │ Carol can claim before Bob or Alice if they try to cheat      │        │
-│  └────────────────────────────────────────────────────────────────┘        │
-│                                                                             │
-│  BLINDING: Mercury server never sees transaction details                    │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                      MERCURY LAYER STATECHAIN                                |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  On-chain UTXO: 100,000 sats                                               |
+|  Key: 2-of-2 (User + Mercury Server)                                       |
+|                                                                             |
+|  Transfer 1: Alice -> Bob                                                    |
+|  +----------------------------------------------------------------+        |
+|  | Alice's backup tx: nLocktime = 1,000,000 (far future)         |        |
+|  | Bob's backup tx:   nLocktime =   999,000 (sooner)             |        |
+|  | Mercury updates key share, Alice's key invalidated            |        |
+|  +----------------------------------------------------------------+        |
+|                                                                             |
+|  Transfer 2: Bob -> Carol                                                    |
+|  +----------------------------------------------------------------+        |
+|  | Carol's backup tx: nLocktime = 998,000 (soonest)              |        |
+|  | Carol can claim before Bob or Alice if they try to cheat      |        |
+|  +----------------------------------------------------------------+        |
+|                                                                             |
+|  BLINDING: Mercury server never sees transaction details                    |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 **Advantages:**
@@ -270,7 +270,7 @@ Satellite signs redemption with private key                   │
 
 **Enterprise Adoption:**
 > "15% of Bitcoin transactions on Coinbase now move over Lightning Network, powered by Lightspark"
-> — [Lightspark Announcement, 2024](https://www.lightspark.com/news/lightspark/coinbase-lightning-network-lightspark)
+> -- [Lightspark Announcement, 2024](https://www.lightspark.com/news/lightspark/coinbase-lightning-network-lightspark)
 
 **References:**
 - [Lightspark Platform](https://www.lightspark.com/)
@@ -317,43 +317,43 @@ PTLCs enable payments that depend on external data (oracles), such as:
 ### 3.2 System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    SATELLITE PAYMENT SYSTEM ARCHITECTURE                     │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  GROUND LAYER                                                               │
-│  ═══════════════════════════════════════════════════════════════════════   │
-│                                                                             │
-│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
-│  │   Customer      │    │  Satellite Mint │    │   Operator      │         │
-│  │   Wallet        │    │  Federation     │    │   Settlement    │         │
-│  │                 │    │                 │    │                 │         │
-│  │  • BTC deposit  │───►│  • eCash issue  │    │  • Redemption   │         │
-│  │  • Task submit  │    │  • LN gateway   │◄───│  • Accounting   │         │
-│  │  • Token lock   │    │  • Multi-sig    │    │  • Verification │         │
-│  └─────────────────┘    └─────────────────┘    └─────────────────┘         │
-│           │                      │                      ▲                   │
-│           │              Token Issuance                 │                   │
-│           │                      │                 Settlement               │
-│           ▼                      ▼                      │                   │
-│  ═══════════════════════════════════════════════════════════════════════   │
-│  SPACE LAYER                                                                │
-│  ═══════════════════════════════════════════════════════════════════════   │
-│                                                                             │
-│  ┌─────────────────┐              ┌─────────────────┐                       │
-│  │  Commanding     │   Task +     │   Target        │                       │
-│  │  Satellite      │   Tokens     │   Satellite     │                       │
-│  │                 │─────────────►│                 │                       │
-│  │  Token Store:   │              │  Escrow Store:  │                       │
-│  │  ┌───────────┐  │              │  ┌───────────┐  │                       │
-│  │  │ Cashu     │  │              │  │ P2PK      │  │                       │
-│  │  │ Tokens    │  │              │  │ Locked    │  │                       │
-│  │  │ 500,000   │  │   Proof +    │  │ Tokens    │  │                       │
-│  │  │ sats      │  │◄─────────────│  │           │  │                       │
-│  │  └───────────┘  │   Receipt    │  └───────────┘  │                       │
-│  └─────────────────┘              └─────────────────┘                       │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                    SATELLITE PAYMENT SYSTEM ARCHITECTURE                     |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  GROUND LAYER                                                               |
+|  =======================================================================   |
+|                                                                             |
+|  +-----------------+    +-----------------+    +-----------------+         |
+|  |   Customer      |    |  Satellite Mint |    |   Operator      |         |
+|  |   Wallet        |    |  Federation     |    |   Settlement    |         |
+|  |                 |    |                 |    |                 |         |
+|  |  * BTC deposit  |--->|  * eCash issue  |    |  * Redemption   |         |
+|  |  * Task submit  |    |  * LN gateway   |<---|  * Accounting   |         |
+|  |  * Token lock   |    |  * Multi-sig    |    |  * Verification |         |
+|  +-----------------+    +-----------------+    +-----------------+         |
+|           |                      |                      ^                   |
+|           |              Token Issuance                 |                   |
+|           |                      |                 Settlement               |
+|           v                      v                      |                   |
+|  =======================================================================   |
+|  SPACE LAYER                                                                |
+|  =======================================================================   |
+|                                                                             |
+|  +-----------------+              +-----------------+                       |
+|  |  Commanding     |   Task +     |   Target        |                       |
+|  |  Satellite      |   Tokens     |   Satellite     |                       |
+|  |                 |------------->|                 |                       |
+|  |  Token Store:   |              |  Escrow Store:  |                       |
+|  |  +-----------+  |              |  +-----------+  |                       |
+|  |  | Cashu     |  |              |  | P2PK      |  |                       |
+|  |  | Tokens    |  |              |  | Locked    |  |                       |
+|  |  | 500,000   |  |   Proof +    |  | Tokens    |  |                       |
+|  |  | sats      |  |<-------------|  |           |  |                       |
+|  |  +-----------+  |   Receipt    |  +-----------+  |                       |
+|  +-----------------+              +-----------------+                       |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 ### 3.3 Component Specifications
@@ -510,61 +510,61 @@ Cryptographic binding between capability tokens and payment:
 #### 3.4.1 Single-Hop Payment
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      SINGLE-HOP TASK PAYMENT                                 │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  PHASE 1: PREPAYMENT (Ground, T-24h)                                        │
-│  ────────────────────────────────────                                       │
-│  Customer                    Mint Federation                                │
-│     │                              │                                        │
-│     │─── Deposit 100,000 sats ────►│                                        │
-│     │                              │                                        │
-│     │◄── eCash tokens (P2PK) ──────│                                        │
-│     │    locked to Starlink-7823   │                                        │
-│     │                              │                                        │
-│  Customer uploads tokens to Starlink-7823 via ground station                │
-│                                                                             │
-│  PHASE 2: TASK SUBMISSION (Space, T+0)                                      │
-│  ─────────────────────────────────────                                      │
-│  Starlink-7823                 Sentinel-2C                                  │
-│     │                              │                                        │
-│     │─── Capability Token ────────►│                                        │
-│     │─── P2PK Locked Tokens ──────►│ (10,000 sats for this task)            │
-│     │    (locked to Sentinel-2C)   │                                        │
-│     │                              │                                        │
-│     │                              │── Verify cap token signature           │
-│     │                              │── Verify P2PK lock to self             │
-│     │                              │── Store in escrow                      │
-│     │                              │                                        │
-│     │◄── Task Accepted ────────────│                                        │
-│                                                                             │
-│  PHASE 3: EXECUTION (Space, T+30min)                                        │
-│  ───────────────────────────────────                                        │
-│  Sentinel-2C                                                                │
-│     │                                                                       │
-│     │── Execute imaging task                                                │
-│     │── Generate proof-of-execution:                                        │
-│     │   • Data hash                                                         │
-│     │   • Timestamp                                                         │
-│     │   • Coverage metadata                                                 │
-│     │                                                                       │
-│     │── Sign token release with Sentinel-2C key                             │
-│     │                                                                       │
-│                                                                             │
-│  PHASE 4: SETTLEMENT (Ground, T+2h)                                         │
-│  ──────────────────────────────────                                         │
-│  Sentinel-2C Operator          Mint Federation         Bitcoin Network      │
-│     │                              │                         │              │
-│     │─── Redeem P2PK tokens ──────►│                         │              │
-│     │    (signed by Sentinel-2C)   │                         │              │
-│     │                              │                         │              │
-│     │                              │─── Lightning payment ──►│              │
-│     │                              │    (or on-chain)        │              │
-│     │                              │                         │              │
-│     │◄── Settlement confirmed ─────│                         │              │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                      SINGLE-HOP TASK PAYMENT                                 |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  PHASE 1: PREPAYMENT (Ground, T-24h)                                        |
+|  ------------------------------------                                       |
+|  Customer                    Mint Federation                                |
+|     |                              |                                        |
+|     |--- Deposit 100,000 sats ---->|                                        |
+|     |                              |                                        |
+|     |<-- eCash tokens (P2PK) ------|                                        |
+|     |    locked to Starlink-7823   |                                        |
+|     |                              |                                        |
+|  Customer uploads tokens to Starlink-7823 via ground station                |
+|                                                                             |
+|  PHASE 2: TASK SUBMISSION (Space, T+0)                                      |
+|  -------------------------------------                                      |
+|  Starlink-7823                 Sentinel-2C                                  |
+|     |                              |                                        |
+|     |--- Capability Token -------->|                                        |
+|     |--- P2PK Locked Tokens ------>| (10,000 sats for this task)            |
+|     |    (locked to Sentinel-2C)   |                                        |
+|     |                              |                                        |
+|     |                              |-- Verify cap token signature           |
+|     |                              |-- Verify P2PK lock to self             |
+|     |                              |-- Store in escrow                      |
+|     |                              |                                        |
+|     |<-- Task Accepted ------------|                                        |
+|                                                                             |
+|  PHASE 3: EXECUTION (Space, T+30min)                                        |
+|  -----------------------------------                                        |
+|  Sentinel-2C                                                                |
+|     |                                                                       |
+|     |-- Execute imaging task                                                |
+|     |-- Generate proof-of-execution:                                        |
+|     |   * Data hash                                                         |
+|     |   * Timestamp                                                         |
+|     |   * Coverage metadata                                                 |
+|     |                                                                       |
+|     |-- Sign token release with Sentinel-2C key                             |
+|     |                                                                       |
+|                                                                             |
+|  PHASE 4: SETTLEMENT (Ground, T+2h)                                         |
+|  ----------------------------------                                         |
+|  Sentinel-2C Operator          Mint Federation         Bitcoin Network      |
+|     |                              |                         |              |
+|     |--- Redeem P2PK tokens ------>|                         |              |
+|     |    (signed by Sentinel-2C)   |                         |              |
+|     |                              |                         |              |
+|     |                              |--- Lightning payment -->|              |
+|     |                              |    (or on-chain)        |              |
+|     |                              |                         |              |
+|     |<-- Settlement confirmed -----|                         |              |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 #### 3.4.2 Multi-Hop Payment Chain
@@ -572,46 +572,46 @@ Cryptographic binding between capability tokens and payment:
 For delegated tasks through multiple satellites:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     MULTI-HOP DELEGATION PAYMENT                             │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  Customer → Iridium-168 → Iridium-172 → Sentinel-2C                         │
-│                                                                             │
-│  Payment Structure:                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐       │
-│  │  Total task payment: 15,000 sats                                │       │
-│  │                                                                 │       │
-│  │  Token 1: 2,000 sats  │ P2PK: Iridium-168  │ Relay fee        │       │
-│  │  Token 2: 2,000 sats  │ P2PK: Iridium-172  │ Relay fee        │       │
-│  │  Token 3: 11,000 sats │ P2PK: Sentinel-2C  │ Execution fee    │       │
-│  └─────────────────────────────────────────────────────────────────┘       │
-│                                                                             │
-│  Flow:                                                                      │
-│                                                                             │
-│  Customer (Ground)                                                          │
-│     │                                                                       │
-│     │── Upload all 3 tokens to Iridium-168                                  │
-│     │                                                                       │
-│  Iridium-168 (Space)                                                        │
-│     │                                                                       │
-│     │── Keep Token 1 (P2PK to self) ✓                                       │
-│     │── Forward Token 2 + Token 3 to Iridium-172                            │
-│     │                                                                       │
-│  Iridium-172 (Space)                                                        │
-│     │                                                                       │
-│     │── Keep Token 2 (P2PK to self) ✓                                       │
-│     │── Forward Token 3 to Sentinel-2C with task                            │
-│     │                                                                       │
-│  Sentinel-2C (Space)                                                        │
-│     │                                                                       │
-│     │── Verify Token 3 P2PK lock to self ✓                                  │
-│     │── Execute task                                                        │
-│     │── Sign proof-of-execution                                             │
-│                                                                             │
-│  Settlement (Ground) - Each operator redeems independently                  │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------------------+
+|                     MULTI-HOP DELEGATION PAYMENT                             |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  Customer -> Iridium-168 -> Iridium-172 -> Sentinel-2C                         |
+|                                                                             |
+|  Payment Structure:                                                         |
+|  +-----------------------------------------------------------------+       |
+|  |  Total task payment: 15,000 sats                                |       |
+|  |                                                                 |       |
+|  |  Token 1: 2,000 sats  | P2PK: Iridium-168  | Relay fee        |       |
+|  |  Token 2: 2,000 sats  | P2PK: Iridium-172  | Relay fee        |       |
+|  |  Token 3: 11,000 sats | P2PK: Sentinel-2C  | Execution fee    |       |
+|  +-----------------------------------------------------------------+       |
+|                                                                             |
+|  Flow:                                                                      |
+|                                                                             |
+|  Customer (Ground)                                                          |
+|     |                                                                       |
+|     |-- Upload all 3 tokens to Iridium-168                                  |
+|     |                                                                       |
+|  Iridium-168 (Space)                                                        |
+|     |                                                                       |
+|     |-- Keep Token 1 (P2PK to self) (yes)                                       |
+|     |-- Forward Token 2 + Token 3 to Iridium-172                            |
+|     |                                                                       |
+|  Iridium-172 (Space)                                                        |
+|     |                                                                       |
+|     |-- Keep Token 2 (P2PK to self) (yes)                                       |
+|     |-- Forward Token 3 to Sentinel-2C with task                            |
+|     |                                                                       |
+|  Sentinel-2C (Space)                                                        |
+|     |                                                                       |
+|     |-- Verify Token 3 P2PK lock to self (yes)                                  |
+|     |-- Execute task                                                        |
+|     |-- Sign proof-of-execution                                             |
+|                                                                             |
+|  Settlement (Ground) - Each operator redeems independently                  |
+|                                                                             |
++-----------------------------------------------------------------------------+
 ```
 
 ### 3.5 Escrow and Dispute Resolution
@@ -733,25 +733,25 @@ Standard Cashu Token: ~200 bytes per proof
 Optimized Satellite Token: ~80 bytes per proof
 
 Optimizations:
-├── Use 4-byte mint ID instead of URL
-├── Use CBOR encoding instead of JSON
-├── Compress point encoding (33 → 32 bytes)
-└── Batch multiple tokens with shared metadata
++-- Use 4-byte mint ID instead of URL
++-- Use CBOR encoding instead of JSON
++-- Compress point encoding (33 -> 32 bytes)
++-- Batch multiple tokens with shared metadata
 ```
 
 **Example Compact Encoding:**
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│ Byte 0-3:   Mint ID (4 bytes)                                  │
-│ Byte 4:     Token count (1 byte)                               │
-│ Byte 5-8:   Epoch (4 bytes)                                    │
-│ Per token (75 bytes each):                                     │
-│   Byte 0-1:   Amount (2 bytes, log2 denomination index)        │
-│   Byte 2-33:  Secret (32 bytes)                                │
-│   Byte 34-65: C point (32 bytes, x-only)                       │
-│   Byte 66-74: DLEQ proof (9 bytes, compressed)                 │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+| Byte 0-3:   Mint ID (4 bytes)                                  |
+| Byte 4:     Token count (1 byte)                               |
+| Byte 5-8:   Epoch (4 bytes)                                    |
+| Per token (75 bytes each):                                     |
+|   Byte 0-1:   Amount (2 bytes, log2 denomination index)        |
+|   Byte 2-33:  Secret (32 bytes)                                |
+|   Byte 34-65: C point (32 bytes, x-only)                       |
+|   Byte 66-74: DLEQ proof (9 bytes, compressed)                 |
++----------------------------------------------------------------+
 
 1000 sats payment: ~80 bytes (vs 200+ bytes standard)
 ```
@@ -862,14 +862,14 @@ FALLBACK:  On-chain BTC for high-value settlements
 When Lightning Network adopts PTLCs:
 
 ```
-Current: H = hash(preimage)     →  Reveal preimage to claim
-Future:  P = point(adaptor)     →  Reveal adaptor signature to claim
+Current: H = hash(preimage)     ->  Reveal preimage to claim
+Future:  P = point(adaptor)     ->  Reveal adaptor signature to claim
 
 Benefits for satellites:
-├── Execution proof can BE the adaptor signature
-├── Payment automatically releases when proof provided
-├── No separate proof verification step
-└── Native oracle support for external data
++-- Execution proof can BE the adaptor signature
++-- Payment automatically releases when proof provided
++-- No separate proof verification step
++-- Native oracle support for external data
 ```
 
 ### 7.2 Ark Virtual UTXOs for Constellations
@@ -878,10 +878,10 @@ Large constellation operators could run Ark Servers:
 
 ```
 Starlink Ark Server
-├── All Starlink satellites share VTXO pool
-├── Inter-satellite payments: instant, free
-├── External payments: via Lightning gateway
-└── vTXO refresh: batched during ground contacts
++-- All Starlink satellites share VTXO pool
++-- Inter-satellite payments: instant, free
++-- External payments: via Lightning gateway
++-- vTXO refresh: batched during ground contacts
 ```
 
 ### 7.3 Cross-Federation Atomic Swaps
@@ -889,9 +889,9 @@ Starlink Ark Server
 Multiple mint federations could enable cross-operator payments:
 
 ```
-ESA Federation ←──── Atomic Swap ────→ NASA Federation
-     │                                        │
-     └── Sentinel satellites                  └── TDRSS satellites
+ESA Federation <----- Atomic Swap -----> NASA Federation
+     |                                        |
+     +-- Sentinel satellites                  +-- TDRSS satellites
 ```
 
 ---

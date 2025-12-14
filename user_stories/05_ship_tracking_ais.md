@@ -29,41 +29,41 @@ EMSA has intelligence suggesting illegal fishing vessels operating in the Barent
 ### Distributed AIS Collection
 
 ```
-                         ┌─────────────────────────────────────┐
-                         │       Barents Sea AOI              │
-                         │    (68-75°N, 15-45°E)              │
-                         └───────────────┬─────────────────────┘
-                                         │
-              ┌──────────────────────────┼──────────────────────────┐
-              │                          │                          │
-              ▼                          ▼                          ▼
-       ┌─────────────┐            ┌─────────────┐            ┌─────────────┐
-       │  NORSAT-1   │            │  NORSAT-2   │            │   RCM-1     │
-       │    AIS      │            │    AIS      │            │  AIS + SAR  │
-       │ (42826)     │            │ (42828)     │            │  (44322)    │
-       └──────┬──────┘            └──────┬──────┘            └──────┬──────┘
-              │                          │                          │
-              │    ┌─────────────────────┴─────────────────────┐    │
-              │    │           Starlink Mesh Relay            │    │
-              │    │         (laser ISL backbone)             │    │
-              └────►                                          ◄────┘
-                   └───────────────────┬───────────────────────┘
-                                       │
-                   ┌───────────────────┴───────────────────┐
-                   │                                       │
-                   ▼                                       ▼
-          ┌─────────────────┐                    ┌─────────────────┐
-          │ Orbital Fusion  │                    │  SvalSat GS     │
-          │ Processing Node │                    │  (Backup path)  │
-          └────────┬────────┘                    └─────────────────┘
-                   │
+                         +-------------------------------------+
+                         |       Barents Sea AOI              |
+                         |    (68-75degN, 15-45degE)              |
+                         +---------------+---------------------+
+                                         |
+              +--------------------------+--------------------------+
+              |                          |                          |
+              v                          v                          v
+       +-------------+            +-------------+            +-------------+
+       |  NORSAT-1   |            |  NORSAT-2   |            |   RCM-1     |
+       |    AIS      |            |    AIS      |            |  AIS + SAR  |
+       | (42826)     |            | (42828)     |            |  (44322)    |
+       +------+------+            +------+------+            +------+------+
+              |                          |                          |
+              |    +---------------------+---------------------+    |
+              |    |           Starlink Mesh Relay            |    |
+              |    |         (laser ISL backbone)             |    |
+              +---->                                          <----+
+                   +-------------------+-----------------------+
+                                       |
+                   +-------------------+-------------------+
+                   |                                       |
+                   v                                       v
+          +-----------------+                    +-----------------+
+          | Orbital Fusion  |                    |  SvalSat GS     |
+          | Processing Node |                    |  (Backup path)  |
+          +--------+--------+                    +-----------------+
+                   |
             Fused AIS picture
-                   │
-                   ▼
-          ┌─────────────────┐     ┌─────────────────┐
-          │   EMSA MDA      │────►│  Sentinel-1C    │
-          │   Operations    │     │  SAR tasking    │
-          └─────────────────┘     └─────────────────┘
+                   |
+                   v
+          +-----------------+     +-----------------+
+          |   EMSA MDA      |---->|  Sentinel-1C    |
+          |   Operations    |     |  SAR tasking    |
+          +-----------------+     +-----------------+
 ```
 
 ### Coordinated Collection Task
@@ -267,7 +267,7 @@ Based on dark target detections, EMSA tasks Sentinel-1C for high-resolution imag
 
 ## Acceptance Criteria
 
-- [ ] ≥90% AOI coverage achieved
+- [ ] >=90% AOI coverage achieved
 - [ ] AIS data latency < 15 minutes from collection
 - [ ] SAR ship detections correlated within 5nm radius
 - [ ] Dark targets flagged within 4 hours

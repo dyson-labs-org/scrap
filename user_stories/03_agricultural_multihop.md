@@ -31,63 +31,63 @@ Sentinel-2C is currently over the South Atlantic with no direct ground station a
 ### Multi-Hop Task Relay
 
 ```
-┌──────────────┐     ┌─────────────┐     ┌─────────────┐
-│   AgriTech   │────►│ AWS GS      │────►│  Iridium    │
-│   Buenos     │     │ Cape Town   │     │    168      │
-│   Aires      │     │             │     │  (Hop 1)    │
-└──────────────┘     └─────────────┘     └──────┬──────┘
-                                                │
++--------------+     +-------------+     +-------------+
+|   AgriTech   |---->| AWS GS      |---->|  Iridium    |
+|   Buenos     |     | Cape Town   |     |    168      |
+|   Aires      |     |             |     |  (Hop 1)    |
++--------------+     +-------------+     +------+------+
+                                                |
                                            Ka-band ISL
-                                                │
-                                                ▼
-                                         ┌─────────────┐
-                                         │  Iridium    │
-                                         │    172      │
-                                         │  (Hop 2)    │
-                                         └──────┬──────┘
-                                                │
+                                                |
+                                                v
+                                         +-------------+
+                                         |  Iridium    |
+                                         |    172      |
+                                         |  (Hop 2)    |
+                                         +------+------+
+                                                |
                                          S-band to TT&C
                                          antenna (proximity)
-                                                │
-                                                ▼
-                                         ┌─────────────────────┐
-                                         │    Sentinel-2C      │
-                                         │    MSI Imager       │
-                                         │    (NORAD 60989)    │
-                                         └──────────┬──────────┘
-                                                    │
+                                                |
+                                                v
+                                         +---------------------+
+                                         |    Sentinel-2C      |
+                                         |    MSI Imager       |
+                                         |    (NORAD 60989)    |
+                                         +----------+----------+
+                                                    |
                                               Image acquisition
-                                                    │
-                                                    ▼
-                                    ┌──────────────────────────────┐
-                                    │    Starlink Mesh Relay       │
-                                    │    (laser ISL backbone)      │
-                                    └──────────────┬───────────────┘
-                                                   │
-                                         ┌─────────┴─────────┐
-                                         │                   │
-                                         ▼                   ▼
-                            ┌─────────────────┐   ┌─────────────────┐
-                            │ LeoLabs Orbital │   │  AWS Ground     │
-                            │ Data Center     │   │  Station        │
-                            │ (processing)    │   │  (backup path)  │
-                            └────────┬────────┘   └─────────────────┘
-                                     │
+                                                    |
+                                                    v
+                                    +------------------------------+
+                                    |    Starlink Mesh Relay       |
+                                    |    (laser ISL backbone)      |
+                                    +--------------+---------------+
+                                                   |
+                                         +---------+---------+
+                                         |                   |
+                                         v                   v
+                            +-----------------+   +-----------------+
+                            | LeoLabs Orbital |   |  AWS Ground     |
+                            | Data Center     |   |  Station        |
+                            | (processing)    |   |  (backup path)  |
+                            +--------+--------+   +-----------------+
+                                     |
                                Processed NDVI
                                products
-                                     │
-                                     ▼
-                            ┌─────────────────┐
-                            │    AgriTech     │
-                            │    Platform     │
-                            └─────────────────┘
+                                     |
+                                     v
+                            +-----------------+
+                            |    AgriTech     |
+                            |    Platform     |
+                            +-----------------+
 ```
 
 ### Capability Token Chain
 
 Each relay hop requires a delegation token:
 
-**Hop 1 Token (AgriTech → Iridium 168):**
+**Hop 1 Token (AgriTech -> Iridium 168):**
 ```json
 {
   "header": { "alg": "ES256", "typ": "SAT-CAP" },
@@ -111,7 +111,7 @@ Each relay hop requires a delegation token:
 }
 ```
 
-**Hop 2 Token (Iridium 168 → Iridium 172):**
+**Hop 2 Token (Iridium 168 -> Iridium 172):**
 ```json
 {
   "header": { "alg": "ES256", "typ": "SAT-CAP" },
@@ -135,7 +135,7 @@ Each relay hop requires a delegation token:
 }
 ```
 
-**Final Execution Token (Iridium 172 → Sentinel-2C):**
+**Final Execution Token (Iridium 172 -> Sentinel-2C):**
 ```json
 {
   "header": { "alg": "ES256", "typ": "SAT-CAP" },
@@ -199,24 +199,24 @@ Each relay hop requires a delegation token:
 |---------|-------------|---------------------|
 | L1C TOA | Top-of-atmosphere reflectance | On-board Sentinel-2C |
 | L2A BOA | Bottom-of-atmosphere reflectance | LeoLabs ODC |
-| NDVI | (NIR-Red)/(NIR+Red) vegetation index | LeoLabs ODC |
-| NDRE | (NIR-RedEdge)/(NIR+RedEdge) | LeoLabs ODC |
-| NDWI | (Green-NIR)/(Green+NIR) water index | LeoLabs ODC |
+| NDVI | $\frac{NIR - Red}{NIR + Red}$ vegetation index | LeoLabs ODC |
+| NDRE | $\frac{NIR - RedEdge}{NIR + RedEdge}$ | LeoLabs ODC |
+| NDWI | $\frac{Green - NIR}{Green + NIR}$ water index | LeoLabs ODC |
 | Crop Stress Map | ML classification | LeoLabs ODC |
 
 ### Orbital Data Center Processing
 
 The LeoLabs Orbital Data Center receives raw data via Starlink ISL and performs:
 
-1. **Atmospheric correction** (L1C → L2A)
+1. **Atmospheric correction** (L1C -> L2A)
 2. **Index calculation** (NDVI, NDRE, NDWI)
 3. **Crop stress classification** (ML inference)
 4. **Compression** (lossless for science, lossy preview)
 5. **Routing** to customer cloud bucket
 
 ```
-Raw Data (800 MB) ──► Processing ──► Products (150 MB) ──► Customer
-         │                                    │
+Raw Data (800 MB) --> Processing --> Products (150 MB) --> Customer
+         |                                    |
     Full spectral cube              Derived indices +
     10m resolution                  classification maps
 ```
@@ -227,7 +227,7 @@ Raw Data (800 MB) ──► Processing ──► Products (150 MB) ──► Cus
 |------|-------|
 | T+0:00 | AgriTech submits request |
 | T+0:15 | Task routed to Iridium 168 |
-| T+0:25 | Iridium 168 → Iridium 172 relay |
+| T+0:25 | Iridium 168 -> Iridium 172 relay |
 | T+0:35 | Iridium 172 proximity pass to Sentinel-2C |
 | T+0:40 | Command received and validated |
 | T+3:00 | Sentinel-2C over target AOI |
@@ -250,7 +250,7 @@ Raw Data (800 MB) ──► Processing ──► Products (150 MB) ──► Cus
 ## Technical Notes
 
 ### Sentinel-2C MSI Specifications
-- **Orbit**: 786 km, sun-synchronous, 98.62° inclination
+- **Orbit**: 786 km, sun-synchronous, 98.62deg inclination
 - **Spectral bands**: 13 (443nm to 2190nm)
 - **Spatial resolution**: 10m (B2,3,4,8), 20m (B5,6,7,8A,11,12), 60m (B1,9,10)
 - **Swath width**: 290 km
@@ -263,9 +263,9 @@ Raw Data (800 MB) ──► Processing ──► Products (150 MB) ──► Cus
 - **Coverage**: Global, including polar regions
 
 ### Agricultural Index Formulas
-- **NDVI**: (B08 - B04) / (B08 + B04)
-- **NDRE**: (B08 - B05) / (B08 + B05)
-- **NDWI**: (B03 - B08) / (B03 + B08)
+- **NDVI**: $\frac{B08 - B04}{B08 + B04}$
+- **NDRE**: $\frac{B08 - B05}{B08 + B05}$
+- **NDWI**: $\frac{B03 - B08}{B03 + B08}$
 
 ### LeoLabs Orbital Data Center
 

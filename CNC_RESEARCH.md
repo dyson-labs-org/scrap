@@ -21,24 +21,24 @@ In most missions, the payload link is physically separated from the telemetry an
 ### Data Flow Architecture
 
 ```
-┌─────────────────┐     RF Link      ┌─────────────────┐
-│   Spacecraft    │◄────────────────►│  Ground Station │
-│  Flight Computer│                  │    Antenna      │
-└─────────────────┘                  └────────┬────────┘
-                                              │
++-----------------+     RF Link      +-----------------+
+|   Spacecraft    |<---------------->|  Ground Station |
+|  Flight Computer|                  |    Antenna      |
++-----------------+                  +--------+--------+
+                                              |
                                      Space Data Link
-                                              │
-                                     ┌────────▼────────┐
-                                     │  Space Link     │
-                                     │  Extension (SLE)│
-                                     └────────┬────────┘
-                                              │
+                                              |
+                                     +--------v--------+
+                                     |  Space Link     |
+                                     |  Extension (SLE)|
+                                     +--------+--------+
+                                              |
                                      Ground Network (IP)
-                                              │
-                                     ┌────────▼────────┐
-                                     │ Mission Control │
-                                     │     Center      │
-                                     └─────────────────┘
+                                              |
+                                     +--------v--------+
+                                     | Mission Control |
+                                     |     Center      |
+                                     +-----------------+
 ```
 
 ---
@@ -83,24 +83,24 @@ The primary international standard for space data systems, established in 1982.
 
 ```
 Bits 0-15:   Packet ID
-             ├── Version (3 bits)      - Always 000 for CCSDS v1
-             ├── Type (1 bit)          - 0=TM, 1=TC
-             ├── Secondary Header (1 bit) - Presence flag
-             └── APID (11 bits)        - Application Process ID (0-2047)
+             +-- Version (3 bits)      - Always 000 for CCSDS v1
+             +-- Type (1 bit)          - 0=TM, 1=TC
+             +-- Secondary Header (1 bit) - Presence flag
+             +-- APID (11 bits)        - Application Process ID (0-2047)
 
 Bits 16-31:  Packet Sequence Control
-             ├── Sequence Flags (2 bits) - 00=continuation, 01=first, 10=last, 11=standalone
-             └── Sequence Count (14 bits) - Packet counter per APID (0-16383)
+             +-- Sequence Flags (2 bits) - 00=continuation, 01=first, 10=last, 11=standalone
+             +-- Sequence Count (14 bits) - Packet counter per APID (0-16383)
 
 Bits 32-47:  Packet Data Length (16 bits) - (length in bytes) - 1
 ```
 
 **Packet Structure:**
 ```
-┌──────────────────┬──────────────────┬─────────────────┐
-│  Primary Header  │ Secondary Header │   User Data     │
-│    (6 bytes)     │   (optional)     │  (variable)     │
-└──────────────────┴──────────────────┴─────────────────┘
++------------------+------------------+-----------------+
+|  Primary Header  | Secondary Header |   User Data     |
+|    (6 bytes)     |   (optional)     |  (variable)     |
++------------------+------------------+-----------------+
 ```
 
 **Maximum packet size:** 65,542 bytes (6-byte header + 65,536 data bytes)
@@ -111,10 +111,10 @@ Wraps space packets for reliable transmission:
 
 **TC Frame Structure:**
 ```
-┌────────────────┬──────────────────┬─────────────┐
-│  Frame Header  │  Data Field      │  CRC-16     │
-│   (5 bytes)    │  (variable)      │  (2 bytes)  │
-└────────────────┴──────────────────┴─────────────┘
++----------------+------------------+-------------+
+|  Frame Header  |  Data Field      |  CRC-16     |
+|   (5 bytes)    |  (variable)      |  (2 bytes)  |
++----------------+------------------+-------------+
 ```
 
 Contains: Spacecraft ID, Virtual Channel ID, Frame sequence count
@@ -136,10 +136,10 @@ European standard (ECSS-E-ST-70-41C) defining application-layer services over CC
 
 **PUS Header (added to CCSDS secondary header):**
 ```
-├── Service Type (8 bits)    - Identifies the service
-├── Service Subtype (8 bits) - Specific operation within service
-├── Source ID (variable)     - Originator identification
-└── Time (variable)          - Timestamp
++-- Service Type (8 bits)    - Identifies the service
++-- Service Subtype (8 bits) - Specific operation within service
++-- Source ID (variable)     - Originator identification
++-- Time (variable)          - Timestamp
 ```
 
 **Standard Services (PUS-C, ECSS-E-ST-70-41C):**
@@ -176,10 +176,10 @@ Data link layer protocol used extensively by CubeSats and amateur satellites.
 
 **Frame Format:**
 ```
-┌──────┬─────────────┬─────────────┬─────────┬────────┬──────────┬─────┐
-│ Flag │ Destination │   Source    │ Control │  PID   │   Info   │ FCS │
-│ 0x7E │  Address    │  Address    │  (1-2)  │  (1)   │(variable)│(2)  │
-└──────┴─────────────┴─────────────┴─────────┴────────┴──────────┴─────┘
++------+-------------+-------------+---------+--------+----------+-----+
+| Flag | Destination |   Source    | Control |  PID   |   Info   | FCS |
+| 0x7E |  Address    |  Address    |  (1-2)  |  (1)   |(variable)|(2)  |
++------+-------------+-------------+---------+--------+----------+-----+
 ```
 
 **Characteristics:**
@@ -203,20 +203,20 @@ SLE extends the space link from ground stations to mission control centers over 
 
 | Service | Direction | Function |
 |---------|-----------|----------|
-| **F-CLTU** (Forward Command Link) | Ground → Space | Send telecommands |
-| **RAF** (Return All Frames) | Space → Ground | Receive all telemetry frames |
-| **RCF** (Return Channel Frames) | Space → Ground | Receive selected virtual channels |
+| **F-CLTU** (Forward Command Link) | Ground -> Space | Send telecommands |
+| **RAF** (Return All Frames) | Space -> Ground | Receive all telemetry frames |
+| **RCF** (Return Channel Frames) | Space -> Ground | Receive selected virtual channels |
 
 ### Implementation Layers
 
 ```
-┌─────────────────────────────┐
-│    SLE Application Layer    │  Protocol logic
-├─────────────────────────────┤
-│    Encoding Layer (DEL)     │  ASN.1 BER encoding
-├─────────────────────────────┤
-│    Transport Layer (TML)    │  TCP/IP transport
-└─────────────────────────────┘
++-----------------------------+
+|    SLE Application Layer    |  Protocol logic
++-----------------------------+
+|    Encoding Layer (DEL)     |  ASN.1 BER encoding
++-----------------------------+
+|    Transport Layer (TML)    |  TCP/IP transport
++-----------------------------+
 ```
 
 ### Adoption
@@ -238,10 +238,10 @@ Provides link-layer security for TC, TM, and AOS protocols.
 
 **Security Header:**
 ```
-┌──────────────┬────────────────┬─────────────────┐
-│ Security     │ Initialization │ Authentication  │
-│ Parameter ID │ Vector (96 bit)│ Tag (128 bit)   │
-└──────────────┴────────────────┴─────────────────┘
++--------------+----------------+-----------------+
+| Security     | Initialization | Authentication  |
+| Parameter ID | Vector (96 bit)| Tag (128 bit)   |
++--------------+----------------+-----------------+
 ```
 
 **Cryptographic Implementation:**
@@ -273,10 +273,10 @@ Satellites can only receive commands during **visibility windows** (also called 
 - **Passes per day per station**: 2-6 (varies with orbital inclination)
 
 ```
-                    ┌─────────────────────────┐
-                    │      Satellite Pass     │
-                    │                         │
-    Horizon ────────┼─────────────────────────┼──────── Horizon
+                    +-------------------------+
+                    |      Satellite Pass     |
+                    |                         |
+    Horizon --------+-------------------------+-------- Horizon
                    AOS                       LOS
               (Acquisition              (Loss of
                of Signal)               Signal)
@@ -288,14 +288,14 @@ Ground stations use orbital elements (Two-Line Element sets / TLEs) to predict v
 
 ```
 Pass Prediction Parameters:
-├── AOS (Acquisition of Signal) - Pass start time
-├── LOS (Loss of Signal) - Pass end time
-├── Maximum Elevation - Highest point in pass (0-90°)
-├── Duration - Total contact time
-└── Azimuth Range - Antenna tracking path
++-- AOS (Acquisition of Signal) - Pass start time
++-- LOS (Loss of Signal) - Pass end time
++-- Maximum Elevation - Highest point in pass (0-90deg)
++-- Duration - Total contact time
++-- Azimuth Range - Antenna tracking path
 ```
 
-Higher maximum elevation correlates with longer, higher-quality contacts. Passes below 5-10° elevation are typically unusable due to atmospheric attenuation and ground clutter.
+Higher maximum elevation correlates with longer, higher-quality contacts. Passes below 5-10deg elevation are typically unusable due to atmospheric attenuation and ground clutter.
 
 ### Ground Station Scheduling Problem
 
@@ -329,15 +329,15 @@ Modern GSaaS providers (AWS Ground Station, Azure Orbital, Leaf Space) expose AP
 Due to limited contact windows, **time-tagged telecommands** are essential for autonomous satellite operation:
 
 ```
-┌─────────────────┬─────────────────┬─────────────────┐
-│ Execution Time  │  Command Type   │  Command Data   │
-│  (absolute UTC) │    (opcode)     │  (parameters)   │
-└─────────────────┴─────────────────┴─────────────────┘
++-----------------+-----------------+-----------------+
+| Execution Time  |  Command Type   |  Command Data   |
+|  (absolute UTC) |    (opcode)     |  (parameters)   |
++-----------------+-----------------+-----------------+
 ```
 
 The on-board computer (OBC) stores commands in a queue sorted by execution time, executing them autonomously without ground contact.
 
-**Position-tagged commands** trigger at specific orbital positions—useful for Earth observation where data collection must begin over precise ground coordinates.
+**Position-tagged commands** trigger at specific orbital positions--useful for Earth observation where data collection must begin over precise ground coordinates.
 
 ### Stored Command Queue Operations
 
@@ -350,20 +350,20 @@ Spacecraft maintain an on-board command queue:
 ### Typical Operations Cycle
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Mission   │────►│   Ground    │────►│  Spacecraft │
-│   Planning  │     │   Station   │     │   OBC Queue │
-└─────────────┘     └─────────────┘     └─────────────┘
-      │                   │                    │
-      │  24hr schedule    │  Upload during     │  Execute
-      │  generation       │  contact pass      │  autonomously
-      │                   │                    │
-      └──────────────────►└───────────────────►│
-                                               │
-┌─────────────┐     ┌─────────────┐            │
-│   Reports   │◄────│  Telemetry  │◄───────────┘
-│ Verification│     │  Download   │   Next pass
-└─────────────┘     └─────────────┘
++-------------+     +-------------+     +-------------+
+|   Mission   |---->|   Ground    |---->|  Spacecraft |
+|   Planning  |     |   Station   |     |   OBC Queue |
++-------------+     +-------------+     +-------------+
+      |                   |                    |
+      |  24hr schedule    |  Upload during     |  Execute
+      |  generation       |  contact pass      |  autonomously
+      |                   |                    |
+      +------------------>+------------------->|
+                                               |
++-------------+     +-------------+            |
+|   Reports   |<----|  Telemetry  |<-----------+
+| Verification|     |  Download   |   Next pass
++-------------+     +-------------+
 ```
 
 ---
@@ -385,32 +385,32 @@ SDLS (CCSDS 355.0-B) provides link-layer security through **Security Association
 **Security Association Parameters:**
 ```
 Security Association:
-├── SA ID - Unique identifier for this association
-├── Service Type - Authentication, Encryption, or Authenticated Encryption
-├── Cryptographic Algorithm - e.g., AES-GCM
-├── Key ID - Reference to active session key
-├── IV Management - Counter or explicit IV
-├── Anti-Replay Window - Acceptable sequence number range
-└── SA State - Operational, Keyed, Unkeyed
++-- SA ID - Unique identifier for this association
++-- Service Type - Authentication, Encryption, or Authenticated Encryption
++-- Cryptographic Algorithm - e.g., AES-GCM
++-- Key ID - Reference to active session key
++-- IV Management - Counter or explicit IV
++-- Anti-Replay Window - Acceptable sequence number range
++-- SA State - Operational, Keyed, Unkeyed
 ```
 
 **Authentication Flow:**
 
 ```
 Ground Station                              Spacecraft
-     │                                           │
-     │  1. Construct TC Frame                    │
-     │  2. Compute MAC = AES-GCM(Key, Frame)     │
-     │  3. Append MAC + Sequence Counter         │
-     │                                           │
-     ├──────── TC Frame + Security Trailer ─────►│
-     │                                           │
-     │                      4. Extract MAC, SeqNum│
-     │                      5. Verify SeqNum in window
-     │                      6. Recompute MAC     │
-     │                      7. Compare MACs      │
-     │                      8. Accept or Reject  │
-     │                                           │
+     |                                           |
+     |  1. Construct TC Frame                    |
+     |  2. Compute MAC = AES-GCM(Key, Frame)     |
+     |  3. Append MAC + Sequence Counter         |
+     |                                           |
+     +-------- TC Frame + Security Trailer ----->|
+     |                                           |
+     |                      4. Extract MAC, SeqNum|
+     |                      5. Verify SeqNum in window
+     |                      6. Recompute MAC     |
+     |                      7. Compare MACs      |
+     |                      8. Accept or Reject  |
+     |                                           |
 ```
 
 **Security Services:**
@@ -445,18 +445,18 @@ Military and high-security satellites employ additional protection layers:
   - Burst transmission at unpredictable times
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│                    Security Layers                        │
-├───────────────────┬──────────────────────────────────────┤
-│     TRANSEC       │  Link-level: Frequency hopping,      │
-│                   │  spread spectrum, traffic masking    │
-├───────────────────┼──────────────────────────────────────┤
-│     COMSEC        │  Data-level: AES encryption of       │
-│                   │  payload content                     │
-├───────────────────┼──────────────────────────────────────┤
-│     SDLS Auth     │  Frame-level: MAC authentication,    │
-│                   │  anti-replay protection              │
-└───────────────────┴──────────────────────────────────────┘
++----------------------------------------------------------+
+|                    Security Layers                        |
++-------------------+--------------------------------------+
+|     TRANSEC       |  Link-level: Frequency hopping,      |
+|                   |  spread spectrum, traffic masking    |
++-------------------+--------------------------------------+
+|     COMSEC        |  Data-level: AES encryption of       |
+|                   |  payload content                     |
++-------------------+--------------------------------------+
+|     SDLS Auth     |  Frame-level: MAC authentication,    |
+|                   |  anti-replay protection              |
++-------------------+--------------------------------------+
 ```
 
 ### Key Management
@@ -470,10 +470,10 @@ Symmetric keys must be pre-shared between ground and spacecraft:
 **Key Hierarchy:**
 ```
 Master Key (burned in at factory)
-    │
-    ├──► Key Encryption Keys (KEK) - Protect key updates
-    │
-    └──► Session Keys - Used for actual command authentication
+    |
+    +--> Key Encryption Keys (KEK) - Protect key updates
+    |
+    +--> Session Keys - Used for actual command authentication
 ```
 
 **Over-the-Air Rekeying (OTAR):**
@@ -484,10 +484,10 @@ Master Key (burned in at factory)
 
 **Key Change Command:**
 ```
-┌─────────────┬──────────────┬───────────────┬────────────┐
-│ Key Change  │ New Key ID   │ Encrypted New │ MAC (old   │
-│ Opcode      │              │ Session Key   │ key)       │
-└─────────────┴──────────────┴───────────────┴────────────┘
++-------------+--------------+---------------+------------+
+| Key Change  | New Key ID   | Encrypted New | MAC (old   |
+| Opcode      |              | Session Key   | key)       |
++-------------+--------------+---------------+------------+
 ```
 
 ### Authorization for Third Parties
@@ -517,11 +517,11 @@ The operator's ground system validates the token and translates the API request 
 **2. Reseller/Partner Programs**
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  End User    │────►│   Reseller   │────►│   Operator   │
-│  (Customer)  │     │   Platform   │     │   Ground Sys │
-└──────────────┘     └──────────────┘     └──────────────┘
-      │                    │                     │
++--------------+     +--------------+     +--------------+
+|  End User    |---->|   Reseller   |---->|   Operator   |
+|  (Customer)  |     |   Platform   |     |   Ground Sys |
++--------------+     +--------------+     +--------------+
+      |                    |                     |
    API Key            Operator API           SDLS Auth
    (Reseller)         Credentials            to Spacecraft
 ```
@@ -551,7 +551,7 @@ Operators provide turnkey platforms that third parties can deploy under their ow
 
 ## 8. Commercial Tasking APIs
 
-Modern commercial satellite operators expose REST APIs for tasking. These APIs act as the authorization boundary—they validate customer credentials and translate requests into operator-authenticated spacecraft commands.
+Modern commercial satellite operators expose REST APIs for tasking. These APIs act as the authorization boundary--they validate customer credentials and translate requests into operator-authenticated spacecraft commands.
 
 ### API Authentication Methods
 
@@ -576,21 +576,21 @@ curl -H "Authorization: Bearer $ACCESS_TOKEN" \
 **OAuth2 Machine-to-Machine Flow:**
 
 ```
-┌──────────────┐                    ┌──────────────┐
-│   Client     │                    │   Auth       │
-│   App        │                    │   Server     │
-└──────┬───────┘                    └──────┬───────┘
-       │                                   │
-       │  POST /oauth/token                │
-       │  grant_type=client_credentials    │
-       │  client_id=xxx                    │
-       │  client_secret=yyy                │
-       ├──────────────────────────────────►│
-       │                                   │
-       │  { "access_token": "...",         │
-       │    "expires_in": 3600 }           │
-       │◄──────────────────────────────────┤
-       │                                   │
++--------------+                    +--------------+
+|   Client     |                    |   Auth       |
+|   App        |                    |   Server     |
++------+-------+                    +------+-------+
+       |                                   |
+       |  POST /oauth/token                |
+       |  grant_type=client_credentials    |
+       |  client_id=xxx                    |
+       |  client_secret=yyy                |
+       +---------------------------------->|
+       |                                   |
+       |  { "access_token": "...",         |
+       |    "expires_in": 3600 }           |
+       |<----------------------------------+
+       |                                   |
 ```
 
 Tokens are short-lived (typically 1 hour) and must be refreshed. This limits damage from token theft.
@@ -624,7 +624,7 @@ Tokens are short-lived (typically 1 hour) and must be refreshed. This limits dam
 
 ### Planet Tasking Parameters
 
-- **Area of Interest (AOI)**: GeoJSON polygon (50-1000 km²)
+- **Area of Interest (AOI)**: GeoJSON polygon (50-1000 km^2)
 - **Time of Interest (TOI)**: ISO 8601 datetime range
 - **sat_elevation_angle_min/max**: Restrict viewing geometry
 - **imaging_mode**: mono, stereo
@@ -668,11 +668,11 @@ Note: Azure Orbital Ground Station was retired in December 2024.
 ### AWS Ground Station Architecture
 
 ```
-┌─────────────┐     ┌─────────────────┐     ┌──────────────┐
-│  Satellite  │◄───►│ AWS Antenna     │────►│ AWS VPC      │
-│             │     │ (S/X-band, 5.4m)│     │ (Customer)   │
-└─────────────┘     └─────────────────┘     └──────────────┘
-                           │
++-------------+     +-----------------+     +--------------+
+|  Satellite  |<--->| AWS Antenna     |---->| AWS VPC      |
+|             |     | (S/X-band, 5.4m)|     | (Customer)   |
++-------------+     +-----------------+     +--------------+
+                           |
                     VITA-49 Protocol
                     (RF over IP)
 ```
@@ -692,7 +692,7 @@ Typical workflow:
 
 Before proposing new mechanisms, we survey what exists today for satellite-to-satellite communication and command relay.
 
-### 10.1 Relay Constellations (Ground → GEO → LEO)
+### 10.1 Relay Constellations (Ground -> GEO -> LEO)
 
 These systems relay ground-originated commands through intermediary satellites:
 
@@ -708,7 +708,7 @@ These systems relay ground-originated commands through intermediary satellites:
 - Can relay commands to **reprogram LEO satellites in near-real-time**
 - 50,000+ successful inter-satellite links as of mid-2021
 - Ground stations at Weilheim, Redu, and Harwell
-- Still ground-originated: operator sends command → EDRS relays → LEO executes
+- Still ground-originated: operator sends command -> EDRS relays -> LEO executes
 
 **SpaceLink (planned 2024+):**
 - Commercial MEO relay constellation
@@ -719,17 +719,17 @@ These systems relay ground-originated commands through intermediary satellites:
 
 **Starlink (2019-present):**
 ```
-┌─────────┐   Laser ISL   ┌─────────┐   Laser ISL   ┌─────────┐
-│Starlink │◄────────────►│Starlink │◄────────────►│Starlink │
-│  Sat A  │    200 Gbps   │  Sat B  │    200 Gbps   │  Sat C  │
-└─────────┘               └─────────┘               └─────────┘
-                               │
++---------+   Laser ISL   +---------+   Laser ISL   +---------+
+|Starlink |<------------>|Starlink |<------------>|Starlink |
+|  Sat A  |    200 Gbps   |  Sat B  |    200 Gbps   |  Sat C  |
++---------+               +---------+               +---------+
+                               |
                           RF Downlink
-                               │
-                               ▼
-                        ┌─────────────┐
-                        │Ground Station│
-                        └─────────────┘
+                               |
+                               v
+                        +-------------+
+                        |Ground Station|
+                        +-------------+
 ```
 
 - 9,000+ satellites with laser crosslinks
@@ -772,28 +772,28 @@ Within a single operator's constellation, satellites can coordinate autonomously
 
 | Capability | Exists Today? | Notes |
 |------------|---------------|-------|
-| Ground → Relay → LEO command | ✅ | TDRSS, EDRS |
-| Data mesh routing | ✅ | Starlink |
-| Single-operator autonomous coordination | ✅ | HiveStar, CBBA |
-| Cross-operator satellite commanding | ❌ | **No mechanism exists** |
-| Delegated authorization tokens | ❌ | Proposed below |
-| Third-party ISL command injection | ❌ | Would require new protocols |
+| Ground -> Relay -> LEO command | (yes) | TDRSS, EDRS |
+| Data mesh routing | (yes) | Starlink |
+| Single-operator autonomous coordination | (yes) | HiveStar, CBBA |
+| Cross-operator satellite commanding | (no) | **No mechanism exists** |
+| Delegated authorization tokens | (no) | Proposed below |
+| Third-party ISL command injection | (no) | Would require new protocols |
 
 **Today's workaround for cross-operator tasking:**
 ```
 Satellite A's Operator                    Satellite B's Operator
-        │                                         │
-        │  1. "Please image coordinates X"        │
-        ├────────► (Email/API/Phone) ────────────►│
-        │                                         │
-        │                    2. Operator B sends  │
-        │                       command via their │
-        │                       ground station    │
-        │                                         ▼
-        │                                    Satellite B
+        |                                         |
+        |  1. "Please image coordinates X"        |
+        +--------> (Email/API/Phone) ------------>|
+        |                                         |
+        |                    2. Operator B sends  |
+        |                       command via their |
+        |                       ground station    |
+        |                                         v
+        |                                    Satellite B
 ```
 
-This requires terrestrial coordination and ground station passes—no direct satellite-to-satellite authorized commanding.
+This requires terrestrial coordination and ground station passes--no direct satellite-to-satellite authorized commanding.
 
 ---
 
@@ -818,20 +818,20 @@ During Rendezvous and Proximity Operations (RPO), satellites can communicate via
 **RF Inter-Satellite Link (ISL):**
 ```
 Commanding Satellite                    Target Satellite
-       │                                      │
-       │  ┌─────────────────────────────┐    │
-       │  │   S-band/UHF Omnidirectional │    │
-       │  │   TT&C Antenna (target)      │    │
-       │  └─────────────────────────────┘    │
-       │              ▲                       │
-       │              │ RF Link              │
-       │              │ (< 10 km range)      │
-       │              │                       │
-       │  ┌──────────┴──────────┐            │
-       │  │ Directional or Omni │            │
-       │  │ Antenna (commander) │            │
-       │  └─────────────────────┘            │
-       │                                      │
+       |                                      |
+       |  +-----------------------------+    |
+       |  |   S-band/UHF Omnidirectional |    |
+       |  |   TT&C Antenna (target)      |    |
+       |  +-----------------------------+    |
+       |              ^                       |
+       |              | RF Link              |
+       |              | (< 10 km range)      |
+       |              |                       |
+       |  +----------+----------+            |
+       |  | Directional or Omni |            |
+       |  | Antenna (commander) |            |
+       |  +---------------------+            |
+       |                                      |
 ```
 
 **Characteristics:**
@@ -842,7 +842,7 @@ Commanding Satellite                    Target Satellite
 
 **Optical ISL (Alternative):**
 - Higher bandwidth (Gbps) but requires precise pointing
-- Narrow beam (~10 μrad) provides inherent security
+- Narrow beam (~10 urad) provides inherent security
 - Not suitable for omnidirectional reception
 
 ### 11.3 Proposed Authorization Model: Delegated Capability Tokens
@@ -856,36 +856,36 @@ The target satellite already has its operator's **public key** (for verifying so
 ### Capability Token Structure
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    CAPABILITY TOKEN (JWT-like)                  │
-├────────────────────────────────────────────────────────────────┤
-│  Header                                                        │
-│  ├── alg: "ES256" (ECDSA with P-256)                          │
-│  └── typ: "SAT-CAP"                                           │
-├────────────────────────────────────────────────────────────────┤
-│  Payload                                                       │
-│  ├── iss: "OP-12345"          # Issuer (target's operator)    │
-│  ├── sub: "SAT-CMD-001"       # Subject (commanding satellite)│
-│  ├── aud: "SAT-TGT-042"       # Audience (target satellite)   │
-│  ├── iat: 1704067200          # Issued at (Unix timestamp)    │
-│  ├── nbf: 1704067200          # Not valid before              │
-│  ├── exp: 1704153600          # Expiration (24-48 hr window)  │
-│  ├── jti: "a1b2c3d4..."       # Unique token ID (nonce)       │
-│  ├── cap: [                   # Capabilities granted          │
-│  │     "cmd:imaging:start",                                   │
-│  │     "cmd:imaging:stop",                                    │
-│  │     "cmd:attitude:point"                                   │
-│  │   ]                                                        │
-│  ├── cns: {                   # Constraints                   │
-│  │     "max_range_km": 10,    # Proximity requirement         │
-│  │     "orbital_zone": {...}, # Allowed region (optional)     │
-│  │     "max_commands": 5      # Rate limiting                 │
-│  │   }                                                        │
-│  └── cmd_pub: "04a1b2..."     # Commander's public key        │
-├────────────────────────────────────────────────────────────────┤
-│  Signature                                                     │
-│  └── ECDSA signature by operator's private key                │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    CAPABILITY TOKEN (JWT-like)                  |
++----------------------------------------------------------------+
+|  Header                                                        |
+|  +-- alg: "ES256" (ECDSA with P-256)                          |
+|  +-- typ: "SAT-CAP"                                           |
++----------------------------------------------------------------+
+|  Payload                                                       |
+|  +-- iss: "OP-12345"          # Issuer (target's operator)    |
+|  +-- sub: "SAT-CMD-001"       # Subject (commanding satellite)|
+|  +-- aud: "SAT-TGT-042"       # Audience (target satellite)   |
+|  +-- iat: 1704067200          # Issued at (Unix timestamp)    |
+|  +-- nbf: 1704067200          # Not valid before              |
+|  +-- exp: 1704153600          # Expiration (24-48 hr window)  |
+|  +-- jti: "a1b2c3d4..."       # Unique token ID (nonce)       |
+|  +-- cap: [                   # Capabilities granted          |
+|  |     "cmd:imaging:start",                                   |
+|  |     "cmd:imaging:stop",                                    |
+|  |     "cmd:attitude:point"                                   |
+|  |   ]                                                        |
+|  +-- cns: {                   # Constraints                   |
+|  |     "max_range_km": 10,    # Proximity requirement         |
+|  |     "orbital_zone": {...}, # Allowed region (optional)     |
+|  |     "max_commands": 5      # Rate limiting                 |
+|  |   }                                                        |
+|  +-- cmd_pub: "04a1b2..."     # Commander's public key        |
++----------------------------------------------------------------+
+|  Signature                                                     |
+|  +-- ECDSA signature by operator's private key                |
++----------------------------------------------------------------+
 ```
 
 ### Command Message Structure
@@ -893,67 +893,67 @@ The target satellite already has its operator's **public key** (for verifying so
 The commanding satellite sends:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    INTER-SATELLITE COMMAND                      │
-├────────────────────────────────────────────────────────────────┤
-│  CCSDS Primary Header (6 bytes)                                │
-│  ├── Version: 000                                              │
-│  ├── Type: 1 (TC)                                              │
-│  ├── APID: Target's ISL command APID                          │
-│  └── Sequence Count                                            │
-├────────────────────────────────────────────────────────────────┤
-│  Extended Security Header                                      │
-│  ├── Security Type: 0x03 (Delegated Capability)               │
-│  ├── Token Length: Variable                                    │
-│  └── Capability Token: [Base64-encoded JWT]                   │
-├────────────────────────────────────────────────────────────────┤
-│  Command Payload                                               │
-│  ├── Timestamp: Current UTC (for freshness)                   │
-│  ├── Command Type: e.g., "cmd:imaging:start"                  │
-│  ├── Parameters: Command-specific data                        │
-│  │   {                                                        │
-│  │     "target_coords": [lat, lon],                           │
-│  │     "duration_sec": 30,                                    │
-│  │     "sensor": "IR-CAM-1"                                   │
-│  │   }                                                        │
-│  └── Commander Signature: ECDSA(commander_privkey, payload)   │
-├────────────────────────────────────────────────────────────────┤
-│  Frame Check (CRC-16)                                          │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    INTER-SATELLITE COMMAND                      |
++----------------------------------------------------------------+
+|  CCSDS Primary Header (6 bytes)                                |
+|  +-- Version: 000                                              |
+|  +-- Type: 1 (TC)                                              |
+|  +-- APID: Target's ISL command APID                          |
+|  +-- Sequence Count                                            |
++----------------------------------------------------------------+
+|  Extended Security Header                                      |
+|  +-- Security Type: 0x03 (Delegated Capability)               |
+|  +-- Token Length: Variable                                    |
+|  +-- Capability Token: [Base64-encoded JWT]                   |
++----------------------------------------------------------------+
+|  Command Payload                                               |
+|  +-- Timestamp: Current UTC (for freshness)                   |
+|  +-- Command Type: e.g., "cmd:imaging:start"                  |
+|  +-- Parameters: Command-specific data                        |
+|  |   {                                                        |
+|  |     "target_coords": [lat, lon],                           |
+|  |     "duration_sec": 30,                                    |
+|  |     "sensor": "IR-CAM-1"                                   |
+|  |   }                                                        |
+|  +-- Commander Signature: ECDSA(commander_privkey, payload)   |
++----------------------------------------------------------------+
+|  Frame Check (CRC-16)                                          |
++----------------------------------------------------------------+
 ```
 
 ### Verification Protocol
 
 ```
 Commanding Satellite (C)              Target Satellite (T)
-        │                                     │
-        │  1. Acquire ISL link                │
-        ├────────────────────────────────────►│
-        │                                     │
-        │  2. Send: Token + Command + Sig     │
-        ├────────────────────────────────────►│
-        │                                     │
-        │         ┌───────────────────────────┤
-        │         │ 3. Verify token:          │
-        │         │    a. Check operator sig  │
-        │         │       (using stored pubkey)
-        │         │    b. Check exp > now     │
-        │         │    c. Check aud == self   │
-        │         │    d. Check jti not used  │
-        │         │       (replay prevention) │
-        │         │                           │
-        │         │ 4. Verify command:        │
-        │         │    a. Check cmd in cap[]  │
-        │         │    b. Verify commander sig│
-        │         │       (using cmd_pub)     │
-        │         │    c. Check freshness     │
-        │         │    d. Check constraints   │
-        │         │       (range, zone, etc.) │
-        │         └───────────────────────────┤
-        │                                     │
-        │  5. ACK/NAK + Execution Status      │
-        │◄────────────────────────────────────┤
-        │                                     │
+        |                                     |
+        |  1. Acquire ISL link                |
+        +------------------------------------>|
+        |                                     |
+        |  2. Send: Token + Command + Sig     |
+        +------------------------------------>|
+        |                                     |
+        |         +---------------------------+
+        |         | 3. Verify token:          |
+        |         |    a. Check operator sig  |
+        |         |       (using stored pubkey)
+        |         |    b. Check exp > now     |
+        |         |    c. Check aud == self   |
+        |         |    d. Check jti not used  |
+        |         |       (replay prevention) |
+        |         |                           |
+        |         | 4. Verify command:        |
+        |         |    a. Check cmd in cap[]  |
+        |         |    b. Verify commander sig|
+        |         |       (using cmd_pub)     |
+        |         |    c. Check freshness     |
+        |         |    d. Check constraints   |
+        |         |       (range, zone, etc.) |
+        |         +---------------------------+
+        |                                     |
+        |  5. ACK/NAK + Execution Status      |
+        |<------------------------------------+
+        |                                     |
 ```
 
 ### Security Properties
@@ -972,59 +972,55 @@ Commanding Satellite (C)              Target Satellite (T)
 
 The target satellite can verify proximity through:
 
-1. **Signal Strength (RSSI)**: At S-band, free-space path loss at 10 km ≈ 130 dB; at 1 km ≈ 110 dB. Received signal strength indicates approximate range.
+1. **Signal Strength (RSSI)**: At S-band, free-space path loss at 10 km ~ 130 dB; at 1 km ~ 110 dB. Received signal strength indicates approximate range.
 
-2. **Two-Way Ranging**: Challenge-response timing. Light-time at 10 km ≈ 33 μs round-trip.
+2. **Two-Way Ranging**: Challenge-response timing. Light-time at 10 km ~ 33 us round-trip.
 
 3. **Orbital Mechanics**: If both satellites broadcast TLE-equivalent state vectors, target can compute expected range and verify consistency.
 
-```
-Range Verification:
-┌─────────────────┬─────────────────┬─────────────────┐
-│     Method      │   Accuracy      │   Spoofability  │
-├─────────────────┼─────────────────┼─────────────────┤
-│ RSSI            │ ±50% (crude)    │ Moderate        │
-│ Two-way ranging │ ±1 m            │ Difficult       │
-│ State vector    │ ±100 m          │ Requires orbit  │
-│ comparison      │                 │ knowledge       │
-└─────────────────┴─────────────────┴─────────────────┘
-```
+**Range Verification Methods:**
+
+| Method | Accuracy | Spoofability |
+|--------|----------|--------------|
+| RSSI | $\pm 50\%$ (crude) | Moderate |
+| Two-way ranging | $\pm 1$ m | Difficult |
+| State vector comparison | $\pm 100$ m | Requires orbit knowledge |
 
 ### Pre-Mission Setup Flow
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Target's   │     │ Commanding  │     │  Target     │
-│  Operator   │     │ Satellite   │     │  Satellite  │
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │                   │                   │
-       │ 1. Operator pubkey burned in         │
-       │   at manufacturing                   │
-       ├──────────────────────────────────────►│
-       │                                       │
-       │ 2. Commander requests                 │
-       │    authorization                      │
-       │◄──────────────────┤                   │
-       │                   │                   │
-       │ 3. Operator issues│                   │
-       │    capability token                   │
-       ├──────────────────►│                   │
-       │                   │                   │
-       │                   │ 4. Close approach │
-       │                   │    + command      │
-       │                   ├──────────────────►│
-       │                   │                   │
-       │                   │ 5. Verification   │
-       │                   │    + execution    │
-       │                   │◄──────────────────┤
-       │                   │                   │
++-------------+     +-------------+     +-------------+
+|  Target's   |     | Commanding  |     |  Target     |
+|  Operator   |     | Satellite   |     |  Satellite  |
++------+------+     +------+------+     +------+------+
+       |                   |                   |
+       | 1. Operator pubkey burned in         |
+       |   at manufacturing                   |
+       +-------------------------------------->|
+       |                                       |
+       | 2. Commander requests                 |
+       |    authorization                      |
+       |<------------------+                   |
+       |                   |                   |
+       | 3. Operator issues|                   |
+       |    capability token                   |
+       +------------------>|                   |
+       |                   |                   |
+       |                   | 4. Close approach |
+       |                   |    + command      |
+       |                   +------------------>|
+       |                   |                   |
+       |                   | 5. Verification   |
+       |                   |    + execution    |
+       |                   |<------------------+
+       |                   |                   |
 ```
 
 ### Challenges and Mitigations
 
 | Challenge | Mitigation |
 |-----------|------------|
-| **Clock drift** | Generous validity windows; timestamp tolerance ±60s |
+| **Clock drift** | Generous validity windows; timestamp tolerance +/-60s |
 | **Token storage** | Small flash storage for used `jti` values; expiry-based cleanup |
 | **Computational cost** | ECDSA P-256 verification: ~10ms on modern embedded CPU |
 | **Key compromise** | Short token lifetimes; operator can update satellite's trust anchor |
@@ -1068,8 +1064,8 @@ Each satellite greedily builds a task bundle:
 **Phase 2: Consensus (Distributed)**
 ```
 Satellites exchange bids with ISL neighbors:
-  SAT-1 → SAT-2: "I bid 10 for Task A"
-  SAT-2 → SAT-1: "I bid 8 for Task A"  ← Lower cost wins
+  SAT-1 -> SAT-2: "I bid 10 for Task A"
+  SAT-2 -> SAT-1: "I bid 8 for Task A"  <- Lower cost wins
 
   SAT-1: "OK, you take A. I'll rebid on B or C."
 ```
@@ -1087,62 +1083,62 @@ Satellites exchange bids with ISL neighbors:
 Extending CBBA to multi-operator scenarios requires authorization:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    CROSS-OPERATOR AUCTION BID                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Bid Header                                                     │
-│  ├── bidder_id: "SAT-ALPHA-007"                                │
-│  ├── task_id: "IMG-20240115-0042"                              │
-│  ├── bid_value: 8.5              # Lower is better             │
-│  └── timestamp: 1705312800                                      │
-├─────────────────────────────────────────────────────────────────┤
-│  Authorization                                                  │
-│  ├── capability_token: <JWT>     # Proves right to bid         │
-│  │     └── cap: ["task:bid:imaging", "task:execute:imaging"]   │
-│  └── bidder_signature: ECDSA(...)                              │
-├─────────────────────────────────────────────────────────────────┤
-│  Bid Details                                                    │
-│  ├── estimated_cost: {                                         │
-│  │     "fuel_kg": 0.02,                                        │
-│  │     "time_sec": 45,                                         │
-│  │     "opportunity_cost": 3.2                                 │
-│  │   }                                                         │
-│  ├── earliest_execution: "2024-01-15T14:30:00Z"               │
-│  └── capability_match: 0.95      # Sensor suitability          │
-└─────────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------------+
+|                    CROSS-OPERATOR AUCTION BID                    |
++-----------------------------------------------------------------+
+|  Bid Header                                                     |
+|  +-- bidder_id: "SAT-ALPHA-007"                                |
+|  +-- task_id: "IMG-20240115-0042"                              |
+|  +-- bid_value: 8.5              # Lower is better             |
+|  +-- timestamp: 1705312800                                      |
++-----------------------------------------------------------------+
+|  Authorization                                                  |
+|  +-- capability_token: <JWT>     # Proves right to bid         |
+|  |     +-- cap: ["task:bid:imaging", "task:execute:imaging"]   |
+|  +-- bidder_signature: ECDSA(...)                              |
++-----------------------------------------------------------------+
+|  Bid Details                                                    |
+|  +-- estimated_cost: {                                         |
+|  |     "fuel_kg": 0.02,                                        |
+|  |     "time_sec": 45,                                         |
+|  |     "opportunity_cost": 3.2                                 |
+|  |   }                                                         |
+|  +-- earliest_execution: "2024-01-15T14:30:00Z"               |
+|  +-- capability_match: 0.95      # Sensor suitability          |
++-----------------------------------------------------------------+
 ```
 
 #### Auction Protocol with Authorization
 
 ```
 Task Originator (O)          Bidder Satellites (A, B, C)
-      │                              │
-      │  1. Broadcast: Task + Auth   │
-      │     Requirements             │
-      ├─────────────────────────────►│
-      │                              │
-      │         ┌────────────────────┤
-      │         │ 2. Each satellite: │
-      │         │    - Check if has  │
-      │         │      valid cap token│
-      │         │    - Compute bid   │
-      │         │      (cost/utility)│
-      │         └────────────────────┤
-      │                              │
-      │  3. Submit bids + tokens     │
-      │◄─────────────────────────────┤
-      │                              │
-      │  4. Verify all tokens        │
-      │  5. Select winner (lowest bid│
-      │     among authorized bidders)│
-      │                              │
-      │  6. Award + Command Token    │
-      ├─────────────────────────────►│ Winner only
-      │                              │
-      │  7. Winner executes task     │
-      │  8. Result + proof           │
-      │◄─────────────────────────────┤
-      │                              │
+      |                              |
+      |  1. Broadcast: Task + Auth   |
+      |     Requirements             |
+      +----------------------------->|
+      |                              |
+      |         +--------------------+
+      |         | 2. Each satellite: |
+      |         |    - Check if has  |
+      |         |      valid cap token|
+      |         |    - Compute bid   |
+      |         |      (cost/utility)|
+      |         +--------------------+
+      |                              |
+      |  3. Submit bids + tokens     |
+      |<-----------------------------+
+      |                              |
+      |  4. Verify all tokens        |
+      |  5. Select winner (lowest bid|
+      |     among authorized bidders)|
+      |                              |
+      |  6. Award + Command Token    |
+      +----------------------------->| Winner only
+      |                              |
+      |  7. Winner executes task     |
+      |  8. Result + proof           |
+      |<-----------------------------+
+      |                              |
 ```
 
 #### Bid Semantics: Why Lower is Better
@@ -1176,10 +1172,10 @@ For commercial cross-operator tasking, the auction can include payment:
 
 ```
 Capability Token includes:
-  ├── cap: ["task:bid:*", "task:execute:*"]
-  ├── payment_escrow: "0x1234..."     # Smart contract or escrow ID
-  ├── max_bid_value: 100              # Budget ceiling
-  └── payment_per_unit: 0.5           # Rate for execution
+  +-- cap: ["task:bid:*", "task:execute:*"]
+  +-- payment_escrow: "0x1234..."     # Smart contract or escrow ID
+  +-- max_bid_value: 100              # Budget ceiling
+  +-- payment_per_unit: 0.5           # Rate for execution
 ```
 
 The winning satellite presents proof-of-execution to claim payment from escrow.
@@ -1202,27 +1198,27 @@ The basic capability token model assumes single-hop authorization: operator issu
 
 ```
 Original Customer (C)
-        │
-        │  Requests task via ground station
-        ▼
-┌─────────────────┐
-│  Relay Sat 1    │  Has token from C's operator
-│  (Iridium)      │
-└────────┬────────┘
-         │
-         │  Must delegate authority to Relay Sat 2
-         ▼
-┌─────────────────┐
-│  Relay Sat 2    │  Needs to prove chain of authority
-│  (Iridium)      │
-└────────┬────────┘
-         │
-         │  Must command target with valid authorization
-         ▼
-┌─────────────────┐
-│  Target Sat     │  Must verify entire delegation chain
-│  (Sentinel-2C)  │
-└─────────────────┘
+        |
+        |  Requests task via ground station
+        v
++-----------------+
+|  Relay Sat 1    |  Has token from C's operator
+|  (Iridium)      |
++--------+--------+
+         |
+         |  Must delegate authority to Relay Sat 2
+         v
++-----------------+
+|  Relay Sat 2    |  Needs to prove chain of authority
+|  (Iridium)      |
++--------+--------+
+         |
+         |  Must command target with valid authorization
+         v
++-----------------+
+|  Target Sat     |  Must verify entire delegation chain
+|  (Sentinel-2C)  |
++-----------------+
 ```
 
 #### Delegation Token Structure
@@ -1230,57 +1226,57 @@ Original Customer (C)
 Each hop in the chain creates a **Delegation Token** that references its parent:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    DELEGATION TOKEN                             │
-├────────────────────────────────────────────────────────────────┤
-│  Header                                                        │
-│  ├── alg: "ES256"                                              │
-│  ├── typ: "SAT-CAP-DEL"                                        │
-│  └── chn: 2                      # Chain depth (0 = root)      │
-├────────────────────────────────────────────────────────────────┤
-│  Payload                                                       │
-│  ├── iss: "IRIDIUM-168"          # Delegating satellite        │
-│  ├── sub: "IRIDIUM-172"          # Delegate (next hop)         │
-│  ├── aud: "SENTINEL-2C"          # Final target (unchanged)    │
-│  ├── root_iss: "ESA-COPERNICUS"  # Original token issuer       │
-│  ├── root_jti: "abc123..."       # Original token ID           │
-│  ├── parent_jti: "def456..."     # Parent delegation ID        │
-│  ├── iat: 1705330805                                           │
-│  ├── exp: 1705334400             # Must be ≤ parent expiration │
-│  ├── jti: "ghi789..."            # This delegation's ID        │
-│  ├── cap: [...]                  # Must be ⊆ parent caps       │
-│  ├── cns: {...}                  # Must be ≥ restrictive       │
-│  └── del_pub: "04d5e6..."        # Delegate's public key       │
-├────────────────────────────────────────────────────────────────┤
-│  Delegation Chain (array of previous tokens)                   │
-│  └── chain: [<root_token>, <parent_delegation>, ...]          │
-├────────────────────────────────────────────────────────────────┤
-│  Signature                                                     │
-│  └── ECDSA signature by delegating satellite's private key    │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    DELEGATION TOKEN                             |
++----------------------------------------------------------------+
+|  Header                                                        |
+|  +-- alg: "ES256"                                              |
+|  +-- typ: "SAT-CAP-DEL"                                        |
+|  +-- chn: 2                      # Chain depth (0 = root)      |
++----------------------------------------------------------------+
+|  Payload                                                       |
+|  +-- iss: "IRIDIUM-168"          # Delegating satellite        |
+|  +-- sub: "IRIDIUM-172"          # Delegate (next hop)         |
+|  +-- aud: "SENTINEL-2C"          # Final target (unchanged)    |
+|  +-- root_iss: "ESA-COPERNICUS"  # Original token issuer       |
+|  +-- root_jti: "abc123..."       # Original token ID           |
+|  +-- parent_jti: "def456..."     # Parent delegation ID        |
+|  +-- iat: 1705330805                                           |
+|  +-- exp: 1705334400             # Must be <= parent exp       |
+|  +-- jti: "ghi789..."            # This delegation's ID        |
+|  +-- cap: [...]                  # Must be subset of parent    |
+|  +-- cns: {...}                  # Must be >= restrictive      |
+|  +-- del_pub: "04d5e6..."        # Delegate's public key       |
++----------------------------------------------------------------+
+|  Delegation Chain (array of previous tokens)                   |
+|  +-- chain: [<root_token>, <parent_delegation>, ...]          |
++----------------------------------------------------------------+
+|  Signature                                                     |
+|  +-- ECDSA signature by delegating satellite's private key    |
++----------------------------------------------------------------+
 ```
 
 #### Delegation Rules
 
-1. **Capability Attenuation**: Each delegation can only grant a **subset** of parent capabilities
+1. **Capability Attenuation**: Each delegation can only grant capabilities $\subseteq$ parent
    ```
    parent.cap = ["cmd:imaging:*", "cmd:attitude:point"]
-   child.cap  = ["cmd:imaging:msi"]  ✓ Valid (subset)
-   child.cap  = ["cmd:propulsion:*"] ✗ Invalid (not in parent)
+   child.cap  = ["cmd:imaging:msi"]  (yes) Valid (subset)
+   child.cap  = ["cmd:propulsion:*"] (no) Invalid (not in parent)
    ```
 
-2. **Constraint Tightening**: Constraints can only become **more restrictive**
+2. **Constraint Tightening**: Constraints can only become $\geq$ restrictive
    ```
    parent.cns.max_range_km = 100
-   child.cns.max_range_km  = 50   ✓ Valid (tighter)
-   child.cns.max_range_km  = 200  ✗ Invalid (looser)
+   child.cns.max_range_km  = 50   (yes) Valid (tighter)
+   child.cns.max_range_km  = 200  (no) Invalid (looser)
    ```
 
-3. **Expiration Inheritance**: Delegation cannot extend validity beyond parent
+3. **Expiration Inheritance**: Delegation cannot extend validity beyond parent ($\leq$)
    ```
    parent.exp = 1705334400
-   child.exp  = 1705332000  ✓ Valid (earlier)
-   child.exp  = 1705340000  ✗ Invalid (later)
+   child.exp  = 1705332000  (yes) Valid (earlier)
+   child.exp  = 1705340000  (no) Invalid (later)
    ```
 
 4. **Maximum Chain Depth**: Root token specifies maximum delegation depth
@@ -1369,55 +1365,55 @@ Command authorization and data access authorization are distinct concerns. A sat
 Separate from command tokens, data access tokens authorize data flows:
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    DATA ACCESS TOKEN                            │
-├────────────────────────────────────────────────────────────────┤
-│  Payload                                                       │
-│  ├── iss: "ESA-COPERNICUS"       # Data owner/operator         │
-│  ├── sub: "STARLINK-FUSION-42"   # Data recipient              │
-│  ├── src: "SENTINEL-2C"          # Data source satellite       │
-│  ├── data_types: [               # Authorized data types       │
-│  │     "OLCI_L1B",                                             │
-│  │     "OLCI_L2A"                                              │
-│  │   ]                                                         │
-│  ├── cap: [                      # Data capabilities           │
-│  │     "data:receive:SENTINEL-2C",                             │
-│  │     "data:process:ocean_color",                             │
-│  │     "data:relay:NOAA-CRW"                                   │
-│  │   ]                                                         │
-│  ├── cns: {                                                    │
-│  │     "max_volume_gb_day": 500,                               │
-│  │     "geographic_mask": "ocean_only",                        │
-│  │     "retention_hours": 24                                   │
-│  │   }                                                         │
-│  ├── iat: 1705320000                                           │
-│  ├── exp: 1736856000             # Can be long-lived           │
-│  └── jti: "data-access-001"                                    │
-├────────────────────────────────────────────────────────────────┤
-│  Signature (by data owner)                                     │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    DATA ACCESS TOKEN                            |
++----------------------------------------------------------------+
+|  Payload                                                       |
+|  +-- iss: "ESA-COPERNICUS"       # Data owner/operator         |
+|  +-- sub: "STARLINK-FUSION-42"   # Data recipient              |
+|  +-- src: "SENTINEL-2C"          # Data source satellite       |
+|  +-- data_types: [               # Authorized data types       |
+|  |     "OLCI_L1B",                                             |
+|  |     "OLCI_L2A"                                              |
+|  |   ]                                                         |
+|  +-- cap: [                      # Data capabilities           |
+|  |     "data:receive:SENTINEL-2C",                             |
+|  |     "data:process:ocean_color",                             |
+|  |     "data:relay:NOAA-CRW"                                   |
+|  |   ]                                                         |
+|  +-- cns: {                                                    |
+|  |     "max_volume_gb_day": 500,                               |
+|  |     "geographic_mask": "ocean_only",                        |
+|  |     "retention_hours": 24                                   |
+|  |   }                                                         |
+|  +-- iat: 1705320000                                           |
+|  +-- exp: 1736856000             # Can be long-lived           |
+|  +-- jti: "data-access-001"                                    |
++----------------------------------------------------------------+
+|  Signature (by data owner)                                     |
++----------------------------------------------------------------+
 ```
 
 #### Data Flow Authorization
 
 ```
-┌─────────────┐  cmd token   ┌─────────────┐  data token  ┌─────────────┐
-│   Customer  │─────────────►│   Target    │─────────────►│   Relay/    │
-│             │              │  Satellite  │              │   ODC       │
-└─────────────┘              └─────────────┘              └──────┬──────┘
-                                                                 │
++-------------+  cmd token   +-------------+  data token  +-------------+
+|   Customer  |------------->|   Target    |------------->|   Relay/    |
+|             |              |  Satellite  |              |   ODC       |
++-------------+              +-------------+              +------+------+
+                                                                 |
                                                            data token
-                                                                 │
-                                                                 ▼
-                                                          ┌─────────────┐
-                                                          │   Ground    │
-                                                          │   Station   │
-                                                          └─────────────┘
+                                                                 |
+                                                                 v
+                                                          +-------------+
+                                                          |   Ground    |
+                                                          |   Station   |
+                                                          +-------------+
 
 Token requirements:
-1. Customer → Target: Command capability token
-2. Target → Relay: Data receive token (Relay authorized by Target's operator)
-3. Relay → Ground: Data downlink token (Ground authorized to receive)
+1. Customer -> Target: Command capability token
+2. Target -> Relay: Data receive token (Relay authorized by Target's operator)
+3. Relay -> Ground: Data downlink token (Ground authorized to receive)
 ```
 
 ### 11.8 Extended Constraint Verification
@@ -1428,13 +1424,13 @@ Basic range verification (RSSI, two-way ranging) is insufficient for RPO and ser
 
 | Constraint | Verification Method | Accuracy |
 |------------|---------------------|----------|
-| `max_range_km` | RSSI, two-way ranging | ±1 m |
-| `max_relative_velocity_m_s` | Doppler shift, state vectors | ±0.01 m/s |
-| `approach_corridor` | State vector + geometric check | ±10 m |
-| `keep_out_zones` | LIDAR, camera, state vectors | ±1 m |
+| `max_range_km` | RSSI, two-way ranging | +/-1 m |
+| `max_relative_velocity_m_s` | Doppler shift, state vectors | +/-0.01 m/s |
+| `approach_corridor` | State vector + geometric check | +/-10 m |
+| `keep_out_zones` | LIDAR, camera, state vectors | +/-1 m |
 | `lighting_required` | Sun vector calculation | N/A |
-| `attitude_tolerance_deg` | IMU comparison, visual | ±0.1° |
-| `orbital_zone` | State vector vs. boundary | ±100 m |
+| `attitude_tolerance_deg` | IMU comparison, visual | +/-0.1deg |
+| `orbital_zone` | State vector vs. boundary | +/-100 m |
 
 #### Constraint Schema
 
@@ -1538,17 +1534,17 @@ Tokens require lifecycle management beyond simple expiration for operational fle
 #### Token States
 
 ```
-┌─────────────┐     issue      ┌─────────────┐
-│   DRAFT     │───────────────►│   ACTIVE    │
-└─────────────┘                └──────┬──────┘
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-              │                       │                       │
-              ▼                       ▼                       ▼
-       ┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-       │   EXPIRED   │         │   REVOKED   │         │   CONSUMED  │
-       │ (time-based)│         │  (explicit) │         │ (use-based) │
-       └─────────────┘         └─────────────┘         └─────────────┘
++-------------+     issue      +-------------+
+|   DRAFT     |--------------->|   ACTIVE    |
++-------------+                +------+------+
+                                      |
+              +-----------------------+-----------------------+
+              |                       |                       |
+              v                       v                       v
+       +-------------+         +-------------+         +-------------+
+       |   EXPIRED   |         |   REVOKED   |         |   CONSUMED  |
+       | (time-based)|         |  (explicit) |         | (use-based) |
+       +-------------+         +-------------+         +-------------+
 ```
 
 #### Long-Lived Token Patterns
@@ -1558,11 +1554,11 @@ For missions requiring extended authorization (servicing, constellation membersh
 **Pattern 1: Renewable Session Tokens**
 ```
 Master Token (5-year validity, stored securely)
-    │
-    ├──► Session Token 1 (24-hour validity) ──► expires
-    ├──► Session Token 2 (24-hour validity) ──► expires
-    ├──► Session Token 3 (24-hour validity) ──► active
-    └──► ...
+    |
+    +--> Session Token 1 (24-hour validity) --> expires
+    +--> Session Token 2 (24-hour validity) --> expires
+    +--> Session Token 3 (24-hour validity) --> active
+    +--> ...
 
 Renewal requires ground station pass to verify master token still valid.
 ```
@@ -1570,13 +1566,13 @@ Renewal requires ground station pass to verify master token still valid.
 **Pattern 2: Epoch-Based Validity**
 ```
 Token includes:
-  ├── exp: 1736856000              # Absolute expiration (far future)
-  ├── epoch: 42                     # Current validity epoch
-  └── epoch_exp: 1705406400         # Epoch expiration (near future)
+  +-- exp: 1736856000              # Absolute expiration (far future)
+  +-- epoch: 42                     # Current validity epoch
+  +-- epoch_exp: 1705406400         # Epoch expiration (near future)
 
 Target satellite maintains:
-  ├── current_epoch: 42             # Updated via ground pass
-  └── min_epoch: 40                 # Reject tokens with epoch < this
+  +-- current_epoch: 42             # Updated via ground pass
+  +-- min_epoch: 40                 # Reject tokens with epoch < this
 
 Operator increments epoch to invalidate old tokens without revoking individually.
 ```
@@ -1584,8 +1580,8 @@ Operator increments epoch to invalidate old tokens without revoking individually
 **Pattern 3: Heartbeat Validation**
 ```
 Token includes:
-  ├── heartbeat_interval_sec: 3600  # Require validation every hour
-  └── last_validated: 1705320000    # Timestamp of last validation
+  +-- heartbeat_interval_sec: 3600  # Require validation every hour
+  +-- last_validated: 1705320000    # Timestamp of last validation
 
 Target rejects commands if:
   now - last_validated > heartbeat_interval_sec
@@ -1627,50 +1623,50 @@ Multi-operator scenarios (disaster response, shared constellations) require trus
 #### Federation Model
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Federation Root                                  │
-│                    (e.g., Space Data Association)                       │
-│                                                                         │
-│  Root Public Key: Published, well-known                                 │
-│  Role: Signs operator certificates, not individual tokens               │
-└────────────────────────────────┬────────────────────────────────────────┘
-                                 │
-         ┌───────────────────────┼───────────────────────┐
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  ESA-COPERNICUS │     │     MAXAR       │     │     ICEYE       │
-│                 │     │                 │     │                 │
-│  Operator Cert  │     │  Operator Cert  │     │  Operator Cert  │
-│  (signed by     │     │  (signed by     │     │  (signed by     │
-│   federation)   │     │   federation)   │     │   federation)   │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-   ┌──────────┐            ┌──────────┐            ┌──────────┐
-   │Sentinel-1│            │WorldView │            │ ICEYE-X  │
-   │Sentinel-2│            │  GeoEye  │            │  Fleet   │
-   └──────────┘            └──────────┘            └──────────┘
++-------------------------------------------------------------------------+
+|                         Federation Root                                  |
+|                    (e.g., Space Data Association)                       |
+|                                                                         |
+|  Root Public Key: Published, well-known                                 |
+|  Role: Signs operator certificates, not individual tokens               |
++--------------------------------+----------------------------------------+
+                                 |
+         +-----------------------+-----------------------+
+         |                       |                       |
+         v                       v                       v
++-----------------+     +-----------------+     +-----------------+
+|  ESA-COPERNICUS |     |     MAXAR       |     |     ICEYE       |
+|                 |     |                 |     |                 |
+|  Operator Cert  |     |  Operator Cert  |     |  Operator Cert  |
+|  (signed by     |     |  (signed by     |     |  (signed by     |
+|   federation)   |     |   federation)   |     |   federation)   |
++--------+--------+     +--------+--------+     +--------+--------+
+         |                       |                       |
+         v                       v                       v
+   +----------+            +----------+            +----------+
+   |Sentinel-1|            |WorldView |            | ICEYE-X  |
+   |Sentinel-2|            |  GeoEye  |            |  Fleet   |
+   +----------+            +----------+            +----------+
 ```
 
 #### Operator Certificate
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    OPERATOR CERTIFICATE                         │
-├────────────────────────────────────────────────────────────────┤
-│  ├── operator_id: "ESA-COPERNICUS"                             │
-│  ├── operator_name: "European Space Agency - Copernicus"       │
-│  ├── operator_pubkey: "04a1b2c3..."                            │
-│  ├── satellites: ["SENTINEL-1A", "SENTINEL-1B", ...]           │
-│  ├── capabilities_offered: [                                   │
-│  │     "imaging:sar", "imaging:msi", "data:relay"              │
-│  │   ]                                                         │
-│  ├── federation_membership: "SPACE-DATA-ASSOCIATION"           │
-│  ├── valid_from: "2024-01-01T00:00:00Z"                        │
-│  ├── valid_until: "2029-01-01T00:00:00Z"                       │
-│  └── certificate_signature: <signed by federation root>        │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    OPERATOR CERTIFICATE                         |
++----------------------------------------------------------------+
+|  +-- operator_id: "ESA-COPERNICUS"                             |
+|  +-- operator_name: "European Space Agency - Copernicus"       |
+|  +-- operator_pubkey: "04a1b2c3..."                            |
+|  +-- satellites: ["SENTINEL-1A", "SENTINEL-1B", ...]           |
+|  +-- capabilities_offered: [                                   |
+|  |     "imaging:sar", "imaging:msi", "data:relay"              |
+|  |   ]                                                         |
+|  +-- federation_membership: "SPACE-DATA-ASSOCIATION"           |
+|  +-- valid_from: "2024-01-01T00:00:00Z"                        |
+|  +-- valid_until: "2029-01-01T00:00:00Z"                       |
+|  +-- certificate_signature: <signed by federation root>        |
++----------------------------------------------------------------+
 ```
 
 #### Cross-Operator Token Verification
@@ -1731,40 +1727,40 @@ Payment release and audit require verifiable proof that tasks were executed as s
 #### Proof-of-Execution Message
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                    PROOF OF EXECUTION                           │
-├────────────────────────────────────────────────────────────────┤
-│  Header                                                        │
-│  ├── task_id: "IMG-2025-01-15-0042"                           │
-│  ├── executor: "SENTINEL-2C"                                   │
-│  ├── execution_time: "2025-01-15T14:30:00Z"                   │
-│  └── proof_type: "imaging"                                     │
-├────────────────────────────────────────────────────────────────┤
-│  Execution Summary                                             │
-│  ├── status: "completed"                                       │
-│  ├── parameters_as_executed: {                                 │
-│  │     "center_lat": 38.5,                                     │
-│  │     "center_lon": -122.3,                                   │
-│  │     "off_nadir_deg": 12.3,                                  │
-│  │     "cloud_cover_pct": 8                                    │
-│  │   }                                                         │
-│  └── deviations_from_request: []                               │
-├────────────────────────────────────────────────────────────────┤
-│  Cryptographic Proof                                           │
-│  ├── product_hash: "sha256:a1b2c3d4..."                       │
-│  ├── metadata_hash: "sha256:e5f6g7h8..."                       │
-│  ├── thumbnail_hash: "sha256:i9j0k1l2..."                      │
-│  └── merkle_root: "sha256:m3n4o5p6..."                         │
-├────────────────────────────────────────────────────────────────┤
-│  Delivery Confirmation                                         │
-│  ├── delivery_method: "isl_relay"                              │
-│  ├── delivered_to: "STARLINK-FUSION-42"                        │
-│  ├── delivery_time: "2025-01-15T14:45:00Z"                     │
-│  └── receipt_signature: <signed by recipient>                  │
-├────────────────────────────────────────────────────────────────┤
-│  Executor Signature                                            │
-│  └── ECDSA signature over all above fields                     │
-└────────────────────────────────────────────────────────────────┘
++----------------------------------------------------------------+
+|                    PROOF OF EXECUTION                           |
++----------------------------------------------------------------+
+|  Header                                                        |
+|  +-- task_id: "IMG-2025-01-15-0042"                           |
+|  +-- executor: "SENTINEL-2C"                                   |
+|  +-- execution_time: "2025-01-15T14:30:00Z"                   |
+|  +-- proof_type: "imaging"                                     |
++----------------------------------------------------------------+
+|  Execution Summary                                             |
+|  +-- status: "completed"                                       |
+|  +-- parameters_as_executed: {                                 |
+|  |     "center_lat": 38.5,                                     |
+|  |     "center_lon": -122.3,                                   |
+|  |     "off_nadir_deg": 12.3,                                  |
+|  |     "cloud_cover_pct": 8                                    |
+|  |   }                                                         |
+|  +-- deviations_from_request: []                               |
++----------------------------------------------------------------+
+|  Cryptographic Proof                                           |
+|  +-- product_hash: "sha256:a1b2c3d4..."                       |
+|  +-- metadata_hash: "sha256:e5f6g7h8..."                       |
+|  +-- thumbnail_hash: "sha256:i9j0k1l2..."                      |
+|  +-- merkle_root: "sha256:m3n4o5p6..."                         |
++----------------------------------------------------------------+
+|  Delivery Confirmation                                         |
+|  +-- delivery_method: "isl_relay"                              |
+|  +-- delivered_to: "STARLINK-FUSION-42"                        |
+|  +-- delivery_time: "2025-01-15T14:45:00Z"                     |
+|  +-- receipt_signature: <signed by recipient>                  |
++----------------------------------------------------------------+
+|  Executor Signature                                            |
+|  +-- ECDSA signature over all above fields                     |
++----------------------------------------------------------------+
 ```
 
 #### Proof Verification for Payment Release
@@ -1852,23 +1848,23 @@ Time-critical scenarios (disaster response, collision avoidance, search and resc
 Operators pre-issue emergency tokens to authorized agencies:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    PRE-AUTHORIZED EMERGENCY FRAMEWORK                    │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  Standing Agreements:                                                   │
-│  ├── International Charter: 17 space agencies, 60+ satellites          │
-│  ├── COSPAS-SARSAT: Search and rescue                                  │
-│  ├── VAAC: Volcanic ash advisories                                     │
-│  └── National agencies: FEMA, EMSA, etc.                               │
-│                                                                         │
-│  Pre-Issued Tokens:                                                     │
-│  ├── Scope: Emergency imaging, data relay                              │
-│  ├── Validity: 1 year, renewable                                       │
-│  ├── Activation: Requires activation code + emergency declaration      │
-│  └── Audit: All uses logged, reviewed quarterly                        │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------------------+
+|                    PRE-AUTHORIZED EMERGENCY FRAMEWORK                    |
++-------------------------------------------------------------------------+
+|                                                                         |
+|  Standing Agreements:                                                   |
+|  +-- International Charter: 17 space agencies, 60+ satellites          |
+|  +-- COSPAS-SARSAT: Search and rescue                                  |
+|  +-- VAAC: Volcanic ash advisories                                     |
+|  +-- National agencies: FEMA, EMSA, etc.                               |
+|                                                                         |
+|  Pre-Issued Tokens:                                                     |
+|  +-- Scope: Emergency imaging, data relay                              |
+|  +-- Validity: 1 year, renewable                                       |
+|  +-- Activation: Requires activation code + emergency declaration      |
+|  +-- Audit: All uses logged, reviewed quarterly                        |
+|                                                                         |
++-------------------------------------------------------------------------+
 ```
 
 #### Act-First Protocol (Level 3)
@@ -2005,18 +2001,18 @@ For repeated interactions, use token references:
 
 ```
 First command:
-┌─────────────────────────────────────────────┐
-│  Full token (689 bytes)                     │
-│  Command payload                            │
-│  Signature                                  │
-└─────────────────────────────────────────────┘
++---------------------------------------------+
+|  Full token (689 bytes)                     |
+|  Command payload                            |
+|  Signature                                  |
++---------------------------------------------+
 
 Subsequent commands (within session):
-┌─────────────────────────────────────────────┐
-│  Token reference: jti hash (32 bytes)       │
-│  Command payload                            │
-│  Signature                                  │
-└─────────────────────────────────────────────┘
++---------------------------------------------+
+|  Token reference: jti hash (32 bytes)       |
+|  Command payload                            |
+|  Signature                                  |
++---------------------------------------------+
 
 Target caches token by jti, validates reference against cache.
 Saves ~650 bytes per subsequent command.
@@ -2088,7 +2084,7 @@ class AuctionRound:
     task: SatelliteTask
     bids: list[TaskBid]
     round_number: int
-    consensus_state: dict[str, str]  # task_id → winning_bidder_id
+    consensus_state: dict[str, str]  # task_id -> winning_bidder_id
 
 # === Auction Protocol ===
 

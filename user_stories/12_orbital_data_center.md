@@ -31,60 +31,60 @@ This creates a 12-24 hour latency from acquisition to alert. An orbital data cen
 ### Orbital Processing Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         Data Sources (LEO)                               │
-├────────────────────┬────────────────────┬────────────────────────────────┤
-│    Sentinel-3A     │    Sentinel-3B     │         JPSS-2                 │
-│    OLCI Imager     │    OLCI Imager     │      VIIRS Imager              │
-│    (41335)         │    (43437)         │       (54234)                  │
-└─────────┬──────────┴─────────┬──────────┴──────────────┬─────────────────┘
-          │                    │                         │
-          │    Starlink ISL    │     Starlink ISL       │
-          │    (1.8 Gbps)      │     (1.8 Gbps)         │
-          │                    │                         │
-          └────────────────────┼─────────────────────────┘
-                               │
-                               ▼
-               ┌───────────────────────────────┐
-               │     Loft Orbital YAM-6        │
-               │     Orbital Data Center       │
-               │                               │
-               │  ┌─────────────────────────┐  │
-               │  │   GPU Processing Unit   │  │
-               │  │   - NVIDIA Jetson AGX   │  │
-               │  │   - 275 TOPS AI         │  │
-               │  │   - 32GB RAM            │  │
-               │  └─────────────────────────┘  │
-               │                               │
-               │  ┌─────────────────────────┐  │
-               │  │   Storage: 10 TB SSD    │  │
-               │  └─────────────────────────┘  │
-               │                               │
-               │  ┌─────────────────────────┐  │
-               │  │   Processing Pipeline   │  │
-               │  │   - Atmospheric corr.   │  │
-               │  │   - Ocean color deriv.  │  │
-               │  │   - SST calculation     │  │
-               │  │   - Anomaly detection   │  │
-               │  └─────────────────────────┘  │
-               │                               │
-               │  (NORAD 55123)                │
-               └───────────────┬───────────────┘
-                               │
++-------------------------------------------------------------------------+
+|                         Data Sources (LEO)                               |
++--------------------+--------------------+--------------------------------+
+|    Sentinel-3A     |    Sentinel-3B     |         JPSS-2                 |
+|    OLCI Imager     |    OLCI Imager     |      VIIRS Imager              |
+|    (41335)         |    (43437)         |       (54234)                  |
++---------+----------+---------+----------+--------------+-----------------+
+          |                    |                         |
+          |    Starlink ISL    |     Starlink ISL       |
+          |    (1.8 Gbps)      |     (1.8 Gbps)         |
+          |                    |                         |
+          +--------------------+-------------------------+
+                               |
+                               v
+               +-------------------------------+
+               |     Loft Orbital YAM-6        |
+               |     Orbital Data Center       |
+               |                               |
+               |  +-------------------------+  |
+               |  |   GPU Processing Unit   |  |
+               |  |   - NVIDIA Jetson AGX   |  |
+               |  |   - 275 TOPS AI         |  |
+               |  |   - 32GB RAM            |  |
+               |  +-------------------------+  |
+               |                               |
+               |  +-------------------------+  |
+               |  |   Storage: 10 TB SSD    |  |
+               |  +-------------------------+  |
+               |                               |
+               |  +-------------------------+  |
+               |  |   Processing Pipeline   |  |
+               |  |   - Atmospheric corr.   |  |
+               |  |   - Ocean color deriv.  |  |
+               |  |   - SST calculation     |  |
+               |  |   - Anomaly detection   |  |
+               |  +-------------------------+  |
+               |                               |
+               |  (NORAD 55123)                |
+               +---------------+---------------+
+                               |
                     Processed products only
                     (10% of raw data volume)
-                               │
-                               ▼
-               ┌───────────────────────────────┐
-               │    AWS Ground Station         │
-               │    Oregon                     │
-               └───────────────┬───────────────┘
-                               │
-                               ▼
-               ┌───────────────────────────────┐
-               │    NOAA Coral Reef Watch      │
-               │    Bleaching Thermal Stress   │
-               └───────────────────────────────┘
+                               |
+                               v
+               +-------------------------------+
+               |    AWS Ground Station         |
+               |    Oregon                     |
+               +---------------+---------------+
+                               |
+                               v
+               +-------------------------------+
+               |    NOAA Coral Reef Watch      |
+               |    Bleaching Thermal Stress   |
+               +-------------------------------+
 ```
 
 ### Processing Task Definition
@@ -379,7 +379,7 @@ This creates a 12-24 hour latency from acquisition to alert. An orbital data cen
 - [ ] ISL data transfers complete within 2-hour window
 - [ ] Processing completes within 3 hours
 - [ ] Output products < 5% of input data volume
-- [ ] SST accuracy within ±0.3 K
+- [ ] SST accuracy within +/-0.3 K
 - [ ] Bleaching alerts issued within 6 hours
 - [ ] 99% uptime SLA maintained
 
