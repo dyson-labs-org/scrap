@@ -158,7 +158,7 @@ This creates a 12-24 hour latency from acquisition to alert. An orbital data cen
 
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "LOFT-ORBITAL",
     "sub": "NOAA-CRW",

@@ -90,7 +90,7 @@ Each relay hop requires a delegation token:
 **Hop 1 Token (AgriTech -> Iridium 168):**
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "AGRITECH-SOLUTIONS",
     "sub": "IRIDIUM-168-56728",
@@ -114,7 +114,7 @@ Each relay hop requires a delegation token:
 **Hop 2 Token (Iridium 168 -> Iridium 172):**
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "IRIDIUM-168-56728",
     "sub": "IRIDIUM-172-56732",
@@ -138,7 +138,7 @@ Each relay hop requires a delegation token:
 **Final Execution Token (Iridium 172 -> Sentinel-2C):**
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "ESA-COPERNICUS",
     "sub": "IRIDIUM-RELAY-AUTH",

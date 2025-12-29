@@ -1,0 +1,321 @@
+; SCAP Protocol CDDL Schema
+; Satellite Capability and Payment Protocol
+; Version: 1.0.0
+; RFC 8610 Concise Data Definition Language
+;
+; Validate with: cddl scap.cddl validate message.cbor
+; Generate Rust: cddl-codegen --input scap.cddl --output src/types.rs
+
+; =============================================================================
+; COMMON TYPES
+; =============================================================================
+
+; Unix timestamp (seconds since 1970-01-01T00:00:00Z)
+timestamp = uint
+
+; NORAD catalog ID for satellite identification
+norad-id = uint
+
+; SHA-256 hash (32 bytes)
+sha256-hash = bytes .size 32
+
+; secp256k1 compressed public key (33 bytes)
+secp256k1-pubkey = bytes .size 33
+
+; secp256k1 ECDSA signature (DER encoded, 70-72 bytes typical)
+ecdsa-signature = bytes .size (70..73)
+
+; Unique identifier for tasks/tokens (UUID or custom format)
+jti = tstr .size (1..64)
+
+; Capability string (hierarchical, colon-separated)
+; Examples: "cmd:imaging:msi", "cmd:propulsion:*", "relay:task:forward"
+capability = tstr .regexp "^[a-z]+:[a-z_]+(?::[a-z_*]+)*$"
+
+; =============================================================================
+; CAPABILITY TOKEN (SAT-CAP)
+; =============================================================================
+
+capability-token = {
+    header: cap-header,
+    payload: cap-payload,
+    signature: ecdsa-signature
+}
+
+cap-header = {
+    alg: "ES256K",              ; Algorithm: ECDSA with secp256k1
+    typ: "SAT-CAP" / "SAT-CAP-DEL",  ; Token type
+    ? enc: "CBOR",              ; Encoding (implicit if absent)
+    ? chn: uint                 ; Chain depth for delegations (0 = root)
+}
+
+cap-payload = {
+    iss: tstr,                  ; Issuer (operator ID or satellite ID)
+    sub: tstr,                  ; Subject (authorized entity)
+    aud: tstr,                  ; Audience (target satellite ID)
+    iat: timestamp,             ; Issued at
+    exp: timestamp,             ; Expiration
+    jti: jti,                   ; Unique token ID
+    cap: [+ capability],        ; Granted capabilities
+    ? cns: constraints,         ; Constraints on capabilities
+    ? prf: jti,                 ; Parent token JTI (for delegations)
+    ? cmd_pub: secp256k1-pubkey ; Authorized command signing key
+}
+
+constraints = {
+    ? max_area_km2: uint,
+    ? max_range_km: float,
+    ? max_hops: uint,
+    ? geographic_bounds: geo-bounds,
+    ? time_window: time-window,
+    ? min_approach_distance_m: uint,
+    ? max_relative_velocity_m_s: float,
+    ? fuel_budget_kg: float,
+    ? abort_triggers: [+ tstr],
+    * tstr => any               ; Extension point for domain-specific constraints
+}
+
+geo-bounds = {
+    ? lat_min: float,
+    ? lat_max: float,
+    ? lon_min: float,
+    ? lon_max: float,
+    ? polygon: [[float, float]]  ; GeoJSON-style polygon coordinates
+}
+
+time-window = {
+    start: timestamp,
+    end: timestamp
+}
+
+; =============================================================================
+; BOUND TASK REQUEST
+; =============================================================================
+
+bound-task-request = {
+    capability_token: bytes,     ; CBOR-encoded capability-token
+    payment_hash: sha256-hash,   ; Lightning payment hash
+    payment_amount_msat: uint,   ; Payment amount in millisatoshi
+    htlc_timeout_blocks: uint,   ; HTLC timeout in Bitcoin blocks
+    binding_sig: ecdsa-signature ; Signature over binding-hash
+}
+
+; binding-hash = SHA256(jti || payment_hash)
+; Signed by the entity in capability_token.payload.sub
+
+; =============================================================================
+; EXECUTION PROOF
+; =============================================================================
+
+execution-proof = {
+    task_jti: jti,               ; Reference to capability token
+    payment_hash: sha256-hash,   ; Binds proof to specific HTLC
+    output_hash: sha256-hash,    ; SHA256 of task output data
+    execution_timestamp: timestamp,
+    ? output_metadata: output-metadata,
+    executor_sig: ecdsa-signature  ; Signature over proof-hash
+}
+
+; proof-hash = SHA256(task_jti || payment_hash || output_hash || timestamp)
+; Signed by the executing satellite's identity key
+
+output-metadata = {
+    ? data_size_bytes: uint,
+    ? data_format: tstr,
+    ? coverage_km2: float,
+    ? acquisition_start: timestamp,
+    ? acquisition_end: timestamp,
+    ? sensor_mode: tstr,
+    * tstr => any                ; Extension for sensor-specific metadata
+}
+
+; =============================================================================
+; DISPUTE MESSAGE
+; =============================================================================
+
+dispute-message = {
+    task_jti: jti,
+    payment_hash: sha256-hash,
+    dispute_type: dispute-type,
+    evidence: dispute-evidence,
+    timestamp: timestamp,
+    customer_sig: ecdsa-signature
+}
+
+dispute-type = "no_proof" / "invalid_proof" / "hash_mismatch" / "constraint_violation"
+
+dispute-evidence = {
+    ? proof_received: bytes,     ; The proof that was received (if any)
+    ? expected_output_hash: sha256-hash,
+    ? actual_output_hash: sha256-hash,
+    ? constraint_violated: tstr,
+    ? signature_error: tstr,
+    ? additional_data: any
+}
+
+; =============================================================================
+; TASK RESPONSE MESSAGES
+; =============================================================================
+
+task-response = task-accepted / task-rejected / task-completed / task-failed
+
+task-accepted = {
+    type: "ACCEPTED",
+    task_jti: jti,
+    accepted_at: timestamp,
+    estimated_completion: timestamp,
+    executor_sig: ecdsa-signature
+}
+
+task-rejected = {
+    type: "REJECTED",
+    task_jti: jti,
+    rejected_at: timestamp,
+    reason: rejection-reason,
+    ? detail: tstr,
+    executor_sig: ecdsa-signature
+}
+
+rejection-reason =
+    "TOKEN_EXPIRED" /
+    "TOKEN_INVALID_SIGNATURE" /
+    "CAPABILITY_DENIED" /
+    "CONSTRAINT_VIOLATION" /
+    "RESOURCE_UNAVAILABLE" /
+    "PAYMENT_INSUFFICIENT" /
+    "PAYMENT_HASH_MISMATCH" /
+    "QUEUE_FULL"
+
+task-completed = {
+    type: "COMPLETED",
+    task_jti: jti,
+    proof: execution-proof,
+    ? data_location: data-location
+}
+
+task-failed = {
+    type: "FAILED",
+    task_jti: jti,
+    failed_at: timestamp,
+    reason: failure-reason,
+    ? detail: tstr,
+    ? partial_proof: execution-proof,
+    executor_sig: ecdsa-signature
+}
+
+failure-reason =
+    "INSTRUMENT_FAULT" /
+    "ATTITUDE_ERROR" /
+    "POWER_INSUFFICIENT" /
+    "STORAGE_FULL" /
+    "TIMEOUT" /
+    "ABORTED" /
+    "RELAY_FAILED"
+
+data-location = {
+    method: "isl" / "ground_station" / "data_relay",
+    ? relay_satellite: tstr,
+    ? ground_station: tstr,
+    ? estimated_delivery: timestamp
+}
+
+; =============================================================================
+; ISL MESSAGE ENCAPSULATION
+; =============================================================================
+
+; Wrapper for all SCAP messages over ISL
+isl-scap-message = {
+    version: uint,               ; Protocol version (1)
+    msg_type: message-type,
+    sender: tstr,                ; Sender satellite ID
+    recipient: tstr,             ; Recipient satellite ID
+    sequence: uint,              ; Message sequence number
+    timestamp: timestamp,
+    payload: scap-payload,
+    ? hmac: bytes .size 32       ; Optional HMAC for integrity
+}
+
+message-type =
+    "TASK_REQUEST" /
+    "TASK_RESPONSE" /
+    "PROOF" /
+    "DISPUTE" /
+    "LIGHTNING" /                ; Encapsulated Lightning message
+    "HEARTBEAT"
+
+scap-payload =
+    bound-task-request /
+    task-response /
+    execution-proof /
+    dispute-message /
+    lightning-wrapper /
+    heartbeat
+
+; =============================================================================
+; LIGHTNING MESSAGE ENCAPSULATION
+; =============================================================================
+
+; Wrapper for Lightning Network protocol messages over ISL
+lightning-wrapper = {
+    bolt_msg_type: uint,         ; BOLT message type number
+    bolt_payload: bytes,         ; Raw BOLT message
+    ? channel_id: bytes .size 32 ; Channel identifier if applicable
+}
+
+; Common BOLT message types for reference:
+; 16: init
+; 17: error
+; 32: open_channel
+; 33: accept_channel
+; 34: funding_created
+; 35: funding_signed
+; 36: channel_ready
+; 128: update_add_htlc
+; 130: update_fulfill_htlc
+; 131: update_fail_htlc
+; 132: commitment_signed
+; 133: revoke_and_ack
+
+; =============================================================================
+; HEARTBEAT / KEEPALIVE
+; =============================================================================
+
+heartbeat = {
+    sender: tstr,
+    timestamp: timestamp,
+    ? channel_states: [* channel-state-summary],
+    ? pending_htlcs: uint,
+    ? queue_depth: uint
+}
+
+channel-state-summary = {
+    channel_id: bytes .size 32,
+    local_balance_msat: uint,
+    remote_balance_msat: uint,
+    pending_htlcs: uint,
+    state: channel-state
+}
+
+channel-state = "PENDING" / "ACTIVE" / "CLOSING" / "CLOSED" / "FORCE_CLOSING"
+
+; =============================================================================
+; CBBA AUCTION MESSAGES (Optional, for distributed task allocation)
+; =============================================================================
+
+cbba-bid = {
+    task_jti: jti,
+    bidder: tstr,                ; Satellite ID
+    cost: uint,                  ; Bid cost (internal units)
+    estimated_completion: timestamp,
+    capabilities_offered: [+ capability],
+    timestamp: timestamp,
+    bidder_sig: ecdsa-signature
+}
+
+cbba-assignment = {
+    task_jti: jti,
+    assigned_to: tstr,           ; Winning satellite ID
+    winning_bid: uint,
+    assignment_timestamp: timestamp,
+    authority_sig: ecdsa-signature
+}

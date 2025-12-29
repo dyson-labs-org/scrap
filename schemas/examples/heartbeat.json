@@ -1,0 +1,15 @@
+{
+  "sender": "SATELLITE-1-12345",
+  "timestamp": 1705320500,
+  "channel_states": [
+    {
+      "channel_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "local_balance_msat": 50000000,
+      "remote_balance_msat": 50000000,
+      "pending_htlcs": 1,
+      "state": "ACTIVE"
+    }
+  ],
+  "pending_htlcs": 1,
+  "queue_depth": 3
+}

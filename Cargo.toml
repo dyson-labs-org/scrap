@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "scap-core",
+    "scap-ffi",
+    "scap-lightning",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/dysonlabs/scap"
+
+[workspace.dependencies]
+# Shared dependencies across crates
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"      # Optimize for size (important for satellite flash)
+lto = true           # Link-time optimization
+codegen-units = 1    # Better optimization, slower compile
+panic = "abort"      # Smaller binary, no unwinding
+strip = true         # Strip symbols
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = false

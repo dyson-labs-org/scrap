@@ -468,7 +468,7 @@ Cryptographic binding between capability tokens and payment:
 {
   "task_payment_bundle": {
     "capability_token": {
-      "header": {"alg": "ES256", "typ": "SAT-CAP"},
+      "header": {"alg": "ES256K", "typ": "SAT-CAP"},
       "payload": {
         "iss": "ESA-COPERNICUS",
         "sub": "STARLINK-RELAY",
@@ -684,7 +684,7 @@ Satellites require hardware support for:
 |-----------|-----------|---------|
 | Token verification | DLEQ proofs | Verify mint signatures |
 | P2PK spending | secp256k1 ECDSA | Sign token redemption |
-| Capability tokens | ES256 | Verify task authorization |
+| Capability tokens | ES256K (secp256k1) | Verify task authorization |
 | Proof generation | SHA-256 | Create execution proofs |
 
 **Storage Requirements:**
@@ -763,7 +763,7 @@ The payment system integrates with the capability token framework from Section 1
 ```json
 {
   "capability_token_with_payment": {
-    "header": {"alg": "ES256", "typ": "SAT-CAP-PAY"},
+    "header": {"alg": "ES256K", "typ": "SAT-CAP-PAY"},
     "payload": {
       "iss": "ESA-COPERNICUS",
       "sub": "CUSTOMER-WALLET",

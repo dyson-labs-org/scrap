@@ -1,5 +1,7 @@
 # User Story 11: Multi-Constellation Disaster Response via Distributed Auction
 
+> **Note**: This user story illustrates a potential SCAP application. The distributed auction mechanism (CBBA) shown is **illustrative** and not part of the core SCAP specification. Initial deployments use pre-negotiated capability tokens. See [PROPOSAL_AUCTION.md](../PROPOSAL_AUCTION.md) for auction mechanism details.
+
 ## Summary
 
 A major tsunami triggers simultaneous tasking requests across multiple satellite constellations. A distributed CBBA auction coordinates SAR, optical, and communications satellites from different operators to maximize coverage and minimize response time.

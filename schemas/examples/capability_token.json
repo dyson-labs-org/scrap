@@ -1,0 +1,27 @@
+{
+  "header": {
+    "alg": "ES256K",
+    "typ": "SAT-CAP",
+    "enc": "CBOR"
+  },
+  "payload": {
+    "iss": "OPERATOR-TEST",
+    "sub": "SATELLITE-1-12345",
+    "aud": "SATELLITE-2-12346",
+    "iat": 1705320000,
+    "exp": 1705406400,
+    "jti": "test-imaging-001",
+    "cap": [
+      "cmd:imaging:msi",
+      "cmd:downlink:starlink"
+    ],
+    "cns": {
+      "max_area_km2": 1000,
+      "geographic_bounds": {
+        "lat_min": -60.0,
+        "lat_max": 60.0
+      }
+    }
+  },
+  "signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}

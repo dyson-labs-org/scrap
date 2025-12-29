@@ -1,0 +1,23 @@
+{
+  "header": {
+    "alg": "ES256K",
+    "typ": "SAT-CAP-DEL",
+    "chn": 1
+  },
+  "payload": {
+    "iss": "SATELLITE-1-12345",
+    "sub": "CUSTOMER-WALLET",
+    "aud": "SATELLITE-2-12346",
+    "iat": 1705320100,
+    "exp": 1705406400,
+    "jti": "test-imaging-001-del-1",
+    "prf": "test-imaging-001",
+    "cap": [
+      "cmd:imaging:msi"
+    ],
+    "cns": {
+      "max_area_km2": 500
+    }
+  },
+  "signature": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}

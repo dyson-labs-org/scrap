@@ -57,7 +57,7 @@ Pre-issued by NASA for atmospheric emergency observations:
 
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "NASA-LARC",
     "sub": "IRIDIUM-EMERGENCY-RELAY",

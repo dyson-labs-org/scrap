@@ -1,5 +1,7 @@
 # User Story 02: Wildfire Monitoring with Hyperspectral Imaging via Auction
 
+> **Note**: This user story illustrates a potential SCAP application. The distributed auction mechanism (CBBA) shown is **illustrative** and not part of the core SCAP specification. Initial deployments use pre-negotiated capability tokens. See [PROPOSAL_AUCTION.md](../PROPOSAL_AUCTION.md) for auction mechanism details.
+
 ## Summary
 
 A wildfire management agency needs hyperspectral imagery to identify active fire fronts, fuel types, and post-burn severity. Multiple hyperspectral satellites bid on the task through a distributed auction protocol, with the winner delivering data via ground station.

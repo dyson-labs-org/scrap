@@ -1,0 +1,139 @@
+{
+  "version": "1.0.0",
+  "generated": "2025-12-18T14:28:33Z",
+  "description": "Computed test vectors for SCAP protocol",
+  "capability_token": {
+    "description": "Simple imaging task capability token",
+    "keys": {
+      "operator": {
+        "private_key_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "public_key_hex": "0x034646ae5047316b4230d0086c8acec687f00b1cd9d1dc634f6cb358ac0a9a8fff"
+      }
+    },
+    "input": {
+      "header": {
+        "alg": "ES256K",
+        "typ": "SAT-CAP",
+        "enc": "CBOR"
+      },
+      "payload": {
+        "iss": "OPERATOR-TEST",
+        "sub": "SATELLITE-1-12345",
+        "aud": "SATELLITE-2-12346",
+        "iat": 1705320000,
+        "exp": 1705406400,
+        "jti": "test-imaging-001",
+        "cap": [
+          "cmd:imaging:msi"
+        ],
+        "cns": {
+          "max_area_km2": 1000
+        }
+      }
+    },
+    "computed": {
+      "header_cbor_hex": "a363616c676645533235364b63747970675341542d43415063656e636443424f52",
+      "payload_cbor_hex": "a8636973736d4f50455241544f522d544553546373756271534154454c4c4954452d312d31323334356361756471534154454c4c4954452d322d3132333436636961741a65a51e40636578701a65a66fc0636a746970746573742d696d6167696e672d30303163636170816f636d643a696d6167696e673a6d736963636e73a16c6d61785f617265615f6b6d321903e8",
+      "signing_input_hash_hex": "4962f38c3889d220bf407a70e1c5eee8574a9d3c9ffe6d72d77c370c808244eb",
+      "signature_der_hex": "3045022100d996626ab26061fce1883679eda5fd3681dbcb34438fe721a8b0697e16f282c902204b3cc67cb9d3052bfc343644d070f350d059b116982c0e46da05101379b6703f",
+      "token_complete": {
+        "header_cbor": "a363616c676645533235364b63747970675341542d43415063656e636443424f52",
+        "payload_cbor": "a8636973736d4f50455241544f522d544553546373756271534154454c4c4954452d312d31323334356361756471534154454c4c4954452d322d3132333436636961741a65a51e40636578701a65a66fc0636a746970746573742d696d6167696e672d30303163636170816f636d643a696d6167696e673a6d736963636e73a16c6d61785f617265615f6b6d321903e8",
+        "signature": "3045022100d996626ab26061fce1883679eda5fd3681dbcb34438fe721a8b0697e16f282c902204b3cc67cb9d3052bfc343644d070f350d059b116982c0e46da05101379b6703f"
+      }
+    }
+  },
+  "execution_proof": {
+    "description": "Valid execution proof for imaging task",
+    "keys": {
+      "executor": {
+        "private_key_hex": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "public_key_hex": "0x0288e2ddeb04657dbd0edadf9c1f98da3b3895faa1f00527934dd35d17542ffe9b"
+      }
+    },
+    "input": {
+      "task_jti": "test-imaging-001",
+      "payment_hash_hex": "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "output_hash_hex": "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "execution_timestamp": 1705321000
+    },
+    "computed": {
+      "proof_preimage_hex": "746573742d696d6167696e672d3030319f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8550000000065a52228",
+      "proof_hash_hex": "90e12b10bcc9fcd8e8f458feca27148102b1f8de12e98239f235751d592c5174",
+      "signature_der_hex": "304502210094200ea3808c4e5ac25557a8844bad4d009b62aec35b923f468c7510787500170220526aea86fbd587f0b2ca0283804d01543f9042bd0a61f36e052b19816370077c"
+    }
+  },
+  "payment_binding": {
+    "description": "Valid payment-capability binding",
+    "keys": {
+      "requester": {
+        "private_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "public_key_hex": "0x02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      }
+    },
+    "input": {
+      "task_jti": "test-imaging-001",
+      "payment_hash_hex": "0x9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "payment_amount_msat": 10000000,
+      "htlc_timeout_blocks": 336
+    },
+    "computed": {
+      "binding_preimage_hex": "746573742d696d6167696e672d3030319f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "binding_hash_hex": "8a2f7372d5b8a216575349b6e23da463f2164919911ebe43a6082c3285e0dee1",
+      "binding_signature_der_hex": "3045022100c0d9dcb2daf4d136c2a67cd8f33b36d69bb840752883e968da066d34f93b92a4022052c38e92411517c357d3cfbcf0cbcfb298419eeba71e0242929991258dedc07b"
+    }
+  },
+  "htlc_timeouts": [
+    {
+      "hops": 1,
+      "input": {
+        "dispute_window_blocks": 36,
+        "max_contact_gap_blocks": 12,
+        "margin_per_hop_blocks": 144
+      },
+      "computed": {
+        "timeout_chain_blocks": [
+          192
+        ],
+        "customer_timeout_blocks": 192,
+        "customer_timeout_hours": 32.0,
+        "final_timeout_blocks": 192
+      }
+    },
+    {
+      "hops": 2,
+      "input": {
+        "dispute_window_blocks": 36,
+        "max_contact_gap_blocks": 12,
+        "margin_per_hop_blocks": 144
+      },
+      "computed": {
+        "timeout_chain_blocks": [
+          336,
+          192
+        ],
+        "customer_timeout_blocks": 336,
+        "customer_timeout_hours": 56.0,
+        "final_timeout_blocks": 192
+      }
+    },
+    {
+      "hops": 3,
+      "input": {
+        "dispute_window_blocks": 36,
+        "max_contact_gap_blocks": 12,
+        "margin_per_hop_blocks": 144
+      },
+      "computed": {
+        "timeout_chain_blocks": [
+          480,
+          336,
+          192
+        ],
+        "customer_timeout_blocks": 480,
+        "customer_timeout_hours": 80.0,
+        "final_timeout_blocks": 192
+      }
+    }
+  ]
+}

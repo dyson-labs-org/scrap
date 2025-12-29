@@ -1,0 +1,47 @@
+            <!-- Slide: Payment Flow -->
+            <section>
+                <h2>Atomic Settlement: Adaptor Signatures</h2>
+                <h3>Task Completion Cryptographically Bound to Payment</h3>
+                <div class="svg-container">
+                    <svg viewBox="0 0 620 180">
+                        <!-- Requester -->
+                        <rect x="20" y="40" width="90" height="100" rx="5" fill="#1a1a2e" stroke="#42affa" stroke-width="2"/>
+                        <text x="65" y="65" fill="#42affa" text-anchor="middle" font-size="11" font-weight="bold">Requester</text>
+                        <text x="65" y="82" fill="#bbb" text-anchor="middle" font-size="10">(Sat A)</text>
+
+                        <!-- Executor -->
+                        <rect x="510" y="40" width="90" height="100" rx="5" fill="#1a1a2e" stroke="#51cf66" stroke-width="2"/>
+                        <text x="555" y="65" fill="#51cf66" text-anchor="middle" font-size="11" font-weight="bold">Executor</text>
+                        <text x="555" y="82" fill="#bbb" text-anchor="middle" font-size="10">(Sat B)</text>
+
+                        <!-- Step 1: Task + Adaptor Point -->
+                        <line x1="110" y1="55" x2="510" y2="55" stroke="#42affa" stroke-width="2"/>
+                        <polygon points="505,55 495,50 495,60" fill="#42affa"/>
+                        <text x="310" y="48" fill="#42affa" text-anchor="middle" font-size="11">1. Task Request + Adaptor Point T</text>
+
+                        <!-- Step 2: Execute -->
+                        <rect x="515" y="95" width="80" height="20" rx="3" fill="rgba(81,207,102,0.3)" stroke="#51cf66" stroke-width="1"/>
+                        <text x="555" y="109" fill="#51cf66" text-anchor="middle" font-size="10">2. Execute</text>
+
+                        <!-- Step 3: Proof + Adaptor Sig -->
+                        <line x1="510" y1="125" x2="110" y2="125" stroke="#51cf66" stroke-width="2"/>
+                        <polygon points="115,125 125,120 125,130" fill="#51cf66"/>
+                        <text x="310" y="118" fill="#51cf66" text-anchor="middle" font-size="11">3. Proof + Adaptor Signature s'</text>
+
+                        <!-- Step 4: Complete signature -->
+                        <rect x="180" y="145" width="260" height="30" rx="5" fill="rgba(247,183,49,0.2)" stroke="#f7b731" stroke-width="1"/>
+                        <text x="310" y="164" fill="#f7b731" text-anchor="middle" font-size="11">4. Requester completes: s = s' + t → Claims payment</text>
+
+                        <!-- Math box -->
+                        <rect x="170" y="5" width="280" height="30" rx="5" fill="rgba(66,175,250,0.1)" stroke="#42affa" stroke-width="1"/>
+                        <text x="310" y="24" fill="#42affa" text-anchor="middle" font-size="11">T = t·G (adaptor point) | s' = k - H(m)·x (partial sig)</text>
+                    </svg>
+                </div>
+                <table style="font-size: 0.6em;">
+                    <tr><th>Property</th><th>Guarantee</th></tr>
+                    <tr><td>Atomicity</td><td>Executor reveals t only with valid proof → payment claimable</td></tr>
+                    <tr><td>Fairness</td><td>Requester can't claim without receiving proof</td></tr>
+                    <tr><td>Timeout</td><td>6-hour window; defaults to executor (real costs incurred)</td></tr>
+                </table>
+                <p style="font-size: 0.75em;"><strong class="success">Result:</strong> Either task completes AND payment settles, OR timeout refunds requester</p>
+            </section>

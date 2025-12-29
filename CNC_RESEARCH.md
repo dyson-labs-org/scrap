@@ -547,6 +547,40 @@ Operators provide turnkey platforms that third parties can deploy under their ow
 
 **Key Access:** Session keys are never exposed to third parties. Authorization flows through the operator's authenticated systems.
 
+### Authentication Methods Taxonomy
+
+Based on recent surveys of satellite authentication systems:
+
+| Method | Mechanism | Real-time | Security | Quantum-Safe |
+|--------|-----------|-----------|----------|--------------|
+| **Cryptography (ECDSA/AES)** | Digital signatures, symmetric encryption | High | High | No |
+| **Blockchain** | Distributed ledger, consensus | Low | High | Partial |
+| **Orbital Parameters** | Position/velocity as auth factor | Low | Medium | Yes |
+| **AKA Protocol** | Adapted from mobile networks | Medium | Medium | No |
+| **Hardware (PUF/HSM)** | Physical unclonable functions | High | High | Partial |
+
+Cryptography-based methods dominate operational systems due to real-time requirements, though blockchain approaches show promise for audit trails and cross-operator coordination.
+
+### Gap Analysis: What Current Systems Cannot Do
+
+| Capability | CCSDS SDLS | Commercial API | Zero-Trust ISL |
+|------------|------------|----------------|----------------|
+| Ground-to-satellite auth | ✓ | ✓ (indirect) | — |
+| Satellite-to-satellite auth | — | — | ✓ |
+| Third-party direct authorization | — | — | — |
+| Delegation chains | — | — | — |
+| Capability attenuation | — | — | — |
+| Payment integration | — | — | — |
+| Cross-operator (real-time) | — | — | — |
+
+**Critical limitation**: All current systems use either symmetric keys (CCSDS SDLS) or operator-mediated APIs. There is no mechanism for:
+
+1. **Delegation**: Operator A cannot authorize Satellite X to command Operator B's Satellite Y
+2. **Attenuation**: Granted access is all-or-nothing within a category (no "image up to 100 km² only")
+3. **Direct cross-operator**: ESA tasking a Planet satellite requires days of business process, not minutes of protocol
+
+The fundamental issue: **symmetric keys cannot support delegation**. Only the key holder can authenticate. Asymmetric signatures allow anyone to verify without being able to forge.
+
 ---
 
 ## 8. Commercial Tasking APIs
@@ -2030,9 +2064,9 @@ At 9.6 kbps (typical S-band TT&C):
 
 For time-critical operations, 0.7 second savings per command is significant.
 
-### 11.14 Implications for Tasklib
+### 11.14 Implications for SCAP
 
-The capability token and auction models suggest tasklib should support:
+The capability token and auction models suggest SCAP should support:
 
 ```python
 # === Authorization Layer ===
@@ -2107,7 +2141,7 @@ class CBBAAuction:
 
 ---
 
-## 12. Summary: Tasklib Design Considerations
+## 12. Summary: SCAP Design Considerations
 
 ### Key Design Requirements
 

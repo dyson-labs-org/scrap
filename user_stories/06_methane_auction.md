@@ -1,5 +1,7 @@
 # User Story 06: Methane Super-Emitter Detection via Constellation Auction
 
+> **Note**: This user story illustrates a potential SCAP application. The distributed auction mechanism (CBBA) shown is **illustrative** and not part of the core SCAP specification. Initial deployments use pre-negotiated capability tokens. See [PROPOSAL_AUCTION.md](../PROPOSAL_AUCTION.md) for auction mechanism details.
+
 ## Summary
 
 An environmental NGO needs rapid detection and quantification of methane super-emitters at suspected oil and gas facilities. Multiple satellites with methane detection capability bid on the task through a CBBA auction, with the winner providing point-source emission rates.

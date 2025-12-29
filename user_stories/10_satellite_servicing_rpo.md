@@ -92,7 +92,7 @@ Intelsat pre-authorizes MEV-3 docking:
 
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "INTELSAT-OPS",
     "sub": "NGC-MEV-3",

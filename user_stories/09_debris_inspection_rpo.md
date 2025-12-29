@@ -72,7 +72,7 @@ LeoLabs pre-negotiated authorization with Astroscale for debris inspection:
 
 ```json
 {
-  "header": { "alg": "ES256", "typ": "SAT-CAP" },
+  "header": { "alg": "ES256K", "typ": "SAT-CAP" },
   "payload": {
     "iss": "ASTROSCALE-OPS",
     "sub": "LEOLABS-SSA",

@@ -1,0 +1,18 @@
+[package]
+name = "scap-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI bindings for SCAP protocol"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+scap-core = { path = "../scap-core" }
+
+[dev-dependencies]
+hex = "0.4"
+
+[build-dependencies]
+cbindgen = "0.26"
