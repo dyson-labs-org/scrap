@@ -16,7 +16,7 @@ This document specifies a payment protocol for inter-satellite task execution us
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  This glossary defines the key entities referenced throughout this          │
-│  document and PROPOSAL_CHANNELS.md.                                         │
+│  document and CHANNELS.md.                                         │
 │                                                                             │
 │  CUSTOMER:                                                                  │
 │  ─────────                                                                  │
@@ -92,7 +92,7 @@ This document specifies a payment protocol for inter-satellite task execution us
 │    - Monitors for old channel state broadcasts                              │
 │    - Responds with latest state (LN-Symmetry rebinding)                     │
 │    - Operated by operators for their satellites                             │
-│    - See PROPOSAL_CHANNELS.md Section 7 for details                         │
+│    - See CHANNELS.md Section 7 for details                         │
 │                                                                             │
 │  ENTITY RELATIONSHIPS:                                                      │
 │  ─────────────────────                                                      │
@@ -833,7 +833,7 @@ For acknowledgment signatures to serve as adaptor secrets, the acknowledging par
 │  UNIFIED ADAPTOR CONVENTION:                                                │
 │  ───────────────────────────                                                │
 │    This script structure is IDENTICAL to payment channel PTLCs              │
-│    (see PROPOSAL_CHANNELS.md). The unified convention:                      │
+│    (see CHANNELS.md). The unified convention:                      │
 │      □ Receiver (satellite) creates adaptor signature                       │
 │      □ Receiver uses own key in claim script                                │
 │      □ Adaptor point T provided by protocol (task or channel)               │
@@ -1605,7 +1605,7 @@ For acknowledgment signatures to serve as adaptor secrets, the acknowledging par
 │      2. Create adaptor sig: adaptor_create(P_satellite, claim_tx, T)        │
 │      3. Store adaptor_sig locally for later claim                           │
 │                                                                             │
-│    This UNIFIED convention matches payment channels (PROPOSAL_CHANNELS.md)  │
+│    This UNIFIED convention matches payment channels (CHANNELS.md)  │
 │    and enables smooth upgrade from on-chain PTLCs to channel PTLCs.         │
 │                                                                             │
 │  ENCRYPTION:                                                                │
@@ -2826,7 +2826,7 @@ For acknowledgment signatures to serve as adaptor secrets, the acknowledging par
 
 ## 14. Unified Infrastructure (Shared with Payment Channels)
 
-This section documents components shared between on-chain PTLCs (this document) and payment channels (PROPOSAL_CHANNELS.md). Implementing these uniformly enables smooth upgrade from Phase 1 (on-chain) to Phase 2 (channels).
+This section documents components shared between on-chain PTLCs (this document) and payment channels (CHANNELS.md). Implementing these uniformly enables smooth upgrade from Phase 1 (on-chain) to Phase 2 (channels).
 
 ### 14.1 Unified Adaptor Signature Convention
 
@@ -2845,7 +2845,7 @@ This section documents components shared between on-chain PTLCs (this document) 
 │                                                                             │
 │  USED BY BOTH:                                                              │
 │    □ On-chain PTLCs (this document): Satellite creates adaptor for claim    │
-│    □ Payment channels (PROPOSAL_CHANNELS.md): Receiver creates adaptor      │
+│    □ Payment channels (CHANNELS.md): Receiver creates adaptor      │
 │                                                                             │
 │  ADAPTOR POINT SOURCE:                                                      │
 │    On-chain: T = R_last + e·P_last (signature-as-secret from delivery ack)  │
@@ -3107,7 +3107,7 @@ This section documents components shared between on-chain PTLCs (this document) 
 │  Channels            T = R_last + e·P_last     T = z·G (receiver)           │
 │                      Delivery proof            No delivery proof            │
 │                      Instant settlement        Instant settlement           │
-│                      (PROPOSAL_CHANNELS.md)    (PROPOSAL_CHANNELS.md)       │
+│                      (CHANNELS.md)    (CHANNELS.md)       │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -3193,7 +3193,7 @@ This section documents components shared between on-chain PTLCs (this document) 
 │      □ Settlement requires ground contact for PTLC claims                   │
 │      □ Delivery proof via signature-as-secret                               │
 │                                                                             │
-│  PHASE 2: OPERATOR CHANNELS (PROPOSAL_CHANNELS.md)                          │
+│  PHASE 2: OPERATOR CHANNELS (CHANNELS.md)                          │
 │  ─────────────────────────────────────────────────                          │
 │    Status: Standard Lightning (no soft fork needed for basic version)       │
 │    Dependencies: Operators maintain Lightning nodes                         │

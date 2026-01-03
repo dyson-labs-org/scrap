@@ -1,0 +1,39 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# Claude Code
+.claude/
+
+# Generated presentations (built from .md sources)
+presentations/*.html
+presentations/*.pdf
+presentations/.tmp-*.md
+presentations/_static/
+presentations/dist/
+
+# OS
+Thumbs.db

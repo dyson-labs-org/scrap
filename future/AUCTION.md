@@ -1,4 +1,4 @@
-# PROPOSAL_AUCTION: Distributed Task Allocation (CBBA)
+# Distributed Task Allocation (CBBA) - Future Extension
 
 ## Status: Future / Illustrative
 

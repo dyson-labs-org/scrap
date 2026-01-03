@@ -3,7 +3,7 @@
 **Status:** Draft Proposal
 **Version:** 0x02
 **Date:** 2025-12-17
-**Based on:** CCSDS Proximity-1, CCSDS SDLS, Signal X3DH, PROPOSAL_PTLC.md
+**Based on:** CCSDS Proximity-1, CCSDS SDLS, Signal X3DH, [PTLC.md](PTLC.md)
 
 ---
 
@@ -23,7 +23,7 @@ SISL is the **link layer** in a multi-layer security architecture:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ APPLICATION: Onion Task Packets (per PROPOSAL_PTLC.md Section 7.1)      │
+│ APPLICATION: Onion Task Packets (per PTLC.md Section 7.1)               │
 │   End-to-end encryption through untrusted relays                        │
 │   ChaCha20-Poly1305 per-hop encryption                                  │
 │   secp256k1 ECDH key derivation, ephemeral key rotation                 │
@@ -39,7 +39,7 @@ SISL is the **link layer** in a multi-layer security architecture:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-**End-to-end security** is provided by the onion layer (PROPOSAL_PTLC.md). Intermediate relay satellites cannot read payload content.
+**End-to-end security** is provided by the onion layer ([PTLC.md](PTLC.md)). Intermediate relay satellites cannot read payload content.
 
 **Link security** is provided by SISL. Each hop is mutually authenticated with forward secrecy.
 
@@ -86,7 +86,7 @@ Current satellite communication protocols have limitations for ad-hoc ISL:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ LAYER 7: APPLICATION                                                    │
-│   Onion task packets (per PROPOSAL_PTLC.md 7.1)                         │
+│   Onion task packets (per PTLC.md 7.1)                         │
 │   ≤50 KB per session, end-to-end encrypted                              │
 ├─────────────────────────────────────────────────────────────────────────┤
 │ LAYER 6: SISL SECURITY SUBLAYER                                         │
@@ -134,8 +134,8 @@ P_identity = k_identity · G
 
 This key is used for:
 - X3DH key agreement (SISL link establishment)
-- Onion decryption (per PROPOSAL_PTLC.md)
-- Payment operations (per PROPOSAL_CHANNELS.md)
+- Onion decryption (per PTLC.md)
+- Payment operations (per CHANNELS.md)
 
 **Key distribution**: Operators uplink trust lists to their satellites during ground contact. Each satellite stores `{norad_id: secp256k1_pubkey}` mappings for satellites it is authorized to communicate with. Trust is rooted in the operator relationship, not a global PKI.
 
@@ -857,7 +857,7 @@ T-5min    T-2min    T=0       T+2min    T+5min
 | **Anti-replay** | Nonce in hail, IV from sequence in frames |
 | **LPI/LPD** | Session-derived spread spectrum |
 | **Traffic analysis resistance** | Source NORAD encrypted in hail |
-| **End-to-end through relays** | Onion encryption (PROPOSAL_PTLC.md) |
+| **End-to-end through relays** | Onion encryption (PTLC.md) |
 
 ---
 
@@ -900,7 +900,7 @@ See `SPRINT_RADIOS.md` for database schema.
 
 Satellites use the **same secp256k1 identity key** for:
 - X3DH link authentication (SISL)
-- Onion packet decryption (PROPOSAL_PTLC.md)
+- Onion packet decryption (PTLC.md)
 - PTLC adaptor signatures
 - LN-Symmetry channel operations
 
@@ -912,7 +912,7 @@ SISL carries onion-encrypted task packets as payload:
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ SISL Frame Payload                                                      │
 │ ┌─────────────────────────────────────────────────────────────────────┐ │
-│ │ Onion Task Packet (per PROPOSAL_PTLC.md 7.1)                        │ │
+│ │ Onion Task Packet (per PTLC.md 7.1)                        │ │
 │ │   - Outer envelope (first_hop, ephemeral_pubkey)                    │ │
 │ │   - Funding transaction (Tx_1)                                      │ │
 │ │   - Encrypted per-hop payload (routing, task, payment)              │ │
@@ -995,8 +995,8 @@ The `Flags` field in hail body indicates capabilities:
 6. Signal X3DH Specification: https://signal.org/docs/specifications/x3dh/
 7. BIP-340: Schnorr Signatures for secp256k1
 8. RFC 8446: TLS 1.3
-9. PROPOSAL_PTLC.md: Satellite Task Payment Protocol
-10. PROPOSAL_CHANNELS.md: Satellite Payment Channels
+9. PTLC.md: Satellite Task Payment Protocol
+10. CHANNELS.md: Satellite Payment Channels
 
 ---
 

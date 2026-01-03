@@ -76,7 +76,7 @@ Current systems cannot support delegation because they rely on symmetric keys—
 - Capability attenuation (delegate can only narrow permissions, never expand)
 - Cross-operator authorization (without sharing secrets)
 
-See CNC_RESEARCH.md §7 "Gap Analysis" for detailed comparison with CCSDS SDLS, commercial APIs, and emerging ISL authentication protocols.
+See [../research/CNC_RESEARCH.md](../research/CNC_RESEARCH.md) §7 "Gap Analysis" for detailed comparison with CCSDS SDLS, commercial APIs, and emerging ISL authentication protocols.
 
 > **Naming**: SCAP complements the protocol stack: **SISL** (Secure Inter-Satellite Link) at the link layer, **SCAP** at the payment/authorization layer, and **SAT-CAP** tokens for capability delegation.
 
@@ -134,21 +134,26 @@ See CNC_RESEARCH.md §7 "Gap Analysis" for detailed comparison with CCSDS SDLS, 
 +-----------------------------------------------------------------------------+
 ```
 
-### 1.6 Service Discovery
+### 1.6 Service Discovery and Token Issuance
 
-Service discovery is **out of band** and not part of the SCAP protocol:
+Service discovery and token issuance occur **before** the on-orbit protocol:
 
-- Operators register available capabilities via external registry (web service)
-- Customers browse registry, negotiate capability tokens offline before mission
-- Tokens are uploaded to satellites during ground contact windows
-- Protocol assumes capability tokens already exist; discovery is a business layer concern
+- Operators run internet-accessible **Operator API** endpoints
+- Customers authenticate via OAuth2 and request capability tokens
+- Tokens are uploaded to commanding satellites during ground contact windows
+- On-orbit protocol assumes capability tokens already exist
 
-**SCAP does not specify:**
-- Capability advertisement messages
-- Registry API or data formats
-- Pricing negotiation protocols
+**Operator API** ([OPERATOR_API.md](OPERATOR_API.md)) specifies:
 
-This separation keeps the on-orbit protocol simple and deterministic. Satellites verify pre-arranged tokens; they do not participate in service discovery.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /operator` | Operator signing pubkey (trust root) |
+| `GET /satellites` | Satellite catalog with identity pubkeys |
+| `POST /tokens` | Request signed capability token |
+| `GET /tokens/{jti}` | Token status and revocation |
+| `GET /channels` | Lightning channel info for settlement |
+
+This separation keeps the on-orbit protocol simple and deterministic. Satellites verify pre-arranged tokens; they do not participate in service discovery or token issuance.
 
 ---
 
@@ -389,7 +394,7 @@ These are **operator implementation details**:
 
 **Key Insight**: Satellite-to-satellite channels don't work due to sparse ISL connectivity. Multi-hop Lightning requires real-time coordination that's impossible with intermittent ISL windows. Moving payment logic to operators (who are always online) solves this.
 
-See PROPOSAL_CHANNELS.md §2.3 "Why Satellite Channels Don't Work" for detailed analysis.
+See [CHANNELS.md](CHANNELS.md) §2.3 "Why Satellite Channels Don't Work" for detailed analysis.
 
 ### 3.2 HTLC Mechanics
 
@@ -835,7 +840,7 @@ Satellite D (final):
 
 **Rationale**: Source routing simplifies satellite firmware (no routing protocol needed), enables route privacy (intermediate hops don't know full path), and allows ground operators to optimize routes based on current orbital geometry.
 
-See PROPOSAL_PTLC.md §7 for detailed onion packet format.
+See [PTLC.md](PTLC.md) §7 for detailed onion packet format.
 
 ### 5.6 Ground Relay Hops
 
@@ -1895,7 +1900,7 @@ The initial demonstration uses **UHF inter-satellite links** on existing CubeSat
 |--------|----------|-------------------|
 | **ISL Band** | 435-438 MHz (amateur/experimental) | Optical (1550nm) or Ka-band |
 | **Data Rate** | ~9.6 kbps | 25+ Gbps |
-| **Regulatory** | Amateur/experimental (jurisdiction-dependent) | Per AGS_PROPOSAL.md |
+| **Regulatory** | Amateur/experimental (jurisdiction-dependent) | Per [../future/AGS.md](../future/AGS.md) |
 
 **UHF ISL Capability**:
 - ✓ Relay: capability tokens (~1 KB)

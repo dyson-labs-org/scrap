@@ -1,6 +1,6 @@
 # User Story 02: Wildfire Monitoring with Hyperspectral Imaging via Auction
 
-> **Note**: This user story illustrates a potential SCAP application. The distributed auction mechanism (CBBA) shown is **illustrative** and not part of the core SCAP specification. Initial deployments use pre-negotiated capability tokens. See [PROPOSAL_AUCTION.md](../PROPOSAL_AUCTION.md) for auction mechanism details.
+> **Note**: This user story illustrates a potential SCAP application. The distributed auction mechanism (CBBA) shown is **illustrative** and not part of the core SCAP specification. Initial deployments use pre-negotiated capability tokens. See [AUCTION.md](../future/AUCTION.md) for auction mechanism details.
 
 ## Summary
 
