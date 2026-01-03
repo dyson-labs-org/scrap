@@ -1,0 +1,107 @@
+/* Dyson Labs Presentation Theme */
+
+:root {
+    --r-background-color: #0d1117;
+    --r-main-font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --r-heading-font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --r-main-color: #e6edf3;
+    --r-heading-color: #58a6ff;
+    --r-link-color: #58a6ff;
+}
+
+.reveal {
+    font-size: 32px;
+}
+
+.reveal h1 {
+    font-size: 2.2em;
+    color: #58a6ff;
+}
+
+.reveal h2 {
+    font-size: 1.6em;
+    color: #58a6ff;
+}
+
+.reveal h3 {
+    font-size: 1.1em;
+    color: #8b949e;
+    font-weight: 400;
+}
+
+.reveal table {
+    font-size: 0.7em;
+    margin: 0.5em auto;
+}
+
+.reveal th {
+    background: rgba(88, 166, 255, 0.2);
+}
+
+.reveal td,
+.reveal th {
+    padding: 0.4em 0.8em;
+    border: 1px solid #30363d;
+}
+
+.reveal code {
+    background: #161b22;
+    padding: 0.2em 0.4em;
+    border-radius: 4px;
+}
+
+.reveal pre {
+    background: #161b22;
+    border-radius: 8px;
+}
+
+.reveal blockquote {
+    background: rgba(88, 166, 255, 0.1);
+    border-left: 4px solid #58a6ff;
+    padding: 1em;
+    font-style: italic;
+}
+
+/* Mermaid diagram styling */
+.mermaid,
+.mermaid-rendered {
+    background: transparent !important;
+    display: flex;
+    justify-content: center;
+}
+
+.mermaid-rendered svg {
+    max-width: 100%;
+    max-height: 450px;
+}
+
+/* Fix edge label clipping - add padding for descenders */
+.mermaid-rendered .edgeLabel {
+    padding: 4px 8px !important;
+}
+
+.mermaid-rendered .edgeLabel foreignObject {
+    overflow: visible !important;
+}
+
+.mermaid-rendered .edgeLabel div {
+    padding-bottom: 4px !important;
+}
+
+/* Center code blocks containing mermaid */
+.reveal pre {
+    display: flex;
+    justify-content: center;
+}
+
+/* Hide code blocks that will be rendered as mermaid */
+pre:has(code.language-mermaid) {
+    background: transparent;
+    box-shadow: none;
+}
+
+/* Color classes */
+.highlight { color: #58a6ff; }
+.success { color: #3fb950; }
+.warn { color: #f85149; }
+.gold { color: #d29922; }
