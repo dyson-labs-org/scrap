@@ -131,7 +131,11 @@ INDEX_HTML = '''<!DOCTYPE html>
                 <a href="stories.html" class="card">
                     <h3>All Stories (Slideshow)</h3>
                     <p>Browse all user stories as a presentation</p>
+                    <span class="badge recommended">Start Here</span>
                 </a>
+            </div>
+            <div class="grid" style="margin-top: 1rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
+{story_links}
             </div>
         </div>
         <footer>
@@ -219,24 +223,47 @@ PRESENTATIONS = [
     ('.tmp-stories.md', 'stories.html', 'User Stories'),
 ]
 
+def extract_story_title(filepath):
+    """Extract title from story markdown (first ## heading)"""
+    with open(filepath) as f:
+        for line in f:
+            if line.startswith('## '):
+                return line[3:].strip()
+    # Fallback to filename
+    name = os.path.basename(filepath).replace('.md', '').replace('_', ' ')
+    return name.title()
+
 def build_stories_md():
-    """Concatenate all stories/*.md into .tmp-stories.md"""
+    """Concatenate all stories/*.md into .tmp-stories.md, return list of (title, index)"""
     story_files = sorted(glob.glob('stories/*.md'))
     if not story_files:
-        return False
+        return []
+    stories = []
     with open('.tmp-stories.md', 'w') as out:
-        for sf in story_files:
+        for i, sf in enumerate(story_files):
+            title = extract_story_title(sf)
+            stories.append((title, i))
             with open(sf) as f:
                 out.write(f.read())
             out.write('\n\n---\n\n')
-    return True
+    return stories
+
+def generate_story_links(stories):
+    """Generate HTML links for each story"""
+    links = []
+    for title, idx in stories:
+        links.append(f'''                <a href="stories.html#/{idx}" class="card" style="padding: 1rem;">
+                    <h3 style="font-size: 0.95rem;">{title}</h3>
+                </a>''')
+    return '\n'.join(links)
 
 if __name__ == "__main__":
     print("Building investor portal presentations...")
 
-    # Build stories markdown if stories exist
-    if build_stories_md():
-        print("  Assembled stories from stories/*.md")
+    # Build stories markdown and get list of stories
+    stories = build_stories_md()
+    if stories:
+        print(f"  Assembled {len(stories)} stories from stories/*.md")
 
     # Build presentation HTML files
     for md, html, title in PRESENTATIONS:
@@ -245,9 +272,11 @@ if __name__ == "__main__":
         else:
             print(f"  Skipping {md} (not found)")
 
-    # Write index.html
+    # Write index.html with story links
+    story_links = generate_story_links(stories) if stories else ""
+    index_html = INDEX_HTML.replace('{story_links}', story_links)
     with open('index.html', 'w') as f:
-        f.write(INDEX_HTML)
+        f.write(index_html)
     print("  Built: index.html")
 
     print("Done.")
