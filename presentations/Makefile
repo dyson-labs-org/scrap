@@ -28,6 +28,7 @@ COMMON_SLIDES := \
 	common/roadmap.md \
 	common/implementation.md \
 	common/risks.md \
+	common/team.md \
 	common/summary.md
 
 # Audience-specific slides - edit to reorder or add slides per audience
@@ -50,7 +51,8 @@ COMMERCIAL_SLIDES := \
 COFOUNDER_COMMON := \
 	common/title.md \
 	common/problem.md \
-	common/vision.md
+	common/vision.md \
+	common/team.md
 
 COFOUNDER_SLIDES := \
 	cofounder/opportunity.md \
