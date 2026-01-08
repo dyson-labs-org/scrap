@@ -617,6 +617,7 @@ if __name__ == "__main__":
     print(f"    ./serve.py --add-user newuser password")
     print(f"\n  Press Ctrl+C to stop.\n")
 
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer((BIND_ADDRESS, PORT), PortalHandler) as httpd:
         try:
             httpd.serve_forever()
