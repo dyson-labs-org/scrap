@@ -825,15 +825,58 @@ T-5min    T-2min    T=0       T+2min    T+5min
 
 ### 12.2 Link Budget (500 km, S-band 2.4 GHz)
 
-| Parameter | Value |
-|-----------|-------|
-| Path loss | ~158 dB |
-| TX power | 1W (30 dBm) |
-| Antenna gain | 0 dBi (omni) |
-| Received power | ~-128 dBm |
-| SDR sensitivity | -120 dBm (narrowband) |
-| DSSS processing gain | +17 dB |
-| Margin | ~9 dB |
+**Common Parameters**:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| TX power | 1W (30 dBm) | |
+| TX antenna gain | 0 dBi | Omnidirectional |
+| Path loss (500 km) | 158 dB | Free space: 20×log10(d) + 20×log10(f) + 32.45 |
+| RX antenna gain | 0 dBi | Omnidirectional |
+| **Received power** | **-128 dBm** | |
+| Noise density (kT) | -174 dBm/Hz | 290K system temperature |
+
+**Hailing Channel** (5 Mcps, 1 kbps data rate):
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Signal bandwidth | 5 MHz | Chip rate |
+| Noise floor (5 MHz) | -107 dBm | -174 + 10×log10(5×10⁶) |
+| SNR before despread | -21 dB | Signal below noise floor |
+| Processing gain | +37 dB | 10×log10(5×10⁶ / 1×10³) |
+| **SNR after despread** | **+16 dB** | |
+| Required Eb/N0 | 2.5 dB | BER 10⁻⁶ with FEC |
+| **Link margin** | **13.5 dB** | Robust for acquisition |
+
+**P2P Channel** (5 Mcps, variable data rate):
+
+| Data Rate | Processing Gain | SNR After Despread | Margin | Status |
+|-----------|-----------------|-------------------|--------|--------|
+| 10 kbps | 27 dB | +6 dB | 3.5 dB | Marginal |
+| 25 kbps | 23 dB | +2 dB | -0.5 dB | **Does not close** |
+| 50 kbps | 20 dB | -1 dB | -3.5 dB | **Does not close** |
+| 100 kbps | 17 dB | -4 dB | -6.5 dB | **Does not close** |
+
+**To achieve higher data rates at 500 km**, use directional antennas:
+
+| Configuration | Additional Gain | Max Data Rate (3 dB margin) |
+|---------------|-----------------|----------------------------|
+| Omni + Omni | 0 dB | ~10 kbps |
+| Omni + 10 dBi patch | +10 dB | ~50 kbps |
+| 10 dBi + 10 dBi | +20 dB | ~250 kbps |
+
+**Alternatively**, reduce range for higher throughput with omni antennas:
+
+| Range | Path Loss | SNR (after 17 dB gain) | Margin at 100 kbps |
+|-------|-----------|------------------------|-------------------|
+| 500 km | 158 dB | -4 dB | -6.5 dB |
+| 200 km | 150 dB | +4 dB | +1.5 dB (marginal) |
+| 100 km | 144 dB | +10 dB | +7.5 dB |
+| 50 km | 138 dB | +16 dB | +13.5 dB |
+
+**Recommendation**: For LEO proximity operations (< 100 km), 100 kbps is achievable with omnidirectional antennas. For longer ranges, use directional antennas or reduce data rate.
+
+**Note**: Hailing always uses 1 kbps for robust acquisition regardless of range. After link establishment, P2P data rate is negotiated based on measured SNR.
 
 ### 12.3 Data Transfer Time
 

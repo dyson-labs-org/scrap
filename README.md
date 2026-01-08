@@ -108,6 +108,7 @@ scap/
 | Document | Description |
 |----------|-------------|
 | [strategy/ROADMAP.md](strategy/ROADMAP.md) | Development roadmap and phasing |
+| [strategy/TRL.md](strategy/TRL.md) | Technology Readiness Level progression, demos, hardware |
 | [strategy/FUNDING.md](strategy/FUNDING.md) | Grant opportunities (NASA, DARPA, NSF, etc.) |
 | [strategy/STANDARDIZATION.md](strategy/STANDARDIZATION.md) | CCSDS/ITU standardization path |
 | [strategy/REGULATORY.md](strategy/REGULATORY.md) | Spectrum and regulatory considerations |
