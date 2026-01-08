@@ -44,6 +44,7 @@ BIND_ADDRESS = "0.0.0.0"
 HTPASSWD_FILE = ".htpasswd"
 ACCESS_LOG = "access.log"
 REALM = "Dyson Labs Portal"
+ADMIN_USERS = ["calvin", "bob"]
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -183,6 +184,125 @@ MARKDOWN_TEMPLATE = '''<!DOCTYPE html>
 </html>
 '''
 
+ADMIN_TEMPLATE = '''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Admin - Dyson Labs</title>
+    <style>
+        :root {{
+            --bg: #0d1117;
+            --card-bg: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --muted: #8b949e;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }}
+        h1 {{ color: var(--accent); margin-bottom: 0.5rem; }}
+        h2 {{ color: var(--accent); font-size: 1.2rem; margin: 2rem 0 1rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }}
+        .nav {{ margin-bottom: 2rem; }}
+        .nav a {{ color: var(--accent); text-decoration: none; }}
+        .nav a:hover {{ text-decoration: underline; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; }}
+        th, td {{ padding: 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }}
+        th {{ color: var(--muted); font-weight: 500; }}
+        .warning {{ color: var(--red); font-weight: bold; }}
+        .form-box {{
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+        }}
+        input[type="text"] {{
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.5rem 0.75rem;
+            color: var(--text);
+            font-size: 1rem;
+            width: 200px;
+        }}
+        button {{
+            background: var(--accent);
+            color: var(--bg);
+            border: none;
+            border-radius: 4px;
+            padding: 0.5rem 1rem;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-left: 0.5rem;
+        }}
+        button:hover {{ opacity: 0.9; }}
+        .result {{
+            background: var(--card-bg);
+            border: 1px solid var(--green);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }}
+        .result code {{
+            background: var(--bg);
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-family: monospace;
+            user-select: all;
+        }}
+        .muted {{ color: var(--muted); }}
+    </style>
+</head>
+<body>
+    <div class="nav"><a href="/">← Presentations</a></div>
+    <h1>Admin Panel</h1>
+    <p class="muted">Access restricted to: {admin_users}</p>
+
+    {result_html}
+
+    <h2>Add New User</h2>
+    <div class="form-box">
+        <form method="POST" action="/admin">
+            <label for="username">Username:</label>
+            <input type="text" id="username" name="username" required pattern="[a-zA-Z0-9_-]+" placeholder="newuser">
+            <button type="submit">Generate Password</button>
+        </form>
+        <p class="muted" style="margin-top: 0.75rem; font-size: 0.85rem;">
+            A random password will be generated and saved to .htpasswd
+        </p>
+    </div>
+
+    <h2>Access Statistics</h2>
+    <p class="muted">Users with 3+ unique IPs or devices are flagged for potential credential sharing.</p>
+    <table>
+        <tr>
+            <th>User</th>
+            <th>Accesses</th>
+            <th>Unique IPs</th>
+            <th>Devices</th>
+            <th>Last Access</th>
+        </tr>
+        {stats_rows}
+    </table>
+
+    <h2>Registered Users</h2>
+    <p class="muted">Users in .htpasswd file:</p>
+    <ul style="margin: 1rem 0; padding-left: 1.5rem;">
+        {user_list}
+    </ul>
+</body>
+</html>
+'''
+
 DOCS_INDEX_TEMPLATE = '''<!DOCTYPE html>
 <html>
 <head>
@@ -270,6 +390,14 @@ class PortalHandler(http.server.SimpleHTTPRequestHandler):
         # Log access
         self.log_access(username)
 
+        # Handle /admin - restricted to ADMIN_USERS
+        if self.path == '/admin' or self.path == '/admin/':
+            if username not in ADMIN_USERS:
+                self.send_error(403, "Admin access denied")
+                return
+            self.serve_admin()
+            return
+
         # Handle /docs/ paths - serve markdown as HTML
         if self.path == '/docs/' or self.path == '/docs':
             self.serve_docs_index()
@@ -283,6 +411,46 @@ class PortalHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         super().do_GET()
+
+    def do_POST(self) -> None:
+        username = self.authenticate()
+        if not username:
+            self.send_auth_required()
+            return
+
+        self.log_access(username)
+
+        # Only /admin accepts POST
+        if self.path == '/admin' or self.path == '/admin/':
+            if username not in ADMIN_USERS:
+                self.send_error(403, "Admin access denied")
+                return
+            self.handle_admin_post()
+            return
+
+        self.send_error(405, "Method not allowed")
+
+    def handle_admin_post(self) -> None:
+        """Handle POST to /admin - add new user."""
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length).decode('utf-8')
+
+        # Parse form data
+        from urllib.parse import parse_qs
+        params = parse_qs(post_data)
+        new_username = params.get('username', [''])[0].strip()
+
+        if not new_username or not new_username.replace('_', '').replace('-', '').isalnum():
+            self.serve_admin(error="Invalid username. Use only letters, numbers, underscores, hyphens.")
+            return
+
+        # Generate random password (16 chars, alphanumeric + special)
+        password = secrets.token_urlsafe(12)
+
+        # Add user
+        add_user(new_username, password)
+
+        self.serve_admin(new_user=new_username, new_password=password)
 
     def serve_docs_index(self) -> None:
         """Serve the documentation index page."""
@@ -398,6 +566,57 @@ class PortalHandler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             self.send_error(500, f"Error listing directory: {e}")
+
+    def serve_admin(self, new_user: str | None = None, new_password: str | None = None, error: str | None = None) -> None:
+        """Serve admin panel with access stats and user management."""
+        # Build result HTML if user was just created or error occurred
+        result_html = ""
+        if new_user and new_password:
+            result_html = f'''<div class="result">
+        <strong>User created:</strong> {new_user}<br>
+        <strong>Password:</strong> <code>{new_password}</code><br>
+        <em>Copy this password now - it cannot be retrieved later.</em>
+    </div>'''
+        elif error:
+            result_html = f'<div class="result" style="border-color: var(--red);"><strong>Error:</strong> {error}</div>'
+
+        # Get access stats
+        stats = analyze_access_log()
+        stats_rows = ""
+        for user, data in stats.items():
+            ips = data['unique_ips']
+            fps = data['unique_fingerprints']
+            ip_count = len(ips) if isinstance(ips, set) else 0
+            fp_count = len(fps) if isinstance(fps, set) else 0
+            warning_class = ' class="warning"' if ip_count > 3 or fp_count > 3 else ""
+            last = str(data['last_access'])[:19]
+            stats_rows += f'''<tr{warning_class}>
+            <td>{user}</td>
+            <td>{data['access_count']}</td>
+            <td>{ip_count}</td>
+            <td>{fp_count}</td>
+            <td>{last}</td>
+        </tr>
+'''
+
+        if not stats_rows:
+            stats_rows = '<tr><td colspan="5" style="color: var(--muted);">No access logs yet</td></tr>'
+
+        # Get registered users
+        users = check_htpasswd() or []
+        user_list = "\n".join(f"<li>{u}</li>" for u in users)
+
+        html = ADMIN_TEMPLATE.format(
+            admin_users=", ".join(ADMIN_USERS),
+            result_html=result_html,
+            stats_rows=stats_rows,
+            user_list=user_list
+        )
+
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
 
     def send_auth_required(self) -> None:
         """Send 401 response requesting authentication."""
