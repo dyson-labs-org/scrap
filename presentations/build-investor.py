@@ -112,6 +112,11 @@ INDEX_HTML = '''<!DOCTYPE html>
                     <p>Business model, market opportunity, and investment thesis for SCAP.</p>
                     <span class="badge recommended">Recommended</span>
                 </a>
+                <a href="cofounder.html" class="card">
+                    <h3>Co-Founder Opportunity</h3>
+                    <p>Join as business/operations co-founder. SDVOSB strategic priority.</p>
+                    <span class="badge" style="background: #f85149;">Recruiting</span>
+                </a>
                 <a href="nasa.html" class="card">
                     <h3>NASA</h3>
                     <p>CCSDS alignment, technology readiness levels, and integration path.</p>
@@ -121,6 +126,16 @@ INDEX_HTML = '''<!DOCTYPE html>
                     <h3>DARPA</h3>
                     <p>Contested environment operations and defense applications.</p>
                     <span class="badge">Government</span>
+                </a>
+            </div>
+        </div>
+        <div class="section">
+            <h2>Documentation</h2>
+            <div class="grid">
+                <a href="/docs/" class="card">
+                    <h3>Protocol Specifications</h3>
+                    <p>SCAP, SISL, HTLC/PTLC specs, strategy docs, and research.</p>
+                    <span class="badge">Reference</span>
                 </a>
             </div>
         </div>
@@ -220,6 +235,7 @@ PRESENTATIONS = [
     ('.tmp-nasa.md', 'nasa.html', 'NASA Presentation'),
     ('.tmp-darpa.md', 'darpa.html', 'DARPA Presentation'),
     ('.tmp-commercial.md', 'commercial.html', 'Commercial/Investor Presentation'),
+    ('.tmp-cofounder.md', 'cofounder.html', 'Co-Founder Opportunity'),
     ('.tmp-stories.md', 'stories.html', 'User Stories'),
 ]
 

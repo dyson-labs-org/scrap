@@ -11,7 +11,7 @@
 #   make serve-nasa   - Live preview NASA deck
 #   make clean        - Remove generated files
 
-.PHONY: all clean nasa darpa commercial serve serve-nasa serve-darpa serve-commercial help
+.PHONY: all clean nasa darpa commercial cofounder serve serve-nasa serve-darpa serve-commercial serve-cofounder help
 
 # Common slides (in order) - edit this list to reorder or insert slides
 # Note: Payment details only in commercial deck
@@ -46,10 +46,25 @@ COMMERCIAL_SLIDES := \
 	commercial/market.md \
 	commercial/cta.md
 
-# Output files
-OUTPUTS := dyson-nasa.html dyson-darpa.html dyson-commercial.html
+# Co-founder specific slides (uses subset of common slides + cofounder-specific)
+COFOUNDER_COMMON := \
+	common/title.md \
+	common/problem.md \
+	common/vision.md
 
-# reveal-md options with Mermaid support
+COFOUNDER_SLIDES := \
+	cofounder/opportunity.md \
+	cofounder/status.md \
+	cofounder/sdvosb.md \
+	cofounder/role.md \
+	cofounder/funding.md \
+	cofounder/path.md \
+	cofounder/cta.md
+
+# Output files
+OUTPUTS := nasa.html darpa.html commercial.html cofounder.html stories.html index.html
+
+# reveal-md options with Mermaid support (for serve targets only)
 REVEAL_OPTS := --theme black --highlight-theme monokai --css _theme.css \
 	--scripts "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js,mermaid-init.js" \
 	--static-dirs=.
@@ -62,9 +77,9 @@ define SLIDE_SEP
 
 endef
 
-all: $(OUTPUTS)
-	@echo "Built all presentations:"
-	@ls -la *.html 2>/dev/null || true
+# Build all presentations using build-investor.py (creates standalone HTML)
+all: .tmp-nasa.md .tmp-darpa.md .tmp-commercial.md .tmp-cofounder.md _theme.css mermaid-init.js
+	@python3 build-investor.py
 
 # Concatenate markdown files with slide separators
 .tmp-nasa.md: $(COMMON_SLIDES) $(NASA_SLIDES)
@@ -97,26 +112,28 @@ all: $(OUTPUTS)
 		echo "" >> $@; \
 	done
 
-# Build HTML from assembled markdown
-dyson-nasa.html: .tmp-nasa.md _theme.css
-	@echo "Building $@..."
-	reveal-md .tmp-nasa.md $(REVEAL_OPTS) --static $@ --static-dirs=. 2>/dev/null || \
-	reveal-md .tmp-nasa.md $(REVEAL_OPTS) --print $@
+.tmp-cofounder.md: $(COFOUNDER_COMMON) $(COFOUNDER_SLIDES)
+	@echo "Assembling Co-founder slides..."
+	@rm -f $@
+	@for f in $(COFOUNDER_COMMON) $(COFOUNDER_SLIDES); do \
+		cat $$f >> $@; \
+		echo "" >> $@; \
+		echo "---" >> $@; \
+		echo "" >> $@; \
+	done
 
-dyson-darpa.html: .tmp-darpa.md _theme.css
-	@echo "Building $@..."
-	reveal-md .tmp-darpa.md $(REVEAL_OPTS) --static $@ --static-dirs=. 2>/dev/null || \
-	reveal-md .tmp-darpa.md $(REVEAL_OPTS) --print $@
+# Individual targets (build specific deck)
+nasa: .tmp-nasa.md
+	@python3 build-investor.py
 
-dyson-commercial.html: .tmp-commercial.md _theme.css
-	@echo "Building $@..."
-	reveal-md .tmp-commercial.md $(REVEAL_OPTS) --static $@ --static-dirs=. 2>/dev/null || \
-	reveal-md .tmp-commercial.md $(REVEAL_OPTS) --print $@
+darpa: .tmp-darpa.md
+	@python3 build-investor.py
 
-# Individual targets
-nasa: dyson-nasa.html
-darpa: dyson-darpa.html
-commercial: dyson-commercial.html
+commercial: .tmp-commercial.md
+	@python3 build-investor.py
+
+cofounder: .tmp-cofounder.md
+	@python3 build-investor.py
 
 # Live preview servers
 serve-nasa: .tmp-nasa.md _theme.css
@@ -131,6 +148,10 @@ serve-commercial: .tmp-commercial.md _theme.css
 	@echo "Starting Commercial preview at http://localhost:1948"
 	reveal-md .tmp-commercial.md $(REVEAL_OPTS) --watch
 
+serve-cofounder: .tmp-cofounder.md _theme.css
+	@echo "Starting Co-founder preview at http://localhost:1948"
+	reveal-md .tmp-cofounder.md $(REVEAL_OPTS) --watch
+
 # Serve base slides only (for quick iteration)
 serve:
 	@echo "Starting base slides preview..."
@@ -138,7 +159,7 @@ serve:
 	reveal-md .tmp-base.md $(REVEAL_OPTS) --watch
 
 clean:
-	rm -rf dyson-nasa.html dyson-darpa.html dyson-commercial.html .tmp-*.md _static
+	rm -rf nasa.html darpa.html commercial.html cofounder.html stories.html index.html .tmp-*.md _static dyson-*.html
 	@echo "Cleaned generated files"
 
 help:
@@ -149,6 +170,7 @@ help:
 	@echo "  nasa/       - NASA-specific slides"
 	@echo "  darpa/      - DARPA-specific slides"
 	@echo "  commercial/ - Investor-specific slides"
+	@echo "  cofounder/  - Co-founder recruitment slides"
 	@echo "  stories/    - User story slides (not in default builds)"
 	@echo "  _theme.css  - Custom styling"
 	@echo "  mermaid-init.js - Mermaid diagram initialization"
@@ -158,12 +180,14 @@ help:
 	@echo "  make nasa            - Build NASA deck only"
 	@echo "  make darpa           - Build DARPA deck only"
 	@echo "  make commercial      - Build Commercial deck only"
+	@echo "  make cofounder       - Build Co-founder deck only"
 	@echo ""
 	@echo "Preview targets:"
 	@echo "  make serve           - Preview base slides"
 	@echo "  make serve-nasa      - Preview NASA deck with hot reload"
 	@echo "  make serve-darpa     - Preview DARPA deck"
 	@echo "  make serve-commercial - Preview Commercial deck"
+	@echo "  make serve-cofounder - Preview Co-founder deck"
 	@echo ""
 	@echo "  make clean           - Remove generated files"
 	@echo ""
