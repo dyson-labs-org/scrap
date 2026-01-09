@@ -210,14 +210,14 @@ attenuation (narrowing of permissions). Tokens are encoded using TLV
 ```
 CapabilityToken (TLV encoding):
   Type 0:   version (1 byte)          # Protocol version
-  Type 2:   issuer (33 bytes)         # Issuer pubkey (compressed secp256k1)
-  Type 4:   subject (variable)        # Who can use this token
-  Type 6:   audience (variable)       # Who must execute
+  Type 2:   issuer (33 bytes)         # Target's operator pubkey (signer)
+  Type 4:   subject (variable)        # Commander (who may use this token)
+  Type 6:   audience (variable)       # Target satellite (who executes)
   Type 8:   issued_at (4 bytes)       # Unix timestamp (uint32 big-endian)
   Type 10:  expires_at (4 bytes)      # Unix timestamp (uint32 big-endian)
   Type 12:  token_id (16 bytes)       # Random bytes for replay protection
   Type 14:  capability (variable)     # Capability string [MAY repeat]
-  Type 20:  root_issuer (33 bytes)    # For delegated tokens
+  Type 20:  root_issuer (33 bytes)    # Target's operator (for delegation chains)
   Type 22:  root_jti (16 bytes)       # Root token ID
   Type 24:  parent_jti (16 bytes)     # Parent token ID
   Type 26:  chain_depth (1 byte)      # Delegation depth (root=0)

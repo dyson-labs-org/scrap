@@ -337,9 +337,9 @@ value:  [length] bytes
 | Type | Name | Length | Description |
 |------|------|--------|-------------|
 | 0 | version | 1 | Protocol version (0x01) |
-| 2 | issuer | 33 | Issuer pubkey (compressed secp256k1) |
-| 4 | subject | var | Subject identifier (UTF-8 or 33-byte pubkey) |
-| 6 | audience | var | Target identifier (UTF-8 or 33-byte pubkey) |
+| 2 | issuer | 33 | Target's operator pubkey (signer, trust root) |
+| 4 | subject | var | Commander identifier (who may use this token) |
+| 6 | audience | var | Target satellite identifier (who executes) |
 | 8 | issued_at | 4 | Unix timestamp (uint32 big-endian) |
 | 10 | expires_at | 4 | Unix timestamp (uint32 big-endian) |
 | 12 | token_id | 16 | Unique identifier (random bytes) |
@@ -360,8 +360,8 @@ value:  [length] bytes
 
 | Type | Name | Length | Description |
 |------|------|--------|-------------|
-| 20 | root_issuer | 33 | Original operator pubkey |
-| 22 | root_jti | 16 | Root token ID |
+| 20 | root_issuer | 33 | Target's operator pubkey (for chain verification) |
+| 22 | root_jti | 16 | Root token ID (issued by operator) |
 | 24 | parent_jti | 16 | Immediate parent token ID |
 | 26 | chain_depth | 1 | Depth in delegation chain (root=0) |
 
@@ -1891,8 +1891,8 @@ Domain separation prevents cross-protocol attacks where a signature valid in one
 
 | Tag | Purpose | Context |
 |-----|---------|---------|
-| `SCRAP/token/v1` | Capability token signature | Operator signs token payload |
-| `SCRAP/binding/v1` | Payment-capability binding | Commander signs jti+payment_hash |
+| `SCRAP/token/v1` | Capability token signature | Target's operator signs token |
+| `SCRAP/binding/v1` | Payment-capability binding | Commander signs token_id+payment_hash |
 | `SCRAP/proof/v1` | Execution proof | Executor signs proof payload |
 | `SCRAP/delegation/v1` | Delegation token | Delegator signs delegation payload |
 
