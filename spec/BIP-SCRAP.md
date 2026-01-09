@@ -204,30 +204,37 @@ SCRAP consists of three components:
 ### Capability Token Structure
 
 Capability tokens authorize specific actions and can be delegated with
-attenuation (narrowing of permissions):
+attenuation (narrowing of permissions). Tokens are encoded using TLV
+(Type-Length-Value) format following Lightning Network conventions (BOLT 1):
 
 ```
-CapabilityToken:
-  v: 1                          # Protocol version
-  iss: "operator-pubkey"        # Issuer (root authority or delegator)
-  sub: "commander-pubkey"       # Who can use this token
-  aud: "executor-pubkey"        # Who must execute
-  iat: 1704067200               # Issued at (Unix timestamp)
-  exp: 1704153600               # Expires at
-  jti: "unique-token-id"        # For replay protection
-  cap: ["cmd:imaging:msi"]      # Capabilities granted
-  prf: ["parent-token-jti"]     # Proof chain (parent tokens, if delegated)
-  sig: <schnorr-signature>      # Issuer signature over all fields
+CapabilityToken (TLV encoding):
+  Type 0:   version (1 byte)          # Protocol version
+  Type 2:   issuer (33 bytes)         # Issuer pubkey (compressed secp256k1)
+  Type 4:   subject (variable)        # Who can use this token
+  Type 6:   audience (variable)       # Who must execute
+  Type 8:   issued_at (4 bytes)       # Unix timestamp (uint32 big-endian)
+  Type 10:  expires_at (4 bytes)      # Unix timestamp (uint32 big-endian)
+  Type 12:  token_id (16 bytes)       # Random bytes for replay protection
+  Type 14:  capability (variable)     # Capability string [MAY repeat]
+  Type 20:  root_issuer (33 bytes)    # For delegated tokens
+  Type 22:  root_jti (16 bytes)       # Root token ID
+  Type 24:  parent_jti (16 bytes)     # Parent token ID
+  Type 26:  chain_depth (1 byte)      # Delegation depth (root=0)
+  Type 240: signature (64 bytes)      # BIP-340 Schnorr signature (MUST be last)
 ```
 
-**Version field**: The `v` field enables protocol evolution. Verifiers MUST
+**Encoding rules**: Records MUST appear in ascending type order. Unknown even
+types MUST cause rejection; unknown odd types MUST be ignored (forward
+compatibility). Signature covers all TLV records except type 240.
+
+**Version field**: The version field enables protocol evolution. Verifiers MUST
 reject tokens with unrecognized versions. Version 1 is specified in this
 document.
 
-**Delegation**: When delegating, the delegator becomes `iss`, and the `prf`
-field references the parent token(s) that authorize the delegation. Verifiers
-check the full chain back to a trusted root. Each delegation may only
-attenuate (narrow) capabilities, never expand them.
+**Delegation**: When delegating, the delegator's pubkey becomes the issuer, and
+types 20-26 reference the parent token. Verifiers check the full chain back to
+a trusted root. Each delegation may only attenuate (narrow) capabilities.
 
 ### Adaptor Signature Construction
 

@@ -174,7 +174,7 @@ Capability tokens are inspired by UCAN (User Controlled Authorization Networks) 
 |  Header                                                        |
 |  +-- alg: "ES256K" (ECDSA with secp256k1)                     |
 |  +-- typ: "SAT-CAP"                                           |
-|  +-- enc: "CBOR"           # Compact binary encoding          |
+|  +-- enc: "TLV"            # Type-Length-Value encoding       |
 +----------------------------------------------------------------+
 |  Payload                                                       |
 |  +-- iss: "ESA-COPERNICUS"       # Issuer (target's operator) |
@@ -315,20 +315,74 @@ def generate_jti(issuer_prefix: str) -> str:
 - **Global uniqueness**: The combination of `(iss, jti)` MUST be globally unique
 - **Collision probability**: With 128-bit random component, collision probability is negligible (~2^-64 after 2^64 tokens)
 
-#### 2.5.4 Encoding in CBOR
+#### 2.5.4 TLV Encoding
 
-When serialized to CBOR, the `jti` is encoded as a UTF-8 text string (major type 3):
+Capability tokens use TLV (Type-Length-Value) encoding, following Lightning Network conventions (BOLT 1). This provides a compact binary format with forward compatibility.
 
-```python
-import cbor2
+**TLV Record Structure:**
+```
+type:   BigSize (1-9 bytes, typically 1-2)
+length: BigSize (1-9 bytes, typically 1-2)
+value:  [length] bytes
+```
 
-token_payload = {
-    'iss': 'ESA-COPERNICUS',
-    'jti': 'ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01',
-    # ... other fields
-}
+**BigSize Encoding** (BOLT 1):
+- 0x00-0xFC: 1 byte (value as-is)
+- 0xFD + 2 bytes: values 0xFD-0xFFFF
+- 0xFE + 4 bytes: values 0x10000-0xFFFFFFFF
+- 0xFF + 8 bytes: larger values
 
-encoded = cbor2.dumps(token_payload)
+**Token TLV Types:**
+
+| Type | Name | Length | Description |
+|------|------|--------|-------------|
+| 0 | version | 1 | Protocol version (0x01) |
+| 2 | issuer | 33 | Issuer pubkey (compressed secp256k1) |
+| 4 | subject | var | Subject identifier (UTF-8 or 33-byte pubkey) |
+| 6 | audience | var | Target identifier (UTF-8 or 33-byte pubkey) |
+| 8 | issued_at | 4 | Unix timestamp (uint32 big-endian) |
+| 10 | expires_at | 4 | Unix timestamp (uint32 big-endian) |
+| 12 | token_id | 16 | Unique identifier (random bytes) |
+| 14 | capability | var | Capability string (UTF-8) [MAY repeat] |
+| 240 | signature | 64 | BIP-340 Schnorr signature (MUST be last) |
+
+**Optional Types (odd - ignore if unknown):**
+
+| Type | Name | Length | Description |
+|------|------|--------|-------------|
+| 1 | flags | 1 | Reserved flags |
+| 13 | constraint_geo | var | GeoJSON polygon (UTF-8) |
+| 15 | constraint_rate | 8 | [uint32 count, uint32 period_sec] |
+| 17 | constraint_amount | 8 | Satoshi limit (uint64 big-endian) |
+| 19 | constraint_after | 4 | Not-before timestamp (uint32) |
+
+**Delegation Types (for non-root tokens):**
+
+| Type | Name | Length | Description |
+|------|------|--------|-------------|
+| 20 | root_issuer | 33 | Original operator pubkey |
+| 22 | root_jti | 16 | Root token ID |
+| 24 | parent_jti | 16 | Immediate parent token ID |
+| 26 | chain_depth | 1 | Depth in delegation chain (root=0) |
+
+**Encoding Rules:**
+1. Records MUST appear in ascending type order
+2. Type 14 (capability) MAY appear multiple times
+3. Type 240 (signature) MUST appear exactly once, last
+4. Unknown even types: MUST reject entire token
+5. Unknown odd types: MUST ignore (forward compatibility)
+
+**Example Encoding:**
+```
+00 01 01                             # type=0, len=1, version=1
+02 21 <33-byte-pubkey>               # type=2, len=33, issuer
+04 0f 49 43 45 59 45 2d 58 31 34 ... # type=4, len=15, subject="ICEYE-X14-51070"
+06 12 53 45 4e 54 49 4e 45 4c ...    # type=6, len=18, audience="SENTINEL-2C-62261"
+08 04 65 a5 1e 00                    # type=8, len=4, issued_at
+0a 04 65 a6 0f 80                    # type=10, len=4, expires_at
+0c 10 <16-byte-random>               # type=12, len=16, token_id
+0e 0f 63 6d 64 3a 69 6d 61 67 ...    # type=14, len=15, capability="cmd:imaging:msi"
+f0 40 <64-byte-signature>            # type=240, len=64, signature
 ```
 
 ### 2.6 Priority and Preemption
@@ -474,7 +528,7 @@ The commanding satellite sends a task request that includes both authorization a
 |  +-- timestamp: 1705320000                                     |
 +----------------------------------------------------------------+
 |  Authorization                                                 |
-|  +-- capability_token: <CBOR-encoded SAT-CAP>                 |
+|  +-- capability_token: <TLV-encoded SAT-CAP>                  |
 |  +-- commander_signature: ECDSA(cmd_privkey, task_header)     |
 +----------------------------------------------------------------+
 |  Task Specification                                            |
@@ -1059,12 +1113,17 @@ class DisputeEvidence:
     constraint_violated: str | None     # Which constraint failed
 
     def serialize(self) -> bytes:
-        return cbor2.dumps({
-            'proof': self.proof_received,
-            'expected': self.expected_output_hash,
-            'actual': self.actual_output_hash,
-            'constraint': self.constraint_violated
-        })
+        """Serialize evidence as TLV records."""
+        tlv = TLVWriter()
+        if self.proof_received:
+            tlv.write(0, self.proof_received)
+        if self.expected_output_hash:
+            tlv.write(2, self.expected_output_hash)
+        if self.actual_output_hash:
+            tlv.write(4, self.actual_output_hash)
+        if self.constraint_violated:
+            tlv.write(6, self.constraint_violated.encode('utf-8'))
+        return tlv.to_bytes()
 ```
 
 **Dispute Types**:
@@ -1502,8 +1561,9 @@ def verify_and_mark_token(token: CapabilityToken, target: Satellite) -> VerifyRe
         return VerifyResult(REJECT, "wrong_audience")
 
     # 4. Signature verification (expensive, do last in stateless phase)
-    token_hash = tagged_hash("SCRAP/token/v1", cbor_encode(token.payload))
-    if not verify_ecdsa(token_hash, token.signature, target.operator_pubkey):
+    token_data = token.serialize_tlv(exclude_signature=True)
+    token_hash = tagged_hash("SCRAP/token/v1", token_data)
+    if not schnorr_verify(token_hash, token.signature, target.operator_pubkey):
         return VerifyResult(REJECT, "invalid_signature")
 
     # === PHASE 2: STATEFUL OPERATIONS (atomic with cache) ===
@@ -1850,28 +1910,33 @@ The double SHA256 of the tag creates a 64-byte midstate that can be precomputed 
 
 **Capability Token Signature:**
 ```
-token_hash = tagged_hash("SCRAP/token/v1", CBOR(token_payload))
-signature = ECDSA_Sign(operator_key, token_hash)
+# Signature covers all TLV records except signature (type 240)
+token_data = TLV_serialize(token, exclude_types=[240])
+token_hash = tagged_hash("SCRAP/token/v1", token_data)
+signature = schnorr_sign(operator_key, token_hash)
 ```
 
 **Payment-Capability Binding:**
 ```
-binding_msg = jti || payment_hash
+# token_id is TLV type 12 (16 bytes)
+binding_msg = token_id || payment_hash
 binding_hash = tagged_hash("SCRAP/binding/v1", binding_msg)
-signature = ECDSA_Sign(commander_key, binding_hash)
+signature = schnorr_sign(commander_key, binding_hash)
 ```
 
 **Execution Proof:**
 ```
-proof_msg = task_jti || payment_hash || output_hash || timestamp_be8
+proof_msg = task_token_id || payment_hash || output_hash || timestamp_be8
 proof_hash = tagged_hash("SCRAP/proof/v1", proof_msg)
-signature = ECDSA_Sign(executor_key, proof_hash)
+signature = schnorr_sign(executor_key, proof_hash)
 ```
 
 **Delegation Token:**
 ```
-delegation_hash = tagged_hash("SCRAP/delegation/v1", CBOR(delegation_payload))
-signature = ECDSA_Sign(delegator_key, delegation_hash)
+# Signature covers all TLV records except signature (type 240)
+delegation_data = TLV_serialize(delegation, exclude_types=[240])
+delegation_hash = tagged_hash("SCRAP/delegation/v1", delegation_data)
+signature = schnorr_sign(delegator_key, delegation_hash)
 ```
 
 #### 11.4.4 Security Properties
@@ -1980,25 +2045,27 @@ Capability tokens and Lightning payments are cryptographically bound to prevent 
 +-----------------------------------------------------------------------------+
 ```
 
-### 12.2 CBOR-Encoded Bound Request
+### 12.2 TLV-Encoded Bound Request
 
 ```python
 @dataclass
 class BoundTaskRequest:
-    capability_token: bytes      # CBOR-encoded capability token
+    capability_token: bytes      # TLV-encoded capability token
     payment_hash: bytes          # 32 bytes, SHA256(preimage)
     payment_amount_msat: int     # Payment amount in millisatoshi
     htlc_timeout_blocks: int     # HTLC timeout in Bitcoin blocks
-    binding_sig: bytes           # ECDSA signature over binding hash
+    binding_sig: bytes           # BIP-340 Schnorr signature over binding hash
 
     def binding_hash(self) -> bytes:
-        token_jti = cbor2.loads(self.capability_token)['jti']
-        return hashlib.sha256(
-            token_jti.encode() + self.payment_hash
-        ).digest()
+        # Extract token_id (type 12) from TLV-encoded token
+        token_id = tlv_extract(self.capability_token, type=12)
+        return tagged_hash(
+            "SCRAP/binding/v1",
+            token_id + self.payment_hash
+        )
 
     def verify_binding(self, requester_pubkey: bytes) -> bool:
-        return ecdsa_verify(
+        return schnorr_verify(
             requester_pubkey,
             self.binding_hash(),
             self.binding_sig
@@ -2587,7 +2654,7 @@ SCRAP messages have a common structure regardless of transport:
 ```
 SCRAP Message (transport-independent):
 +----------------+--------+----------------------------------------+
-| SCRAP Msg Type  | Length | SCRAP Message Body (CBOR-encoded)       |
+| SCRAP Msg Type  | Length | SCRAP Message Body (TLV-encoded)        |
 | 1 byte         | 2 bytes| Variable (≤65535 bytes)                |
 +----------------+--------+----------------------------------------+
 ```
@@ -2672,7 +2739,7 @@ Space Packet with SCRAP Payload:
 | +-- Timestamp (CCSDS CUC or CDS format)                                     |
 +-----------------------------------------------------------------------------+
 | User Data Field                                                              |
-| +-- SCRAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + TLV body)                                 |
 +-----------------------------------------------------------------------------+
 ```
 
@@ -2708,7 +2775,7 @@ AX.25 UI Frame with SCRAP Payload:
 | PID: 0xF0 (no layer 3)                                                       |
 +-----------------------------------------------------------------------------+
 | Information Field                                                            |
-| +-- SCRAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + TLV body)                                 |
 | +-- Maximum 256 bytes recommended for UHF                                   |
 +-----------------------------------------------------------------------------+
 | FCS: 16-bit CRC-CCITT                                                        |
@@ -2741,7 +2808,7 @@ UDP Datagram with SCRAP Payload:
 | +-- Checksum                                                                |
 +-----------------------------------------------------------------------------+
 | UDP Payload                                                                  |
-| +-- SCRAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + TLV body)                                 |
 +-----------------------------------------------------------------------------+
 ```
 
@@ -2910,35 +2977,43 @@ Output:
 ### 18.2 Capability Token Encoding
 
 ```
-TEST VECTOR 2: CBOR-Encoded Capability Token
-============================================
+TEST VECTOR 2: TLV-Encoded Capability Token
+===========================================
 
-Logical structure:
-{
-  "alg": "ES256K",
-  "typ": "SAT-CAP",
-  "iss": "ESA-COPERNICUS",
-  "sub": "ICEYE-X14-51070",
-  "aud": "SENTINEL-2C-62261",
-  "iat": 1705320000,
-  "exp": 1705406400,
-  "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
-  "cap": ["cmd:imaging:msi"],
-  "cmd_pub": <33 bytes compressed secp256k1>
-}
+Input values:
+  issuer_pubkey = 0x02a1b2c3d4e5f67890123456789abcdef01234567890abcdef01234567890abcd
+  subject = "ICEYE-X14-51070" (UTF-8)
+  audience = "SENTINEL-2C-62261" (UTF-8)
+  issued_at = 1705320000 (0x65a51e40)
+  expires_at = 1705406400 (0x65a66bc0)
+  token_id = 0xa1b2c3d4e5f6789012345678abcdef01 (16 bytes)
+  capability = "cmd:imaging:msi" (UTF-8)
 
-CBOR encoding (excluding signature):
-  <implementation should compute deterministic CBOR>
+TLV Encoding (excluding signature):
+  00 01 01                                           # type=0, len=1, version=1
+  02 21 02a1b2c3d4e5f67890123456789abcdef01234567890abcdef01234567890abcd
+                                                     # type=2, len=33, issuer
+  04 0f 494345 59452d 5831342d3531303730           # type=4, len=15, subject
+  06 11 53454e 54494e 454c2d32432d3632323631       # type=6, len=17, audience
+  08 04 65a51e40                                     # type=8, len=4, issued_at
+  0a 04 65a66bc0                                     # type=10, len=4, expires_at
+  0c 10 a1b2c3d4e5f6789012345678abcdef01             # type=12, len=16, token_id
+  0e 0f 636d643a696d6167696e673a6d7369               # type=14, len=15, capability
 
-Signature input (using domain-separated tagged hash):
+Concatenated (hex, 107 bytes before signature):
+  000101022102a1b2c3d4e5f67890123456789abcdef01234567890abcdef01234567890abcd
+  040f49434559452d5831342d3531303730061153454e54494e454c2d32432d36323236
+  310804 65a51e400a0465a66bc00c10a1b2c3d4e5f6789012345678abcdef010e0f636d
+  643a696d6167696e673a6d7369
+
+Signature input (tagged hash):
   tag = "SCRAP/token/v1"
-  tag_hash = SHA256(tag.encode('utf-8'))
-    = 0x8f9c3c9e5e6d5a7b8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b
-  message = tagged_hash("SCRAP/token/v1", CBOR_encoded_payload)
-          = SHA256(tag_hash || tag_hash || CBOR_encoded_payload)
+  message = tagged_hash(tag, <TLV bytes above>)
 
-Signature (ECDSA secp256k1, DER-encoded):
-  <implementation should compute>
+Signature (BIP-340 Schnorr, 64 bytes):
+  f0 40 <64-byte-schnorr-signature>
+
+Total token size: 107 + 3 + 64 = 174 bytes
 ```
 
 ### 18.3 Payment-Capability Binding
@@ -2950,26 +3025,24 @@ TEST VECTOR 3: Binding Hash (Domain Separated)
 Tagged hash function (BIP-340 style):
   tagged_hash(tag, msg) = SHA256(SHA256(tag) || SHA256(tag) || msg)
 
-Tag precomputation:
-  tag = "SCRAP/binding/v1"
-  tag_hash = SHA256(tag.encode('utf-8'))
-           = 0x7d4e8f2a1b3c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e
-
 Input:
-  jti = "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
-  jti (UTF-8 bytes) = 0x4553412d313730353332303030302d6131623263336434653566363738393031323334353637386162636465663031
+  token_id = 0xa1b2c3d4e5f6789012345678abcdef01 (16 bytes, from TLV type 12)
   payment_hash = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
 Binding (domain-separated):
-  binding_msg = jti.encode('utf-8') + payment_hash
+  binding_msg = token_id || payment_hash  (48 bytes total)
   binding_hash = tagged_hash("SCRAP/binding/v1", binding_msg)
-               = SHA256(tag_hash || tag_hash || binding_msg)
+
+Computation:
+  tag = "SCRAP/binding/v1"
+  tag_hash = SHA256(tag.encode('utf-8'))
+  binding_hash = SHA256(tag_hash || tag_hash || binding_msg)
 
 Output:
   binding_hash = <implementation should compute with tagged_hash>
 
-Note: The old non-domain-separated hash was 0x744e44abb226dc4b2bd000c2fa18b742b006c961d927a0d7170c1c068d7eadb9.
-Implementations MUST use the domain-separated version.
+Note: The binding uses the 16-byte token_id (TLV type 12), not the
+legacy string-based jti. This provides a fixed-size binding input.
 ```
 
 ### 18.4 Execution Proof
