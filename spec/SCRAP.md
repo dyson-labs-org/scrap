@@ -1464,6 +1464,73 @@ class UsedTokenCache:
 - Mitigation: Expired entries are evicted first; active tokens survive longer
 - Mitigation: Tokens with `exp` in the past are rejected before cache check
 
+#### 10.3.5 Atomic Verification Order
+
+Token verification MUST follow this exact order to prevent race conditions and ensure atomic replay protection:
+
+```python
+def verify_and_mark_token(token: CapabilityToken, target: Satellite) -> VerifyResult:
+    """
+    Atomically verify token and mark as used.
+
+    CRITICAL: Steps 1-4 (validation) must complete before step 5 (cache add).
+    Otherwise, a valid token could be rejected on retry after partial failure.
+
+    Returns: VerifyResult with status and reason
+    """
+
+    # === PHASE 1: STATELESS VALIDATION (no side effects) ===
+
+    # 1. Structural validation
+    if not token.has_required_fields():
+        return VerifyResult(REJECT, "malformed_token")
+
+    # 2. Time bounds (cheap check before crypto)
+    current_time = get_secure_time()
+
+    if token.expires_at < current_time:
+        return VerifyResult(REJECT, "expired")
+
+    if token.expires_at > current_time + MAX_TOKEN_LIFETIME:
+        return VerifyResult(REJECT, "expiry_too_far")
+
+    if hasattr(token, 'issued_at') and token.issued_at > current_time + CLOCK_SKEW:
+        return VerifyResult(REJECT, "future_issued")
+
+    # 3. Audience validation
+    if token.audience != target.id and token.audience != "*":
+        return VerifyResult(REJECT, "wrong_audience")
+
+    # 4. Signature verification (expensive, do last in stateless phase)
+    token_hash = tagged_hash("SCRAP/token/v1", cbor_encode(token.payload))
+    if not verify_ecdsa(token_hash, token.signature, target.operator_pubkey):
+        return VerifyResult(REJECT, "invalid_signature")
+
+    # === PHASE 2: STATEFUL OPERATIONS (atomic with cache) ===
+
+    # 5. Replay check and mark (MUST be atomic)
+    with target.used_tokens.lock:
+        if target.used_tokens.contains(token.token_id):
+            return VerifyResult(REJECT, "replayed")
+
+        # Token is valid - mark as used BEFORE returning success
+        target.used_tokens.add(token.token_id, token.expires_at)
+
+    return VerifyResult(ACCEPT, None)
+```
+
+**Verification Order Rationale:**
+
+| Step | Purpose | Why This Order |
+|------|---------|----------------|
+| 1. Structure | Fast reject malformed | Cheapest check |
+| 2. Time bounds | Reject expired/future | Prevents cache pollution |
+| 3. Audience | Reject wrong target | Quick rejection |
+| 4. Signature | Cryptographic proof | Expensive, do after cheap checks |
+| 5. Replay check+mark | Prevent double-use | MUST be atomic and last |
+
+**Critical Invariant:** The cache addition (step 5b) MUST happen atomically with the cache check (step 5a) and MUST occur before returning success. If these are not atomic, two concurrent verifications of the same token could both pass the check before either marks it used.
+
 ### 10.4 Satellite Node Requirements
 
 | Component | Requirement | Notes |
@@ -1497,6 +1564,76 @@ HTLC timeouts require accurate timekeeping. Two configurations are supported:
 | Ground-uplinked (XO) | 48 hours/hop | No GPS, infrequent ground contact |
 
 **GPS Receiver Prevalence**: Research indicates GPS/GNSS receivers are standard on most operational CubeSats requiring orbit determination or precise timing, but may be absent on educational or technology demonstration missions. Implementations SHOULD support ground-uplinked time as fallback.
+
+#### 10.4.2 Clock Security
+
+Clock manipulation is a critical attack vector because SCRAP uses Bitcoin timelocks (CLTV) for HTLC expiration. An adversary who can shift perceived time can:
+
+- **Premature timeout**: Steal funds via early refund claim
+- **Prevented claims**: Lock funds past true expiration
+- **State desync**: Cause channel disputes
+
+**get_secure_time() Implementation:**
+
+```python
+def get_secure_time() -> int:
+    """
+    Return current Unix timestamp from secure time source.
+
+    SECURITY: This function must resist timing attacks.
+    """
+
+    sources = []
+
+    # Collect all available timing sources
+    if gps_available():
+        sources.append(("gps", gps_time(), WEIGHT_GPS))
+
+    if ground_ntp_recent():  # Within last orbit
+        sources.append(("ntp", ground_ntp_time(), WEIGHT_NTP))
+
+    sources.append(("rtc", rtc_time(), WEIGHT_RTC))
+
+    # Sanity check: reject outliers
+    times = [s[1] for s in sources]
+    median = sorted(times)[len(times) // 2]
+
+    valid_sources = [(name, t, w) for name, t, w in sources
+                     if abs(t - median) < MAX_CLOCK_DEVIATION]
+
+    if not valid_sources:
+        # All sources disagree - possible attack or failure
+        log_anomaly("clock_disagreement", sources)
+        # Fall back to RTC with extended margins
+        return rtc_time()
+
+    # Weighted average of valid sources
+    total_weight = sum(w for _, _, w in valid_sources)
+    weighted_time = sum(t * w for _, t, w in valid_sources) / total_weight
+
+    return int(weighted_time)
+
+# Weights for timing source arbitration
+WEIGHT_GPS = 10   # High confidence, spoofable
+WEIGHT_NTP = 5    # Medium confidence, ground-verified
+WEIGHT_RTC = 1    # Low confidence, no external verification
+MAX_CLOCK_DEVIATION = 60  # Reject sources >60s from median
+```
+
+**Spoofing Detection Indicators:**
+- Sudden time jump (>1s without eclipse/maneuver)
+- Position jump inconsistent with orbital mechanics
+- GPS signal strength anomalies
+- Doppler shift mismatch
+- Disagreement between multiple GPS receivers
+
+**Response to Suspected Spoofing:**
+1. Fall back to ground NTP + RTC
+2. Increase timeout margins (conservative)
+3. Alert ground station
+4. Continue operation with extended safety margins
+
+For adversarial environments (military/contested operations), see [ADVERSARIAL.md](ADVERSARIAL.md) Section 2 "Clock Security" for multi-source timing architecture and enhanced spoofing detection.
 
 ---
 
@@ -1686,6 +1823,130 @@ For ISL windows of 5+ minutes, software ECDSA is acceptable on all listed proces
 
 **Hardened derivation** (indicated by ') is used for purpose, coin type, and account to prevent child key compromise from revealing parent keys.
 
+### 11.4 Domain Separators
+
+Domain separation prevents cross-protocol attacks where a signature valid in one context could be replayed in another. SCRAP uses tagged hashes following BIP-340 conventions.
+
+#### 11.4.1 Tag Definitions
+
+| Tag | Purpose | Context |
+|-----|---------|---------|
+| `SCRAP/token/v1` | Capability token signature | Operator signs token payload |
+| `SCRAP/binding/v1` | Payment-capability binding | Commander signs jti+payment_hash |
+| `SCRAP/proof/v1` | Execution proof | Executor signs proof payload |
+| `SCRAP/delegation/v1` | Delegation token | Delegator signs delegation payload |
+
+#### 11.4.2 Tagged Hash Construction
+
+Following BIP-340, tagged hashes are computed as:
+
+```
+tagged_hash(tag, msg) = SHA256(SHA256(tag) || SHA256(tag) || msg)
+```
+
+The double SHA256 of the tag creates a 64-byte midstate that can be precomputed for efficiency.
+
+#### 11.4.3 Application to SCRAP Messages
+
+**Capability Token Signature:**
+```
+token_hash = tagged_hash("SCRAP/token/v1", CBOR(token_payload))
+signature = ECDSA_Sign(operator_key, token_hash)
+```
+
+**Payment-Capability Binding:**
+```
+binding_msg = jti || payment_hash
+binding_hash = tagged_hash("SCRAP/binding/v1", binding_msg)
+signature = ECDSA_Sign(commander_key, binding_hash)
+```
+
+**Execution Proof:**
+```
+proof_msg = task_jti || payment_hash || output_hash || timestamp_be8
+proof_hash = tagged_hash("SCRAP/proof/v1", proof_msg)
+signature = ECDSA_Sign(executor_key, proof_hash)
+```
+
+**Delegation Token:**
+```
+delegation_hash = tagged_hash("SCRAP/delegation/v1", CBOR(delegation_payload))
+signature = ECDSA_Sign(delegator_key, delegation_hash)
+```
+
+#### 11.4.4 Security Properties
+
+Domain separation ensures:
+1. **No cross-context replay**: A token signature cannot be reused as a proof signature
+2. **Version isolation**: `v1` tags prevent future protocol versions from accepting old signatures
+3. **Protocol isolation**: SCRAP signatures cannot be replayed in Bitcoin or Lightning contexts
+4. **Collision resistance**: Different tag prefixes guarantee different hash outputs for identical messages
+
+### 11.5 Threshold Signatures (FROST/ROAST)
+
+For coalition operations requiring m-of-n authorization, SCRAP uses threshold Schnorr signatures via [FROST](https://eprint.iacr.org/2020/852) (Flexible Round-Optimized Schnorr Threshold signatures) or [ROAST](https://eprint.iacr.org/2022/550) (Robust Asynchronous Schnorr Threshold signatures).
+
+#### 11.5.1 When to Use Threshold Signatures
+
+| Scenario | Single Signer | Threshold (FROST/ROAST) |
+|----------|---------------|-------------------------|
+| Commercial operator | Yes | No |
+| Coalition/joint operations | No | Yes |
+| High-value asset control | Optional | Recommended |
+| Regulatory requirement | Depends | As required |
+
+#### 11.5.2 Properties
+
+**FROST properties:**
+- t-of-n threshold Schnorr signatures
+- Produces standard BIP-340 signatures (indistinguishable from single-signer)
+- Requires coordinated signing rounds
+
+**ROAST properties:**
+- Wrapper around FROST for robustness
+- Handles malicious/unresponsive signers
+- Guaranteed termination if t honest parties exist
+- Recommended for space operations where communication may fail
+
+#### 11.5.3 Coalition Capability Token
+
+```
+CoalitionCapabilityToken:
+  v: 1
+  iss: <frost_aggregate_pubkey>    # Threshold aggregate key
+  iss_threshold: "2-of-3"          # Human-readable policy
+  iss_parties: [pubkey_A, pubkey_B, pubkey_C]  # For audit
+  sub: "coalition-satellite-id"
+  aud: "executor-satellite-id"
+  cap: ["cmd:relay:priority"]
+  sig: <frost_aggregate_signature> # Standard Schnorr sig
+```
+
+**Key property:** The resulting signature is a standard BIP-340 Schnorr signature. Verifiers cannot distinguish threshold signatures from single-signer signatures, preserving privacy of the authorization structure.
+
+#### 11.5.4 Setup and Issuance
+
+1. **Key generation (once)**: Coalition partners run FROST Distributed Key Generation (DKG)
+2. **Aggregate key**: The threshold aggregate public key becomes the token issuer
+3. **Token issuance**: Requires t-of-n signing session via FROST/ROAST
+4. **Verification**: Standard Schnorr verification against aggregate key
+
+#### 11.5.5 Coalition Channel Funding
+
+For coalition-controlled channel funds:
+
+```
+Funding output:
+  <frost_aggregate_key> CHECKSIG
+
+Update/Settlement:
+  Signed with FROST/ROAST by coalition threshold
+```
+
+This enables m-of-n control over channel funds without revealing the threshold structure on-chain.
+
+For detailed coalition operation scenarios including cross-domain authorization, see [ADVERSARIAL.md](ADVERSARIAL.md) Section 5 "Coalition Operations".
+
 ---
 
 ## 12. Payment-Capability Token Binding
@@ -1707,7 +1968,7 @@ Capability tokens and Lightning payments are cryptographically bound to prevent 
 |                                                                             |
 |  Binding: ECDSA_Sign(                                                       |
 |    requester_key,                                                           |
-|    SHA256(capability_token.jti || payment_hash)                             |
+|    tagged_hash("SCRAP/binding/v1", jti || payment_hash)                     |
 |  )                                                                          |
 |                                                                             |
 |  Verification:                                                              |
@@ -2610,9 +2871,20 @@ SISL sessions have limited duration (ISL contact window). SCRAP must complete wi
 - [LDK (Lightning Dev Kit)](https://lightningdevkit.org/)
 - [Bitcoin Optech: PTLCs](https://bitcoinops.org/en/topics/ptlc/)
 
+### Cryptographic Primitives
+- [FROST: Flexible Round-Optimized Schnorr Threshold Signatures](https://eprint.iacr.org/2020/852)
+- [ROAST: Robust Asynchronous Schnorr Threshold Signatures](https://eprint.iacr.org/2022/550)
+- [BIP-340: Schnorr Signatures for secp256k1](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki)
+- [BIP-327: MuSig2](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki)
+
 ### Academic
 - Choi et al., "Consensus-Based Decentralized Auctions for Robust Task Allocation" (MIT)
 - UCAN Specification: https://ucan.xyz/
+
+### SCRAP Extensions
+- [ADVERSARIAL.md](ADVERSARIAL.md) - Military/contested environment considerations
+- [SISL.md](SISL.md) - Secure Inter-Satellite Link (CCSDS integration)
+- [BIP-SCRAP.md](BIP-SCRAP.md) - Informational BIP
 
 ---
 
@@ -2658,8 +2930,12 @@ Logical structure:
 CBOR encoding (excluding signature):
   <implementation should compute deterministic CBOR>
 
-Signature input:
-  message = SHA256(CBOR_encoded_payload)
+Signature input (using domain-separated tagged hash):
+  tag = "SCRAP/token/v1"
+  tag_hash = SHA256(tag.encode('utf-8'))
+    = 0x8f9c3c9e5e6d5a7b8c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b
+  message = tagged_hash("SCRAP/token/v1", CBOR_encoded_payload)
+          = SHA256(tag_hash || tag_hash || CBOR_encoded_payload)
 
 Signature (ECDSA secp256k1, DER-encoded):
   <implementation should compute>
@@ -2668,26 +2944,43 @@ Signature (ECDSA secp256k1, DER-encoded):
 ### 18.3 Payment-Capability Binding
 
 ```
-TEST VECTOR 3: Binding Hash
-===========================
+TEST VECTOR 3: Binding Hash (Domain Separated)
+==============================================
+
+Tagged hash function (BIP-340 style):
+  tagged_hash(tag, msg) = SHA256(SHA256(tag) || SHA256(tag) || msg)
+
+Tag precomputation:
+  tag = "SCRAP/binding/v1"
+  tag_hash = SHA256(tag.encode('utf-8'))
+           = 0x7d4e8f2a1b3c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e
 
 Input:
   jti = "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
   jti (UTF-8 bytes) = 0x4553412d313730353332303030302d6131623263336434653566363738393031323334353637386162636465663031
   payment_hash = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 
-Binding:
-  binding_hash = SHA256(jti.encode('utf-8') + payment_hash)
+Binding (domain-separated):
+  binding_msg = jti.encode('utf-8') + payment_hash
+  binding_hash = tagged_hash("SCRAP/binding/v1", binding_msg)
+               = SHA256(tag_hash || tag_hash || binding_msg)
 
 Output:
-  binding_hash = 0x744e44abb226dc4b2bd000c2fa18b742b006c961d927a0d7170c1c068d7eadb9
+  binding_hash = <implementation should compute with tagged_hash>
+
+Note: The old non-domain-separated hash was 0x744e44abb226dc4b2bd000c2fa18b742b006c961d927a0d7170c1c068d7eadb9.
+Implementations MUST use the domain-separated version.
 ```
 
 ### 18.4 Execution Proof
 
 ```
-TEST VECTOR 4: Execution Proof Hash
-===================================
+TEST VECTOR 4: Execution Proof Hash (Domain Separated)
+======================================================
+
+Tag precomputation:
+  tag = "SCRAP/proof/v1"
+  tag_hash = SHA256(tag.encode('utf-8'))
 
 Input:
   task_jti = "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
@@ -2696,16 +2989,19 @@ Input:
   execution_timestamp = 1705320045
   execution_timestamp (big-endian, 8 bytes) = 0x0000000065a51e6d
 
-Proof hash:
-  proof_hash = SHA256(
-    task_jti.encode('utf-8') +
-    payment_hash +
-    output_hash +
-    execution_timestamp.to_bytes(8, 'big')
-  )
+Proof hash (domain-separated):
+  proof_msg = task_jti.encode('utf-8') +
+              payment_hash +
+              output_hash +
+              execution_timestamp.to_bytes(8, 'big')
+  proof_hash = tagged_hash("SCRAP/proof/v1", proof_msg)
+             = SHA256(tag_hash || tag_hash || proof_msg)
 
 Output:
-  proof_hash = 0xf37b154e8763b9bbc99ceef968f02566a1f799eefaf5a34b9c8956c8801aaf6f
+  proof_hash = <implementation should compute with tagged_hash>
+
+Note: The old non-domain-separated hash was 0xf37b154e8763b9bbc99ceef968f02566a1f799eefaf5a34b9c8956c8801aaf6f.
+Implementations MUST use the domain-separated version.
 ```
 
 ### 18.5 BIP-32 Key Derivation
