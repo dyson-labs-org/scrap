@@ -586,7 +586,7 @@ requires an attestation layer to partially recover payment-proof binding.
 ```
 DeliveryAttestation:
   v: 1
-  task_jti: "task-token-id"       # Links to capability token
+  task_token_id: <16 bytes>       # Links to capability token
   payment_hash: <32 bytes>        # Links to HTLC
   output_hash: SHA256(delivered_data)
   timestamp: 1704067200
@@ -599,7 +599,7 @@ DeliveryAttestation:
 Before revealing the preimage, the gateway MUST verify:
 
 1. Attestation signature is valid
-2. `task_jti` matches the requested task
+2. `task_token_id` matches the requested task
 3. `payment_hash` matches the HTLC
 4. `output_hash` matches received data
 5. `timestamp` is within acceptable window
@@ -730,7 +730,7 @@ The following SCRAP components function identically in fallback mode:
 ### Capability Tokens
 
 Capability token verification is unchanged:
-- Token structure (v, iss, sub, aud, iat, exp, jti, cap, prf, sig)
+- Token structure (v, iss, sub, aud, iat, exp, token_id, cap, prf, sig)
 - Delegation and attenuation
 - Replay protection
 - Signature verification

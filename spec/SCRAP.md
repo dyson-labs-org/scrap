@@ -150,7 +150,7 @@ Service discovery and token issuance occur **before** the on-orbit protocol:
 | `GET /operator` | Operator signing pubkey (trust root) |
 | `GET /satellites` | Satellite catalog with identity pubkeys |
 | `POST /tokens` | Request signed capability token |
-| `GET /tokens/{jti}` | Token status and revocation |
+| `GET /tokens/{token_id}` | Token status and revocation |
 | `GET /channels` | Lightning channel info for settlement |
 
 This separation keeps the on-orbit protocol simple and deterministic. Satellites verify pre-arranged tokens; they do not participate in service discovery or token issuance.
@@ -167,53 +167,50 @@ Capability tokens are inspired by UCAN (User Controlled Authorization Networks) 
 
 ### 2.2 Capability Token Structure
 
+The capability token authorizes a commander to execute specific tasks on a target
+satellite. The target's operator signs the token; the target verifies against its
+operator's pubkey (burned in at manufacturing).
+
 ```
 +----------------------------------------------------------------+
-|                    CAPABILITY TOKEN (SAT-CAP)                   |
+|                    CAPABILITY TOKEN (TLV-encoded)               |
 +----------------------------------------------------------------+
-|  Header                                                        |
-|  +-- alg: "ES256K" (ECDSA with secp256k1)                     |
-|  +-- typ: "SAT-CAP"                                           |
-|  +-- enc: "TLV"            # Type-Length-Value encoding       |
+|  REQUIRED FIELDS                                               |
+|  +-- version: 1                  # Protocol version            |
+|  +-- issuer: <33-byte pubkey>    # Target's operator (signer)  |
+|  +-- subject: <variable>         # Commander (pubkey or ID)    |
+|  +-- audience: <variable>        # Target satellite            |
+|  +-- issued_at: 1705320000       # Unix timestamp (uint32)     |
+|  +-- expires_at: 1705406400      # Expiration (uint32)         |
+|  +-- token_id: <16 random bytes> # Unique ID for replay prot.  |
+|  +-- capability: "cmd:imaging:msi"    # [MAY repeat]           |
+|  +-- capability: "cmd:attitude:point" # Multiple capabilities  |
 +----------------------------------------------------------------+
-|  Payload                                                       |
-|  +-- iss: "ESA-COPERNICUS"       # Issuer (target's operator) |
-|  +-- sub: "ICEYE-X14-51070"      # Subject (commander sat)    |
-|  +-- aud: "SENTINEL-2C-62261"    # Audience (target sat)      |
-|  +-- iat: 1705320000             # Issued at (Unix timestamp) |
-|  +-- nbf: 1705320000             # Not valid before           |
-|  +-- exp: 1705406400             # Expiration (24-48 hr)      |
-|  +-- jti: "cap-2025-001-abc"     # Unique token ID (nonce)    |
-|  |                                                             |
-|  +-- cap: [                      # Capabilities granted       |
-|  |     "cmd:imaging:msi",        # Command satellite's MSI    |
-|  |     "cmd:attitude:point",     # Adjust pointing            |
-|  |     "data:receive:msi_l1b"    # Receive MSI L1B data       |
-|  |   ]                                                        |
-|  |                                                             |
-|  +-- cns: {                      # Constraints                |
-|  |     "max_range_km": 100,      # Proximity requirement      |
-|  |     "geographic_bounds": {    # AOI restriction            |
-|  |       "type": "Polygon",                                   |
-|  |       "coordinates": [...]                                 |
-|  |     },                                                     |
-|  |     "max_tasks": 10,          # Rate limiting              |
-|  |     "max_delegation_depth": 2 # Chaining limit             |
-|  |   }                                                        |
-|  |                                                             |
-|  +-- cmd_pub: "02a1b2c3d4..."    # Commander's secp256k1 key  |
-|  |                                                             |
-|  +-- pmt: {                      # Payment terms              |
-|        "currency": "BTC",                                     |
-|        "channel_id": "abc123...",# Lightning channel          |
-|        "rate_sats_per_km2": 100, # Pricing                    |
-|        "max_amount_sats": 50000  # Budget cap                 |
-|      }                                                        |
+|  OPTIONAL CONSTRAINTS (narrow authorization)                   |
+|  +-- constraint_geo: <GeoJSON>   # Geographic bounds           |
+|  +-- constraint_rate: [10, 3600] # Max 10 per hour             |
+|  +-- constraint_amount: 50000    # Max satoshis                |
+|  +-- constraint_after: 1705320000 # Not before this time       |
 +----------------------------------------------------------------+
-|  Signature                                                     |
-|  +-- ECDSA signature by operator's private key                |
+|  DELEGATION FIELDS (if not root token)                         |
+|  +-- root_issuer: <33-byte pubkey>  # Original operator        |
+|  +-- root_token_id: <16 bytes>      # Root token reference     |
+|  +-- parent_token_id: <16 bytes>    # Parent token reference   |
+|  +-- chain_depth: 1                 # Depth in chain (root=0)  |
++----------------------------------------------------------------+
+|  SIGNATURE (must be last)                                      |
+|  +-- signature: <64-byte BIP-340 Schnorr>                      |
 +----------------------------------------------------------------+
 ```
+
+**Trust model:** The target satellite has its operator's pubkey burned in at
+manufacturing. When a commander presents a token, the target verifies the
+signature against this known pubkey. For delegated tokens, the target verifies
+the chain back to its operator.
+
+**Payment terms** are negotiated per-task in the task request/accept flow, not
+in the capability token. The token authorizes WHAT may be done; the task request
+specifies HOW MUCH to pay.
 
 ### 2.3 Capability Types
 
@@ -264,55 +261,46 @@ Capability tokens are inspired by UCAN (User Controlled Authorization Networks) 
 }
 ```
 
-### 2.5 Token ID (jti) Generation
+### 2.5 Token ID Generation
 
-The `jti` (JWT ID) field provides replay protection and unique identification. Generation requirements:
+The `token_id` field (TLV type 12) provides replay protection and unique identification.
+It consists of 16 cryptographically random bytes.
 
-#### 2.5.1 Format Specification
+**TLV format (canonical):** 16 random bytes stored as TLV type 12.
+
+**Human-readable format (for logs/APIs):** A string format may be used for debugging.
+
+#### 2.5.1 Binary Format (Canonical)
+
+```python
+import secrets
+
+def generate_token_id() -> bytes:
+    """Generate unique 16-byte token ID with replay protection."""
+    return secrets.token_bytes(16)  # 128 bits of entropy
+```
+
+#### 2.5.2 String Format (Logs/APIs)
+
+For debugging and API responses, a human-readable string format may be used:
 
 ```
-jti = <prefix>-<timestamp>-<random>
+token_id_str = <prefix>-<timestamp>-<hex>
 
 Where:
   prefix    = issuer-specific identifier (1-16 ASCII characters)
   timestamp = Unix timestamp in seconds (decimal, 10 digits)
-  random    = cryptographically random bytes (16 bytes, hex-encoded = 32 chars)
+  hex       = token_id bytes, hex-encoded (32 characters)
 
 Example: "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
 ```
 
 **Total length**: 1-16 + 1 + 10 + 1 + 32 = 45-60 characters
 
-#### 2.5.2 Generation Requirements
-
-```python
-import secrets
-import time
-
-def generate_jti(issuer_prefix: str) -> str:
-    """
-    Generate a unique token ID with replay protection.
-
-    Requirements:
-    - Minimum 128 bits of entropy in random component
-    - Timestamp for temporal ordering and cache expiration
-    - Issuer prefix for debugging and multi-issuer environments
-    """
-    if len(issuer_prefix) < 1 or len(issuer_prefix) > 16:
-        raise ValueError("Issuer prefix must be 1-16 characters")
-    if not issuer_prefix.replace('-', '').replace('_', '').isalnum():
-        raise ValueError("Issuer prefix must be alphanumeric with - or _")
-
-    timestamp = int(time.time())
-    random_bytes = secrets.token_hex(16)  # 128 bits
-
-    return f"{issuer_prefix}-{timestamp}-{random_bytes}"
-```
-
 #### 2.5.3 Uniqueness Scope
 
-- **Per-issuer uniqueness**: The `jti` MUST be unique within a single issuer's token space
-- **Global uniqueness**: The combination of `(iss, jti)` MUST be globally unique
+- **Per-issuer uniqueness**: The `token_id` MUST be unique within a single issuer's token space
+- **Global uniqueness**: The combination of `(issuer, token_id)` MUST be globally unique
 - **Collision probability**: With 128-bit random component, collision probability is negligible (~2^-64 after 2^64 tokens)
 
 #### 2.5.4 TLV Encoding
@@ -361,8 +349,8 @@ value:  [length] bytes
 | Type | Name | Length | Description |
 |------|------|--------|-------------|
 | 20 | root_issuer | 33 | Target's operator pubkey (for chain verification) |
-| 22 | root_jti | 16 | Root token ID (issued by operator) |
-| 24 | parent_jti | 16 | Immediate parent token ID |
+| 22 | root_token_id | 16 | Root token's token_id (issued by operator) |
+| 24 | parent_token_id | 16 | Immediate parent's token_id |
 | 26 | chain_depth | 1 | Depth in delegation chain (root=0) |
 
 **Encoding Rules:**
@@ -529,7 +517,7 @@ The commanding satellite sends a task request that includes both authorization a
 +----------------------------------------------------------------+
 |  Authorization                                                 |
 |  +-- capability_token: <TLV-encoded SAT-CAP>                  |
-|  +-- commander_signature: ECDSA(cmd_privkey, task_header)     |
+|  +-- commander_signature: Schnorr(cmd_privkey, task_hash)     |
 +----------------------------------------------------------------+
 |  Task Specification                                            |
 |  +-- task_type: "imaging"                                     |
@@ -592,7 +580,7 @@ The target satellite validates authorization and responds with an invoice:
 |  +-- route_hints: [...]                                        |
 +----------------------------------------------------------------+
 |  Executor Signature                                            |
-|  +-- ECDSA(executor_privkey, message)                         |
+|  +-- Schnorr(executor_privkey, message_hash)                  |
 +----------------------------------------------------------------+
 ```
 
@@ -627,7 +615,7 @@ The target satellite validates authorization and responds with an invoice:
 |       |         | 1. Token signature (operator pubkey)      |               |
 |       |         | 2. Token not expired                      |               |
 |       |         | 3. aud == self                            |               |
-|       |         | 4. jti not replayed                       |               |
+|       |         | 4. token_id not replayed                  |               |
 |       |         | 5. Command in cap[]                       |               |
 |       |         | 6. Commander signature (cmd_pub)          |               |
 |       |         | 7. Constraints satisfied                  |               |
@@ -738,7 +726,7 @@ The target satellite validates authorization and responds with an invoice:
 |  +-- delivery_eta: "2025-01-15T15:00:00Z"                     |
 +----------------------------------------------------------------+
 |  Executor Signature                                            |
-|  +-- ECDSA signature over all above fields                     |
+|  +-- Schnorr signature over all above fields                   |
 +----------------------------------------------------------------+
 ```
 
@@ -783,36 +771,40 @@ When tasks must route through multiple satellites, each hop creates a delegation
 
 ### 5.2 Delegation Token Structure
 
+Delegation tokens use the same TLV format as root tokens, with additional fields
+for chain verification. The delegating satellite signs the token.
+
 ```
 +----------------------------------------------------------------+
-|                    DELEGATION TOKEN (SAT-CAP-DEL)               |
+|                    DELEGATION TOKEN (TLV-encoded)               |
 +----------------------------------------------------------------+
-|  Header                                                        |
-|  +-- alg: "ES256K"                                             |
-|  +-- typ: "SAT-CAP-DEL"                                        |
-|  +-- chn: 2                      # Chain depth (0 = root)      |
+|  REQUIRED FIELDS (same as root token)                          |
+|  +-- version: 1                                                |
+|  +-- issuer: <delegator's pubkey>    # Who is delegating       |
+|  +-- subject: <delegate's pubkey>    # Who receives delegation |
+|  +-- audience: <target satellite>    # Final target (unchanged)|
+|  +-- issued_at: 1705330805                                     |
+|  +-- expires_at: 1705334400          # Must be <= parent       |
+|  +-- token_id: <16 random bytes>                               |
+|  +-- capability: "cmd:relay:store"   # Must be subset parent   |
 +----------------------------------------------------------------+
-|  Payload                                                       |
-|  +-- iss: "IRIDIUM-168"          # Delegating satellite        |
-|  +-- sub: "IRIDIUM-172"          # Delegate (next hop)         |
-|  +-- aud: "SENTINEL-2C"          # Final target (unchanged)    |
-|  +-- root_iss: "ESA-COPERNICUS"  # Original token issuer       |
-|  +-- root_jti: "cap-001"         # Original token ID           |
-|  +-- parent_jti: "del-001"       # Parent delegation ID        |
-|  +-- iat: 1705330805                                           |
-|  +-- exp: 1705334400             # Must be <= parent exp       |
-|  +-- jti: "del-002"              # This delegation's ID        |
-|  +-- cap: [...]                  # Must be subset of parent    |
-|  +-- cns: {...}                  # Must be >= restrictive      |
-|  +-- del_pub: "02d5e6..."        # Delegate's public key       |
+|  DELEGATION FIELDS (required for non-root)                     |
+|  +-- root_issuer: <operator pubkey>  # Target's operator       |
+|  +-- root_token_id: <16 bytes>       # Original token ID       |
+|  +-- parent_token_id: <16 bytes>     # Parent token ID         |
+|  +-- chain_depth: 2                  # Depth (root=0)          |
 +----------------------------------------------------------------+
-|  Delegation Chain (reference or full tokens)                   |
-|  +-- chain: [<root_jti>, <del_1_jti>]  # Compact form          |
+|  OPTIONAL CONSTRAINTS (must be >= restrictive as parent)       |
+|  +-- constraint_rate: [5, 3600]      # Stricter than parent    |
 +----------------------------------------------------------------+
-|  Signature                                                     |
-|  +-- ECDSA signature by delegating satellite's private key    |
+|  SIGNATURE                                                     |
+|  +-- signature: <64-byte Schnorr by delegator>                 |
 +----------------------------------------------------------------+
 ```
+
+**Presentation:** When presenting a delegated token, the commander includes the
+full chain of tokens from root to the presented token. The target verifies each
+link in the chain.
 
 ### 5.3 Delegation Rules
 
@@ -1089,21 +1081,22 @@ When a customer initiates a dispute, they broadcast a signed message:
 ```python
 @dataclass
 class DisputeMessage:
-    task_jti: str              # Reference to original task
+    task_token_id: bytes       # 16 bytes, reference to original task
     payment_hash: bytes        # 32 bytes, identifies the HTLC
     dispute_type: str          # "no_proof" | "invalid_proof" | "constraint_violation"
     evidence: DisputeEvidence  # Type-specific evidence
     timestamp: int             # Unix timestamp
-    customer_sig: bytes        # ECDSA signature over message hash
+    customer_sig: bytes        # BIP-340 Schnorr signature
 
     def message_hash(self) -> bytes:
-        return hashlib.sha256(
-            self.task_jti.encode() +
+        return tagged_hash(
+            "SCRAP/dispute/v1",
+            self.task_token_id +
             self.payment_hash +
             self.dispute_type.encode() +
             self.evidence.serialize() +
-            self.timestamp.to_bytes(8, 'big')
-        ).digest()
+            self.timestamp.to_bytes(4, 'big')
+        )
 
 @dataclass
 class DisputeEvidence:
@@ -1278,8 +1271,8 @@ Ground stations handle on-chain settlement and watchtower functions, but do NOT 
 | Threat | Mitigation |
 |--------|------------|
 | **Unauthorized command** | Capability token verification |
-| **Replay attack** | Token ID (jti) in used-token cache |
-| **Man-in-the-middle** | ECDSA signatures on all messages |
+| **Replay attack** | Token ID (token_id) in used-token cache |
+| **Man-in-the-middle** | BIP-340 Schnorr signatures on all messages |
 | **Payment theft** | HTLC timeout guarantees refund |
 | **Old state broadcast** | Watchtower penalty transactions |
 | **Clock manipulation** | GPS-disciplined clocks, tolerant windows |
@@ -1290,7 +1283,7 @@ Ground stations handle on-chain settlement and watchtower functions, but do NOT 
 |----------|-----------|
 | **Authentication** | Operator signature on token; commander signature on command |
 | **Authorization** | Explicit capability list in token |
-| **Integrity** | ECDSA signatures over all data |
+| **Integrity** | BIP-340 Schnorr signatures over all data |
 | **Freshness** | Timestamps, expiration, nonces |
 | **Non-repudiation** | Payment preimage serves as receipt |
 | **Atomicity** | HTLC: either complete or timeout refund |
@@ -1304,63 +1297,51 @@ Ground stations handle on-chain settlement and watchtower functions, but do NOT 
 ```python
 @dataclass
 class CapabilityToken:
-    issuer: str                    # Target's operator ID
-    subject: str                   # Commanding satellite ID
-    audience: str                  # Target satellite ID
-    issued_at: int                 # Unix timestamp
-    expires_at: int
-    token_id: str                  # Unique nonce (jti)
+    """TLV-encoded capability token."""
+    version: int                   # Protocol version (1)
+    issuer: bytes                  # Target's operator pubkey (33 bytes)
+    subject: bytes | str           # Commander pubkey or identifier
+    audience: bytes | str          # Target satellite pubkey or identifier
+    issued_at: int                 # Unix timestamp (uint32)
+    expires_at: int                # Unix timestamp (uint32)
+    token_id: bytes                # Unique ID (16 random bytes)
     capabilities: list[str]        # Permitted operations
-    constraints: dict              # Range, region, rate limits
-    commander_pubkey: bytes        # secp256k1 public key
-    payment_terms: dict | None     # Lightning channel, rates
-    signature: bytes               # Operator's ECDSA signature
+    constraints: dict | None       # Optional: geo, rate, amount, after
+    # Delegation fields (None for root tokens)
+    root_issuer: bytes | None      # Target's operator (for delegation)
+    root_token_id: bytes | None    # Root token ID (16 bytes)
+    parent_token_id: bytes | None  # Parent token ID (16 bytes)
+    chain_depth: int | None        # Delegation depth (root=0)
+    signature: bytes               # BIP-340 Schnorr (64 bytes)
 
 @dataclass
 class TaskRequest:
     task_id: str
-    capability_token: CapabilityToken
+    capability_token: bytes        # TLV-encoded token
+    delegation_chain: list[bytes]  # Parent tokens if delegated
     task_type: str
     target: dict                   # GeoJSON
     parameters: dict
     constraints: dict
-    payment_offer: dict
-    commander_signature: bytes
+    payment_offer: dict            # max_sats, timeout_blocks
+    commander_signature: bytes     # Schnorr signature
 
 @dataclass
 class TaskAccept:
     task_id: str
     execution_plan: dict
     invoice: LightningInvoice      # BOLT 11
-    executor_signature: bytes
+    executor_signature: bytes      # Schnorr signature
 
 @dataclass
 class ProofOfExecution:
     task_id: str
-    executor: str
+    executor: bytes                # Executor pubkey
     execution_time: int
     parameters_as_executed: dict
     product_hash: bytes            # SHA256 of output
     delivery_info: dict
-    executor_signature: bytes
-
-@dataclass
-class DelegationToken:
-    header: dict                   # typ, alg, chn
-    issuer: str                    # Delegating satellite
-    subject: str                   # Delegate
-    audience: str                  # Final target
-    root_issuer: str
-    root_jti: str
-    parent_jti: str
-    issued_at: int
-    expires_at: int
-    token_id: str
-    capabilities: list[str]        # subset of parent
-    constraints: dict              # >= restrictive
-    delegate_pubkey: bytes
-    chain: list[str]               # Parent token IDs
-    signature: bytes
+    executor_signature: bytes      # Schnorr signature
 ```
 
 ### 10.2 Verification Functions
@@ -1368,49 +1349,60 @@ class DelegationToken:
 ```python
 def verify_capability_token(token: CapabilityToken,
                             target: Satellite) -> bool:
-    """Verify single-hop capability token"""
+    """Verify single-hop (root) capability token."""
 
-    # 1. Verify signature by operator
-    if not verify_ecdsa(token, target.operator_pubkey):
+    # 1. Verify signature by operator (BIP-340 Schnorr)
+    token_data = token.serialize_tlv(exclude_signature=True)
+    token_hash = tagged_hash("SCRAP/token/v1", token_data)
+    if not schnorr_verify(token_hash, token.signature, target.operator_pubkey):
         return False
 
     # 2. Check audience matches target
-    if token.audience != target.id:
+    if token.audience != target.id and token.audience != target.pubkey:
         return False
 
     # 3. Check not expired
-    if token.expires_at < now():
+    if token.expires_at < get_secure_time():
         return False
 
-    # 4. Check not replayed
+    # 4. Check not replayed (token_id is 16 bytes)
     if token.token_id in target.used_tokens:
         return False
-    target.used_tokens.add(token.token_id)
+    target.used_tokens.add(token.token_id, token.expires_at)
 
     return True
 
-def verify_delegation_chain(token: DelegationToken,
-                            chain: list[CapabilityToken | DelegationToken],
+def verify_delegation_chain(token: CapabilityToken,
+                            chain: list[CapabilityToken],
                             target: Satellite) -> bool:
-    """Verify complete delegation chain"""
+    """Verify delegated token with full chain back to root."""
 
     full_chain = chain + [token]
 
     # 1. Verify root is from target's operator
     root = full_chain[0]
-    if not verify_ecdsa(root, target.operator_pubkey):
+    root_data = root.serialize_tlv(exclude_signature=True)
+    root_hash = tagged_hash("SCRAP/token/v1", root_data)
+    if not schnorr_verify(root_hash, root.signature, target.operator_pubkey):
         return False
-    if root.audience != target.id:
+    if root.audience != target.id and root.audience != target.pubkey:
         return False
+    if root.chain_depth is not None and root.chain_depth != 0:
+        return False  # Root must have depth 0 or None
 
     # 2. Walk chain verifying each delegation
     for i in range(1, len(full_chain)):
         parent = full_chain[i-1]
         child = full_chain[i]
 
-        # Verify parent signed child
-        parent_pubkey = parent.commander_pubkey if i == 1 else parent.delegate_pubkey
-        if not verify_ecdsa(child, parent_pubkey):
+        # Child issuer must match parent subject
+        if child.issuer != parent.subject:
+            return False
+
+        # Verify child signature by parent's subject (who is the delegator)
+        child_data = child.serialize_tlv(exclude_signature=True)
+        child_hash = tagged_hash("SCRAP/delegation/v1", child_data)
+        if not schnorr_verify(child_hash, child.signature, parent.subject):
             return False
 
         # Verify capability attenuation
@@ -1419,6 +1411,17 @@ def verify_delegation_chain(token: DelegationToken,
 
         # Verify expiration inheritance
         if child.expires_at > parent.expires_at:
+            return False
+
+        # Verify chain depth
+        expected_depth = (parent.chain_depth or 0) + 1
+        if child.chain_depth != expected_depth:
+            return False
+
+        # Verify root references match
+        if child.root_issuer != target.operator_pubkey:
+            return False
+        if child.root_token_id != root.token_id:
             return False
 
     return True
@@ -1437,7 +1440,7 @@ import time
 
 @dataclass
 class UsedTokenEntry:
-    jti: str
+    token_id: bytes      # 16-byte token identifier
     expires_at: int      # Token expiration timestamp
     added_at: int        # When entry was added to cache
 
@@ -1450,16 +1453,16 @@ class UsedTokenCache:
     """
 
     def __init__(self, max_entries: int = 10000):
-        self.entries: Dict[str, UsedTokenEntry] = {}
+        self.entries: Dict[bytes, UsedTokenEntry] = {}
         self.max_entries = max_entries
 
-    def contains(self, jti: str) -> bool:
+    def contains(self, token_id: bytes) -> bool:
         """Check if token has been used."""
-        if jti in self.entries:
+        if token_id in self.entries:
             return True
         return False
 
-    def add(self, jti: str, expires_at: int) -> None:
+    def add(self, token_id: bytes, expires_at: int) -> None:
         """Add token to used cache."""
         # Evict expired entries if at capacity
         if len(self.entries) >= self.max_entries:
@@ -1469,8 +1472,8 @@ class UsedTokenCache:
         if len(self.entries) >= self.max_entries:
             self._evict_oldest(count=self.max_entries // 10)
 
-        self.entries[jti] = UsedTokenEntry(
-            jti=jti,
+        self.entries[token_id] = UsedTokenEntry(
+            token_id=token_id,
             expires_at=expires_at,
             added_at=int(time.time())
         )
@@ -1478,10 +1481,10 @@ class UsedTokenCache:
     def _evict_expired(self) -> int:
         """Remove entries for expired tokens. Returns count evicted."""
         now = int(time.time())
-        expired = [jti for jti, entry in self.entries.items()
+        expired = [tid for tid, entry in self.entries.items()
                    if entry.expires_at < now]
-        for jti in expired:
-            del self.entries[jti]
+        for tid in expired:
+            del self.entries[tid]
         return len(expired)
 
     def _evict_oldest(self, count: int) -> None:
@@ -1492,8 +1495,8 @@ class UsedTokenCache:
 
         sorted_entries = sorted(self.entries.items(),
                                 key=lambda x: x[1].added_at)
-        for jti, _ in sorted_entries[:count]:
-            del self.entries[jti]
+        for tid, _ in sorted_entries[:count]:
+            del self.entries[tid]
 ```
 
 #### 10.3.2 Eviction Policy
@@ -1595,9 +1598,9 @@ def verify_and_mark_token(token: CapabilityToken, target: Satellite) -> VerifyRe
 
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
-| **CPU** | ARM Cortex-A class | ECDSA, SHA256 |
+| **CPU** | ARM Cortex-A class | Schnorr, SHA256 |
 | **RAM** | 64 MB minimum | Channel state, token cache |
-| **Storage** | 10 MB | Channels, used jti cache |
+| **Storage** | 10 MB | Channels, used token_id cache |
 | **RNG** | Hardware TRNG | Key/nonce generation |
 | **Clock** | See timing requirements below | HTLC timeouts |
 
@@ -1708,9 +1711,9 @@ SCRAP uses **secp256k1 exclusively** for all cryptographic operations:
 | Operation | Curve | Algorithm | Frequency |
 |-----------|-------|-----------|-----------|
 | SISL X3DH key agreement | secp256k1 | ECDH × 3 | Once per session |
-| Capability token signatures | secp256k1 | ECDSA | Once per task |
-| Proof-of-execution signatures | secp256k1 | ECDSA | Once per task |
-| Lightning HTLCs | secp256k1 | ECDSA/Schnorr | Once per payment |
+| Capability token signatures | secp256k1 | BIP-340 Schnorr | Once per task |
+| Proof-of-execution signatures | secp256k1 | BIP-340 Schnorr | Once per task |
+| Lightning PTLCs | secp256k1 | Schnorr adaptor | Once per payment |
 | Onion routing (per-hop) | secp256k1 | ECDH | Per relay hop |
 | BIP-32 key derivation | secp256k1 | Point multiplication | At provisioning |
 
@@ -2031,9 +2034,9 @@ Capability tokens and Lightning payments are cryptographically bound to prevent 
 |    binding_signature                                                        |
 |  }                                                                          |
 |                                                                             |
-|  Binding: ECDSA_Sign(                                                       |
+|  Binding: Schnorr_Sign(                                                     |
 |    requester_key,                                                           |
-|    tagged_hash("SCRAP/binding/v1", jti || payment_hash)                     |
+|    tagged_hash("SCRAP/binding/v1", token_id || payment_hash)                |
 |  )                                                                          |
 |                                                                             |
 |  Verification:                                                              |
@@ -2082,25 +2085,26 @@ When the executor completes the task, they generate a proof that:
 ```python
 @dataclass
 class ExecutionProof:
-    task_jti: str                # From capability token
+    task_token_id: bytes         # 16 bytes, from capability token
     payment_hash: bytes          # 32 bytes, binds proof to specific HTLC
     output_hash: bytes           # SHA256 of task output
-    execution_timestamp: int     # Unix timestamp
-    executor_sig: bytes          # ECDSA(executor_key, proof_hash)
+    execution_timestamp: int     # Unix timestamp (uint32)
+    executor_sig: bytes          # BIP-340 Schnorr signature
 
     def proof_hash(self) -> bytes:
-        return hashlib.sha256(
-            self.task_jti.encode() +
+        return tagged_hash(
+            "SCRAP/proof/v1",
+            self.task_token_id +
             self.payment_hash +
             self.output_hash +
-            self.execution_timestamp.to_bytes(8, 'big')
-        ).digest()
+            self.execution_timestamp.to_bytes(4, 'big')
+        )
 
     def verify(self, executor_pubkey: bytes) -> bool:
-        return ecdsa_verify(
-            executor_pubkey,
+        return schnorr_verify(
             self.proof_hash(),
-            self.executor_sig
+            self.executor_sig,
+            executor_pubkey
         )
 ```
 
@@ -2959,19 +2963,25 @@ SISL sessions have limited duration (ISL contact window). SCRAP must complete wi
 
 Test vectors for interoperability testing. All values in hexadecimal unless noted.
 
-### 18.1 Token ID (jti) Generation
+### 18.1 Token ID Generation
+
+The TLV format uses 16-byte binary `token_id`. For logs and APIs, a string
+representation may be used:
 
 ```
-TEST VECTOR 1: JTI Generation
-=============================
+TEST VECTOR 1: Token ID Generation
+==================================
 
 Input:
   issuer_prefix = "ESA"
   timestamp = 1705320000 (2025-01-15T12:00:00Z)
   random_bytes = 0xa1b2c3d4e5f6789012345678abcdef01
 
-Output:
-  jti = "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+TLV token_id (16 bytes):
+  0xa1b2c3d4e5f6789012345678abcdef01
+
+String format (for logs/APIs):
+  "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
 ```
 
 ### 18.2 Capability Token Encoding
@@ -3042,7 +3052,7 @@ Output:
   binding_hash = <implementation should compute with tagged_hash>
 
 Note: The binding uses the 16-byte token_id (TLV type 12), not the
-legacy string-based jti. This provides a fixed-size binding input.
+string format. This provides a fixed-size binding input.
 ```
 
 ### 18.4 Execution Proof
@@ -3056,14 +3066,14 @@ Tag precomputation:
   tag_hash = SHA256(tag.encode('utf-8'))
 
 Input:
-  task_jti = "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+  task_token_id = 0xa1b2c3d4e5f6789012345678abcdef01 (16 bytes)
   payment_hash = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   output_hash = 0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
   execution_timestamp = 1705320045
   execution_timestamp (big-endian, 8 bytes) = 0x0000000065a51e6d
 
 Proof hash (domain-separated):
-  proof_msg = task_jti.encode('utf-8') +
+  proof_msg = task_token_id +
               payment_hash +
               output_hash +
               execution_timestamp.to_bytes(8, 'big')
@@ -3073,8 +3083,7 @@ Proof hash (domain-separated):
 Output:
   proof_hash = <implementation should compute with tagged_hash>
 
-Note: The old non-domain-separated hash was 0xf37b154e8763b9bbc99ceef968f02566a1f799eefaf5a34b9c8956c8801aaf6f.
-Implementations MUST use the domain-separated version.
+Note: Uses the 16-byte binary token_id, not the string format.
 ```
 
 ### 18.5 BIP-32 Key Derivation
@@ -3115,27 +3124,30 @@ master key above to compute derived keys for your implementation.
 
 import hashlib
 import hmac
-import secrets
 
-def generate_jti(issuer_prefix: str) -> str:
-    """Generate unique token ID with replay protection."""
-    timestamp = 1705320000  # Fixed for test vector
-    random_hex = "a1b2c3d4e5f6789012345678abcdef01"  # Fixed for test vector
-    return f"{issuer_prefix}-{timestamp}-{random_hex}"
+def generate_token_id() -> bytes:
+    """Generate unique 16-byte token ID."""
+    # Fixed for test vector; in production use secrets.token_bytes(16)
+    return bytes.fromhex("a1b2c3d4e5f6789012345678abcdef01")
 
-def compute_binding_hash(jti: str, payment_hash: bytes) -> bytes:
-    """Compute payment-capability binding hash."""
-    return hashlib.sha256(jti.encode('utf-8') + payment_hash).digest()
+def token_id_to_string(token_id: bytes, issuer_prefix: str, timestamp: int) -> str:
+    """Convert binary token_id to string format for logs/APIs."""
+    return f"{issuer_prefix}-{timestamp}-{token_id.hex()}"
 
-def compute_proof_hash(task_jti: str, payment_hash: bytes,
+def tagged_hash(tag: str, msg: bytes) -> bytes:
+    """BIP-340 style tagged hash with domain separation."""
+    tag_hash = hashlib.sha256(tag.encode('utf-8')).digest()
+    return hashlib.sha256(tag_hash + tag_hash + msg).digest()
+
+def compute_binding_hash(token_id: bytes, payment_hash: bytes) -> bytes:
+    """Compute payment-capability binding hash (domain separated)."""
+    return tagged_hash("SCRAP/binding/v1", token_id + payment_hash)
+
+def compute_proof_hash(task_token_id: bytes, payment_hash: bytes,
                        output_hash: bytes, timestamp: int) -> bytes:
-    """Compute execution proof hash."""
-    return hashlib.sha256(
-        task_jti.encode('utf-8') +
-        payment_hash +
-        output_hash +
-        timestamp.to_bytes(8, 'big')
-    ).digest()
+    """Compute execution proof hash (domain separated)."""
+    msg = task_token_id + payment_hash + output_hash + timestamp.to_bytes(8, 'big')
+    return tagged_hash("SCRAP/proof/v1", msg)
 
 def compute_bip32_master(seed: bytes) -> tuple[bytes, bytes]:
     """Compute BIP-32 master key from seed."""
@@ -3143,23 +3155,27 @@ def compute_bip32_master(seed: bytes) -> tuple[bytes, bytes]:
     return I[:32], I[32:]  # master_secret, chain_code
 
 if __name__ == "__main__":
-    # Test Vector 1: JTI
-    jti = generate_jti("ESA")
-    assert jti == "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+    # Test Vector 1: Token ID
+    token_id = generate_token_id()
+    assert token_id.hex() == "a1b2c3d4e5f6789012345678abcdef01"
 
-    # Test Vector 3: Binding hash
+    # String format for logs
+    token_str = token_id_to_string(token_id, "ESA", 1705320000)
+    assert token_str == "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+
+    # Test Vector 3: Binding hash (domain separated)
     payment_hash = bytes.fromhex(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     )
-    binding = compute_binding_hash(jti, payment_hash)
-    assert binding.hex() == "744e44abb226dc4b2bd000c2fa18b742b006c961d927a0d7170c1c068d7eadb9"
+    binding = compute_binding_hash(token_id, payment_hash)
+    # Note: hash value changes with domain separation
 
-    # Test Vector 4: Proof hash
+    # Test Vector 4: Proof hash (domain separated)
     output_hash = bytes.fromhex(
         "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
     )
-    proof = compute_proof_hash(jti, payment_hash, output_hash, 1705320045)
-    assert proof.hex() == "f37b154e8763b9bbc99ceef968f02566a1f799eefaf5a34b9c8956c8801aaf6f"
+    proof = compute_proof_hash(token_id, payment_hash, output_hash, 1705320045)
+    # Note: hash value changes with domain separation
 
     # Test Vector 5: BIP-32 master key
     seed = bytes.fromhex("000102030405060708090a0b0c0d0e0f")

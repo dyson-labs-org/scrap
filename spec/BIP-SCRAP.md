@@ -218,8 +218,8 @@ CapabilityToken (TLV encoding):
   Type 12:  token_id (16 bytes)       # Random bytes for replay protection
   Type 14:  capability (variable)     # Capability string [MAY repeat]
   Type 20:  root_issuer (33 bytes)    # Target's operator (for delegation chains)
-  Type 22:  root_jti (16 bytes)       # Root token ID
-  Type 24:  parent_jti (16 bytes)     # Parent token ID
+  Type 22:  root_token_id (16 bytes)  # Root token's token_id
+  Type 24:  parent_token_id (16 bytes) # Parent's token_id
   Type 26:  chain_depth (1 byte)      # Delegation depth (root=0)
   Type 240: signature (64 bytes)      # BIP-340 Schnorr signature (MUST be last)
 ```
@@ -276,16 +276,16 @@ ground station or gateway.
 
 ### Replay Protection
 
-Capability tokens include unique identifiers (`jti`) that must not be reused.
-Verification MUST proceed in this order:
+Capability tokens include unique identifiers (`token_id`, 16 random bytes) that
+must not be reused. Verification MUST proceed in this order:
 
 ```
-1. Reject if exp < now                        (token expired)
-2. Reject if exp > now + MAX_TOKEN_LIFETIME   (expiration too far future)
-3. Reject if iat > now                        (issued in future)
-4. Reject if jti in used_token_cache          (replay attempt)
-5. Add (jti, exp) to used_token_cache         (record usage)
-6. Periodically evict entries where exp < now (remove expired only)
+1. Reject if exp < now                              (token expired)
+2. Reject if exp > now + MAX_TOKEN_LIFETIME         (expiration too far future)
+3. Reject if iat > now                              (issued in future)
+4. Reject if token_id in used_token_cache           (replay attempt)
+5. Add (token_id, exp) to used_token_cache          (record usage)
+6. Periodically evict entries where exp < now       (remove expired only)
 ```
 
 **Critical**: Only evict expired entries from the cache. Never evict entries
@@ -480,7 +480,7 @@ State rollback could enable double-spending of channel funds.
 
 See [SCRAP.md](SCRAP.md) Section 18 for test vectors covering:
 
-- Token ID (jti) generation
+- Token ID (token_id) generation
 - Binding hash computation (with domain separation)
 - Execution proof hash
 - BIP-32 key derivation paths

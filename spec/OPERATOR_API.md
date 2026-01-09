@@ -62,11 +62,11 @@ SCRAP Operator API Conformance Classes
 │
 ├── /conf/tokens                  [REQUIRED]
 │   ├── POST /tokens
-│   ├── GET  /tokens/{jti}
+│   ├── GET  /tokens/{token_id}
 │   └── GET  /tokens
 │
 ├── /conf/token-revocation        [OPTIONAL]
-│   └── DELETE /tokens/{jti}
+│   └── DELETE /tokens/{token_id}
 │
 ├── /conf/token-quotes            [OPTIONAL]
 │   └── POST /tokens/quote
@@ -514,7 +514,7 @@ Request a signed capability token.
 **Response** `201 Created`:
 ```json
 {
-  "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
+  "token_id": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
   "token": "omlzaWduYXR1cmVYQDBhMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWZncGF5bG9hZKR...",
   "token_format": "CBOR+ECDSA",
   "token_decoded": {
@@ -530,7 +530,7 @@ Request a signed capability token.
       "iat": 1705320000,
       "nbf": 1705320000,
       "exp": 1705406400,
-      "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
+      "token_id": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
       "cap": ["cmd:imaging:msi", "cmd:attitude:point"],
       "cns": {
         "geographic_bounds": { "type": "Polygon", "coordinates": [...] },
@@ -575,7 +575,7 @@ Request a signed capability token.
 ### 4.7 Get Token Status
 
 ```
-GET /tokens/{jti}
+GET /tokens/{token_id}
 ```
 
 Returns status of a previously issued token.
@@ -585,12 +585,12 @@ Returns status of a previously issued token.
 **Path Parameters**:
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `jti` | string | Token ID |
+| `token_id` | string | Token ID |
 
 **Response** `200 OK`:
 ```json
 {
-  "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
+  "token_id": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
   "status": "active",
   "created_at": "2025-01-15T00:00:00Z",
   "expires_at": "2025-01-16T00:00:00Z",
@@ -646,14 +646,14 @@ Returns list of tokens issued to the authenticated customer.
 {
   "tokens": [
     {
-      "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
+      "token_id": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
       "status": "active",
       "audience": "SENTINEL-2C-62261",
       "capabilities": ["cmd:imaging:msi"],
       "expires_at": "2025-01-16T00:00:00Z"
     },
     {
-      "jti": "ESA-1705233600-fedcba9876543210fedcba9876543210",
+      "token_id": "ESA-1705233600-fedcba9876543210fedcba9876543210",
       "status": "expired",
       "audience": "SENTINEL-1C-62262",
       "capabilities": ["cmd:imaging:sar:iw"],
@@ -671,7 +671,7 @@ Returns list of tokens issued to the authenticated customer.
 ### 4.9 Revoke Token
 
 ```
-DELETE /tokens/{jti}
+DELETE /tokens/{token_id}
 ```
 
 Revoke a previously issued token.
@@ -683,12 +683,12 @@ Revoke a previously issued token.
 **Path Parameters**:
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `jti` | string | Token ID |
+| `token_id` | string | Token ID |
 
 **Response** `200 OK`:
 ```json
 {
-  "jti": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
+  "token_id": "ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01",
   "status": "revoked",
   "revoked_at": "2025-01-15T12:00:00Z",
   "revoked_by": "customer"
@@ -897,7 +897,7 @@ All errors return a JSON object:
 
 - Tokens SHOULD have short lifetimes (24-48 hours typical)
 - Revocation SHOULD be propagated to satellites promptly
-- Used token IDs (`jti`) MUST be cached on satellites to prevent replay
+- Used token IDs (`token_id`) MUST be cached on satellites to prevent replay
 
 ### 7.4 Rate Limiting
 
@@ -919,7 +919,7 @@ If implementing alongside STAPI:
 | `GET /products` | `GET /satellites` | Satellites are "products" |
 | `POST /products/{id}/opportunities` | N/A | Use TLE for pass prediction |
 | `POST /products/{id}/orders` | `POST /tokens` | Tokens replace orders |
-| `GET /orders/{id}` | `GET /tokens/{jti}` | Token status |
+| `GET /orders/{id}` | `GET /tokens/{token_id}` | Token status |
 
 ### 8.2 Reference Implementation
 
