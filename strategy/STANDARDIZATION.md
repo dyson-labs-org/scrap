@@ -1,8 +1,8 @@
-# SCAP/SISL Standardization Strategy
+# SCRAP/SISL Standardization Strategy
 
 Last updated: 2025-12-29
 
-This document outlines the path to international standardization for SCAP (Satellite Capability and Payment Protocol) and SISL (Secure Inter-Satellite Link).
+This document outlines the path to international standardization for SCRAP (Secure Capabilities and Routed Authorization Protocol) and SISL (Secure Inter-Satellite Link).
 
 ---
 
@@ -42,15 +42,15 @@ CCSDS is the international standards body for space data systems, founded in 198
 
 **Working Groups:**
 
-| Group | Chair | Focus | SCAP/SISL Relevance |
+| Group | Chair | Focus | SCRAP/SISL Relevance |
 |-------|-------|-------|---------------------|
-| SIS-DTN | Robert Durst | Bundle Protocol, store-and-forward | Delay-tolerant SCAP messaging |
+| SIS-DTN | Robert Durst | Bundle Protocol, store-and-forward | Delay-tolerant SCRAP messaging |
 | SIS-CFDPV1 | Felix Flentge | File delivery protocol | Large payload transfer |
 | SIS-MIVA | Flak Schiffner | Motion imagery and voice | Real-time applications |
 | SIS-VOICE | - | Voice communications | Audio relay |
 
 **Why SIS Area:**
-- SCAP/SISL addresses network-layer interoperability
+- SCRAP/SISL addresses network-layer interoperability
 - Focus on heterogeneous network interconnection
 - Application-layer protocol development
 - Direct fit for "communications among multiple spacecraft"
@@ -108,19 +108,19 @@ CCSDS is the international standards body for space data systems, founded in 198
 
 ---
 
-### SCAP/SISL Standardization Plan
+### SCRAP/SISL Standardization Plan
 
 **Year 1: Foundation**
 | Activity | Target | Document |
 |----------|--------|----------|
-| Concept Paper | Q2 2026 | SCAP/SISL overview |
+| Concept Paper | Q2 2026 | SCRAP/SISL overview |
 | BOF Request | Q3 2026 | SIS Area meeting |
 | NWI Proposal | Q4 2026 | Formal work item |
 
 **Year 2: Development**
 | Activity | Target | Document |
 |----------|--------|----------|
-| White Book | Q2 2027 | SCAP Protocol Specification |
+| White Book | Q2 2027 | SCRAP Protocol Specification |
 | White Book | Q2 2027 | SISL Link Security |
 | Agency Review | Q4 2027 | Red Book preparation |
 
@@ -156,8 +156,8 @@ CCSDS is the international standards body for space data systems, founded in 198
 | RFC 9174 | DTN TCP CL | Ground segment |
 | RFC 9175 | DTN UDP CL | Ground segment |
 
-**SCAP/SISL Integration:**
-- SCAP messages can be encapsulated in Bundle Protocol
+**SCRAP/SISL Integration:**
+- SCRAP messages can be encapsulated in Bundle Protocol
 - SISL provides link-layer security (complementary to BPSec)
 - DTN addresses store-and-forward for intermittent connectivity
 
@@ -184,16 +184,16 @@ CCSDS is the international standards body for space data systems, founded in 198
 | Rel-19 | Advanced NTN | 2025 |
 | Rel-20 | 6G-NTN integration | 2027+ |
 
-### Relevance to SCAP/SISL
+### Relevance to SCRAP/SISL
 
-| Feature | 3GPP Approach | SCAP/SISL Approach |
+| Feature | 3GPP Approach | SCRAP/SISL Approach |
 |---------|---------------|-------------------|
 | Authentication | 5G-AKA | X3DH |
 | Authorization | Network slicing | Capability tokens |
 | Encryption | SNOW, AES | AES-256-GCM |
 | ISL | Not specified | SISL |
 
-**Opportunity:** SCAP/SISL could complement 3GPP NTN for inter-constellation coordination.
+**Opportunity:** SCRAP/SISL could complement 3GPP NTN for inter-constellation coordination.
 
 ---
 
@@ -231,7 +231,7 @@ CCSDS is the international standards body for space data systems, founded in 198
 3. Propose technology standards for ISL value chain
 4. Framework for interoperation and technology reuse
 
-**Alignment:** SCAP transport bindings (Section 16) directly support this standardization goal.
+**Alignment:** SCRAP transport bindings (Section 16) directly support this standardization goal.
 
 ---
 
@@ -241,7 +241,7 @@ CCSDS is the international standards body for space data systems, founded in 198
 
 1. **CCSDS Contact** - Identify NASA SCaN point of contact for SIS Area
 2. **ESA Engagement** - Connect with ARTES ISL standardization team
-3. **Concept Paper Draft** - Prepare SCAP/SISL technical overview
+3. **Concept Paper Draft** - Prepare SCRAP/SISL technical overview
 
 ### Near-Term (2026)
 
@@ -251,7 +251,7 @@ CCSDS is the international standards body for space data systems, founded in 198
 
 ### Medium-Term (2027-2028)
 
-1. **White Book** - Complete SCAP protocol specification
+1. **White Book** - Complete SCRAP protocol specification
 2. **Reference Implementation** - Open-source implementation for validation
 3. **Interoperability Testing** - Multi-vendor demonstrations
 
@@ -325,4 +325,4 @@ CCSDS is the international standards body for space data systems, founded in 198
 
 ---
 
-*Document maintained for SCAP/SISL standardization tracking. Last updated: 2025-12-29.*
+*Document maintained for SCRAP/SISL standardization tracking. Last updated: 2025-12-29.*

@@ -8,7 +8,7 @@
 - Ground authorizes or denies
 - Waits for next pass to relay decision
 
-**SCAP eliminates the ground loop:**
+**SCRAP eliminates the ground loop:**
 - Operator pre-signs capability tokens (before mission)
 - Tokens uploaded to requesting satellite
 - Target satellite verifies token signature on-orbit

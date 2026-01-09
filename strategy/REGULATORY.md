@@ -1,8 +1,8 @@
-# SCAP/SISL Regulatory Landscape
+# SCRAP/SISL Regulatory Landscape
 
 Last updated: 2025-12-29
 
-This document tracks regulatory developments, spectrum allocation, and policy considerations relevant to SCAP (Satellite Capability and Payment Protocol) and SISL (Secure Inter-Satellite Link) deployment.
+This document tracks regulatory developments, spectrum allocation, and policy considerations relevant to SCRAP (Secure Capabilities and Routed Authorization Protocol) and SISL (Secure Inter-Satellite Link) deployment.
 
 ---
 
@@ -26,7 +26,7 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 
 **Industry Support:** Satellite Industry Association applauded the expansion as critical for "domestic technological innovation and U.S. space industry leadership."
 
-**Relevance to SCAP/SISL:** X-band and higher frequency ISL operations may benefit from new spectrum allocations. W-band (92-114 GHz) particularly relevant for high-bandwidth ISL.
+**Relevance to SCRAP/SISL:** X-band and higher frequency ISL operations may benefit from new spectrum allocations. W-band (92-114 GHz) particularly relevant for high-bandwidth ISL.
 
 ---
 
@@ -69,7 +69,7 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 - Updated guidance released Dec 2024
 - Framework for NOAA to acquire commercial satellite data
 
-**Relevance to SCAP/SISL:** Space traffic coordination affects ISL operations. SCAP could integrate with TraCSS for coordinated maneuvers.
+**Relevance to SCRAP/SISL:** Space traffic coordination affects ISL operations. SCRAP could integrate with TraCSS for coordinated maneuvers.
 
 ---
 
@@ -93,7 +93,7 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 | ECCN | Description | Relevance |
 |------|-------------|-----------|
 | 5A002 | Cryptographic items | SISL encryption module |
-| 5D002 | Cryptographic software | SISL/SCAP software |
+| 5D002 | Cryptographic software | SISL/SCRAP software |
 | 9A515 | Spacecraft | Complete satellite systems |
 
 **License Exception TSR** may apply for fundamental research conducted at universities.
@@ -104,14 +104,14 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 
 ### AX.25 Binding Considerations
 
-| Regulation | Requirement | Impact on SCAP |
+| Regulation | Requirement | Impact on SCRAP |
 |------------|-------------|----------------|
 | FCC Part 97 | No encryption on amateur bands | SISL encryption not permitted |
 | ITU Radio Regulations | Station identification | Callsign mapping required |
 | IARU Band Plan | Frequency coordination | 435-438 MHz for CubeSat |
 
 **Phase 1 Demo Approach:**
-- Use amateur 70cm band (435-438 MHz) for unencrypted SCAP messages
+- Use amateur 70cm band (435-438 MHz) for unencrypted SCRAP messages
 - Capability token signatures provide authentication (permitted)
 - Encryption requires licensed spectrum (e.g., S-band, X-band)
 
@@ -134,7 +134,7 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 | ECSS-U-AS-10C | Passivation at end of life |
 | ISO 24113 | Space debris mitigation |
 
-**Relevance:** SCAP's autonomous coordination capabilities could support debris avoidance maneuvers.
+**Relevance:** SCRAP's autonomous coordination capabilities could support debris avoidance maneuvers.
 
 ---
 
@@ -142,7 +142,7 @@ This document tracks regulatory developments, spectrum allocation, and policy co
 
 ### NIST SP 800-171 (CUI Protection)
 
-If SCAP/SISL handles Controlled Unclassified Information (CUI) for government contracts:
+If SCRAP/SISL handles Controlled Unclassified Information (CUI) for government contracts:
 - 110 security controls required
 - CMMC Level 2 certification may be needed
 - Encryption requirements align with SISL's AES-256-GCM
@@ -156,7 +156,7 @@ If SCAP/SISL handles Controlled Unclassified Information (CUI) for government co
 | Encryption | Protect data in transit/at rest |
 | Anomaly detection | Monitor for intrusions |
 
-**SCAP/SISL Alignment:**
+**SCRAP/SISL Alignment:**
 - SISL X3DH provides strong authentication
 - AES-256-GCM encryption for data protection
 - Capability tokens enable fine-grained authorization
@@ -228,4 +228,4 @@ See [STANDARDIZATION.md](STANDARDIZATION.md) for CCSDS and industry standards ac
 
 ---
 
-*Document maintained for SCAP/SISL regulatory tracking. Last updated: 2025-12-29.*
+*Document maintained for SCRAP/SISL regulatory tracking. Last updated: 2025-12-29.*

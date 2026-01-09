@@ -1,4 +1,4 @@
-# SCAP/SISL Funding Opportunities
+# SCRAP/SISL Funding Opportunities
 
 *Last updated: 2025-12-29*
 
@@ -8,7 +8,7 @@
 
 | Product | TRL | Description |
 |---------|-----|-------------|
-| **SCAP/SISL** | 2-3 | Software protocols for satellite capability tokens, authentication, payment |
+| **SCRAP/SISL** | 2-3 | Software protocols for satellite capability tokens, authentication, payment |
 | **BitAxe Space** | 3-4 | Bitcoin mining ASIC board for radiation characterization flight |
 
 **BitAxe Mission:** Fly open-source BitAxe mining board to characterize ASIC chip operation in LEO radiation environment. Demonstrates thermal management, power systems, and radiation tolerance before full-scale space mining deployment.
@@ -20,7 +20,7 @@
 | Focus | Best Opportunities |
 |-------|-------------------|
 | **⚡ Hardware (BitAxe)** | NSIC, AFRL STAR, AFRL SEED, DIU CSO, NASA TechLeap ($500K + flight), NASA CSLI (free launch), NASA Flight Opportunities, Space Force CASR, MDA SHIELD, Starburst, Defense Prime Ventures, SDA subs |
-| **📡 Software (SCAP/SISL)** | NSF SaTC, NSF Safe-OSE, NSF CICI, DHS SVIP, NIST ITL, ESA ARTES, Spiral/OpenSats |
+| **📡 Software (SCRAP/SISL)** | NSF SaTC, NSF Safe-OSE, NSF CICI, DHS SVIP, NIST ITL, ESA ARTES, Spiral/OpenSats |
 | **Both** | SDVOSB, NRO DII, ARL BAA, AFOSR BAA, In-Q-Tel, SpaceWERX Orbital Prime |
 
 ---
@@ -125,7 +125,7 @@ Direct funding with no equity given up. Most require academic PI or specific eli
 <a id="nsf-satc-20"></a>
 ### NSF SaTC 2.0 (NSF 25-515) 📡 SOFTWARE
 
-**Why High Priority:** Solicitation explicitly requests "formal verification of cryptographic protocols" and "novel authentication/authorization mechanisms" - exactly SISL X3DH and SCAP capability tokens.
+**Why High Priority:** Solicitation explicitly requests "formal verification of cryptographic protocols" and "novel authentication/authorization mechanisms" - exactly SISL X3DH and SCRAP capability tokens.
 
 | Field | Value |
 |-------|-------|
@@ -153,7 +153,7 @@ Direct funding with no equity given up. Most require academic PI or specific eli
 | **Full Proposal** | **April 28, 2026** |
 | Award Size | $1.5M ($500K Year 1, $1M Year 2) |
 
-**Relevance:** SCAP/SISL is open-source. Funds security hardening, supply chain analysis, vulnerability remediation.
+**Relevance:** SCRAP/SISL is open-source. Funds security hardening, supply chain analysis, vulnerability remediation.
 
 ---
 
@@ -182,7 +182,7 @@ Direct funding with no equity given up. Most require academic PI or specific eli
 | Award | Up to $84K per fellowship |
 | Eligibility | US citizen/PR graduate students |
 
-**Relevance:** Fund graduate students at partner universities working on SCAP/SISL.
+**Relevance:** Fund graduate students at partner universities working on SCRAP/SISL.
 
 ---
 
@@ -240,7 +240,7 @@ Government contracts and Other Transaction Authority agreements. Non-dilutive bu
 | Award Speed | 60-90 days |
 | Mechanism | Other Transaction Authority |
 
-**Hybrid Space Architecture (HSA):** DIU's flagship space program. 12 vendors selected for pilot (2026). SCAP transport bindings enable "multi-path routing" and "resilient data transport."
+**Hybrid Space Architecture (HSA):** DIU's flagship space program. 12 vendors selected for pilot (2026). SCRAP transport bindings enable "multi-path routing" and "resilient data transport."
 
 ---
 
@@ -269,7 +269,7 @@ Government contracts and Other Transaction Authority agreements. Non-dilutive bu
 | Initial Awards | $1.1M to 4 companies (March 2025) |
 | Active Pilots | SDA, SATCOM, tactical ISR |
 
-**Direct Fit:** SCAP enables cross-constellation coordination CASR needs.
+**Direct Fit:** SCRAP enables cross-constellation coordination CASR needs.
 
 ---
 
@@ -536,7 +536,7 @@ Emerging area with significant DoD investment. BitAxe radiation characterization
 
 **About:** AFRL + MDA joint program testing satellite sensor data processing and AI algorithms on orbit.
 
-**Direct Fit:** BitAxe demonstrates similar on-orbit processing capability. SCAP provides secure data transport.
+**Direct Fit:** BitAxe demonstrates similar on-orbit processing capability. SCRAP provides secure data transport.
 
 ---
 
@@ -569,7 +569,7 @@ Emerging area with significant DoD investment. BitAxe radiation characterization
 
 **200+ CubeSats launched** from 100+ organizations across 42 states.
 
-**Pathway:** Partner with university (see [ACADEMIC.md](ACADEMIC.md)) for free CubeSat launch. BitAxe + SCAP demo mission.
+**Pathway:** Partner with university (see [ACADEMIC.md](ACADEMIC.md)) for free CubeSat launch. BitAxe + SCRAP demo mission.
 
 ---
 
@@ -606,7 +606,7 @@ Emerging area with significant DoD investment. BitAxe radiation characterization
 2. RSO acquisition and docking
 3. RSO servicing (repair, refuel, deorbit, recycle)
 
-**Relevance:** SCAP capability tokens enable secure tasking for ISAM operations.
+**Relevance:** SCRAP capability tokens enable secure tasking for ISAM operations.
 
 ---
 
@@ -757,7 +757,7 @@ Strategic community engagement. Not direct funding but essential for adoption.
 - Global ground station network
 - Low-cost CubeSat launches
 - Community eager for new protocols
-- **SCAP demo path:** UHF ISL at 435-438 MHz
+- **SCRAP demo path:** UHF ISL at 435-438 MHz
 
 **Amateur Frequencies:**
 - VHF (2m): 144-146 MHz
@@ -806,7 +806,7 @@ These require a partner in the respective country/region.
 | ESA Funding | Up to 75% co-funding |
 | **Requires** | ESA member state entity |
 
-**Direct Fit:** SCAP transport bindings address ESA's ISL interface standardization goals.
+**Direct Fit:** SCRAP transport bindings address ESA's ISL interface standardization goals.
 
 ---
 

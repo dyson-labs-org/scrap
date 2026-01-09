@@ -4,7 +4,7 @@
 
 | Component | Status |
 |-----------|--------|
-| SCAP Protocol Specification | Complete (132KB) |
+| SCRAP Protocol Specification | Complete (132KB) |
 | SISL Link Security Specification | Complete (59KB) |
 | Rust Reference Implementation | 70% complete |
 | CDDL Message Schemas | Complete |
@@ -16,9 +16,9 @@
 ### Documentation Complete
 
 **Normative Specifications:**
-- [SCAP.md](/docs/spec/SCAP.md) - Primary protocol (18+ sections)
+- [SCRAP.md](/docs/spec/SCRAP.md) - Primary protocol (18+ sections)
 - [SISL.md](/docs/spec/SISL.md) - Link layer security (X3DH authentication)
-- [HTLC.md](/docs/spec/HTLC.md) / [PTLC.md](/docs/spec/PTLC.md) - Payment protocols
+- [HTLC.md](/docs/spec/HTLC.md) / [PTLC-FALLBACK.md](/docs/spec/PTLC-FALLBACK.md) - Payment protocols
 
 **Strategy Documents:**
 - Funding opportunities mapped ($100M+ identified)

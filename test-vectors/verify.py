@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Verify cryptographic test vectors for SCAP protocol.
+Verify cryptographic test vectors for SCRAP protocol.
 
 This script validates that:
 1. All signatures verify against their public keys
@@ -219,7 +219,7 @@ def main():
     with open(vectors_path) as f:
         vectors = json.load(f)
 
-    print(f"SCAP Test Vector Verification")
+    print(f"SCRAP Test Vector Verification")
     print(f"=" * 50)
     print(f"Version: {vectors.get('version', 'unknown')}")
     print(f"Generated: {vectors.get('generated', 'unknown')}")

@@ -21,7 +21,7 @@ sequenceDiagram
 ```
 
 **Key Metrics:**
-| Traditional | With SCAP |
+| Traditional | With SCRAP |
 |-------------|-----------|
 | 47 min wait | 12 min total |
 | Ground pass required | ISL relay |

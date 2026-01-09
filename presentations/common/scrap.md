@@ -1,4 +1,4 @@
-## SCAP: Capability Tokens
+## SCRAP: Capability Tokens
 
 ### Operator-Signed Authorization
 

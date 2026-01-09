@@ -28,7 +28,7 @@
 1. What draws you to space technology?
 2. What's your experience with government contracting?
 3. What does success look like for you in a co-founder role?
-4. What questions do you have about Dyson Labs or SCAP?
+4. What questions do you have about Dyson Labs or SCRAP?
 
 ---
 

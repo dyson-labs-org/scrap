@@ -12,9 +12,9 @@
 | X3DH handshake | ~200ms |
 
 **Software stack:**
-- `scap-core` — Token creation/verification (no-std)
-- `scap-lightning` — LDK integration for settlement
-- `scap-ffi` — C bindings for flight software
+- `scrap-core` — Token creation/verification (no-std)
+- `scrap-lightning` — LDK integration for settlement
+- `scrap-ffi` — C bindings for flight software
 
 **Crypto:** secp256k1 only (same curve as Bitcoin). Single key hierarchy simplifies provisioning.
 

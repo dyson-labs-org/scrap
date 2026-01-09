@@ -1,6 +1,6 @@
 # Dyson Labs
 
-## SCAP: Satellite Capability and Authorization Protocol
+## SCRAP: Secure Capabilities and Routed Authorization Protocol
 
 Cryptographic authorization for autonomous inter-satellite operations
 

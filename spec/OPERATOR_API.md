@@ -1,8 +1,8 @@
-# SCAP Operator Service API Specification
+# SCRAP Operator Service API Specification
 
 ## Status: Draft
 
-This document specifies the **Operator API** that satellite operators must implement to participate in the SCAP ecosystem. The API enables customers to:
+This document specifies the **Operator API** that satellite operators must implement to participate in the SCRAP ecosystem. The API enables customers to:
 
 1. **Discover** operator capabilities and satellite pubkeys
 2. **Request** signed capability tokens for satellite tasking
@@ -15,7 +15,7 @@ This document specifies the **Operator API** that satellite operators must imple
 
 ### 1.1 Purpose
 
-SCAP capability tokens are issued by satellite operators and verified on-orbit by target satellites. For this to work, operators must provide an internet-accessible service where customers can:
+SCRAP capability tokens are issued by satellite operators and verified on-orbit by target satellites. For this to work, operators must provide an internet-accessible service where customers can:
 
 - Obtain the operator's signing public key (trust root)
 - Obtain satellite identity public keys (for onion routing encryption)
@@ -34,13 +34,13 @@ SCAP capability tokens are issued by satellite operators and verified on-orbit b
 
 ### 1.3 Relationship to STAPI
 
-This specification is designed for potential alignment with [STAPI (Sensor Tasking API)](https://github.com/stapi-spec/stapi-spec), an emerging standard for satellite data ordering. SCAP extends STAPI concepts with:
+This specification is designed for potential alignment with [STAPI (Sensor Tasking API)](https://github.com/stapi-spec/stapi-spec), an emerging standard for satellite data ordering. SCRAP extends STAPI concepts with:
 
 - Cryptographic identity (operator and satellite pubkeys)
 - Signed capability tokens (not just order IDs)
 - Payment channel binding (Lightning Network integration)
 
-If STAPI reaches 1.0 and gains adoption, SCAP Operator API could become a STAPI conformance class (`/conf/scap-tokens`).
+If STAPI reaches 1.0 and gains adoption, SCRAP Operator API could become a STAPI conformance class (`/conf/scap-tokens`).
 
 ---
 
@@ -49,7 +49,7 @@ If STAPI reaches 1.0 and gains adoption, SCAP Operator API could become a STAPI 
 Following [OGC API conventions](https://ogcapi.ogc.org/common/overview.html), this specification defines modular conformance classes:
 
 ```
-SCAP Operator API Conformance Classes
+SCRAP Operator API Conformance Classes
 │
 ├── /conf/core                    [REQUIRED]
 │   ├── GET  /
@@ -155,7 +155,7 @@ Returns API metadata and links to other endpoints.
 **Response** `200 OK`:
 ```json
 {
-  "title": "ESA Copernicus SCAP Operator API",
+  "title": "ESA Copernicus SCRAP Operator API",
   "description": "Capability token issuance for Sentinel constellation",
   "version": "1.0.0",
   "scap_version": "1.0",
@@ -237,7 +237,7 @@ Returns operator identity and cryptographic keys.
   "signing_algorithm": "ES256K",
   "lightning": {
     "node_pubkey": "03f8a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2",
-    "node_alias": "ESA-SCAP-NODE",
+    "node_alias": "ESA-SCRAP-NODE",
     "network": "mainnet"
   },
   "capabilities_offered": [
@@ -758,7 +758,7 @@ Returns Lightning Network channel information for payment settlement.
 ```json
 {
   "node_pubkey": "03f8a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2",
-  "node_alias": "ESA-SCAP-NODE",
+  "node_alias": "ESA-SCRAP-NODE",
   "network": "mainnet",
   "channels": [
     {
@@ -835,7 +835,7 @@ Returns detailed information about a specific Lightning channel.
 
 ### 5.2 Capability Token (SAT-CAP)
 
-See [SCAP.md §2](SCAP.md#2-authorization-layer-capability-tokens) for full token specification.
+See [SCRAP.md §2](SCRAP.md#2-authorization-layer-capability-tokens) for full token specification.
 
 The `token` field in API responses is the CBOR-encoded, ECDSA-signed token ready for upload to the commanding satellite.
 
@@ -914,7 +914,7 @@ Operators SHOULD implement rate limiting:
 
 If implementing alongside STAPI:
 
-| STAPI Endpoint | SCAP Equivalent | Notes |
+| STAPI Endpoint | SCRAP Equivalent | Notes |
 |----------------|-----------------|-------|
 | `GET /products` | `GET /satellites` | Satellites are "products" |
 | `POST /products/{id}/opportunities` | N/A | Use TLE for pass prediction |
@@ -936,7 +936,7 @@ The complete OpenAPI 3.1 specification is available at:
 
 ## 9. References
 
-- [SCAP.md](SCAP.md) - Core protocol specification
+- [SCRAP.md](SCRAP.md) - Core protocol specification
 - [STAPI Specification](https://github.com/stapi-spec/stapi-spec) - Sensor Tasking API
 - [OGC API - Common](https://ogcapi.ogc.org/common/overview.html) - Conformance class patterns
 - [OAuth2 Client Credentials](https://datatracker.ietf.org/doc/html/rfc6749#section-4.4) - Authentication

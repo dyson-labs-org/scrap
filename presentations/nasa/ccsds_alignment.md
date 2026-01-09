@@ -2,7 +2,7 @@
 
 ### Building on Established Space Protocols
 
-| CCSDS Standard | SCAP/SISL Usage |
+| CCSDS Standard | SCRAP/SISL Usage |
 |---------------|-----------------|
 | Space Packet Protocol (133.0-B-2) | Message framing |
 | Space Data Link Security (355.0-B-2) | AES-256-GCM encryption |

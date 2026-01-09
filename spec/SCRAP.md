@@ -1,8 +1,8 @@
-# SCAP: Satellite Capability and Payment Protocol
+# SCRAP: Secure Capabilities and Routed Authorization Protocol
 
 ## Abstract
 
-This document specifies SCAP (Satellite Capability and Payment), a unified protocol for inter-satellite task authorization and payment. It combines cryptographic capability tokens (SAT-CAP) for command authorization with Bitcoin Lightning Network payments for trustless settlement.
+This document specifies SCRAP (Secure Capabilities and Routed Authorization Protocol), a unified protocol for autonomous agent task authorization and payment. It combines cryptographic capability tokens for command authorization with Bitcoin Lightning Network payments for trustless settlement. While the primary use case is inter-satellite operations, SCRAP applies to any intermittently-connected autonomous agents: vehicles, drones, IoT devices, AI agents, and remote infrastructure.
 
 **Separation of concerns:**
 - **Satellites**: Execute tasks, route data via ISL, verify capability tokens
@@ -10,7 +10,7 @@ This document specifies SCAP (Satellite Capability and Payment), a unified proto
 
 Payment coordination occurs between operators on the ground, not between satellites. This avoids the impossibility of multi-hop Lightning routing over sparse, intermittent ISL connectivity. Satellites execute tasks authorized by capability tokens; operators settle payments atomically using adaptor signatures.
 
-SCAP complements SISL (Secure Inter-Satellite Link) at the link layer.
+SCRAP complements SISL (Secure Inter-Satellite Link) at the link layer.
 
 ---
 
@@ -54,11 +54,11 @@ This is sufficient for:
 
 ### 1.4 Relationship to Existing Standards
 
-SCAP **layers on top of** existing spacecraft security rather than replacing it:
+SCRAP **layers on top of** existing spacecraft security rather than replacing it:
 
 ```
 +---------------------------+
-|     SCAP Protocol         |  <- Application-layer: WHO may do WHAT
+|     SCRAP Protocol         |  <- Application-layer: WHO may do WHAT
 +---------------------------+
 |     CCSDS SDLS            |  <- Link-layer: IS this channel authentic
 +---------------------------+
@@ -68,9 +68,9 @@ SCAP **layers on top of** existing spacecraft security rather than replacing it:
 
 **CCSDS SDLS** provides link-layer security (authenticated encryption of frames). It answers: "Is this ISL transmission authentic and unmodified?"
 
-**SCAP** provides application-layer authorization. It answers: "Does this authenticated peer have permission to execute this specific task?"
+**SCRAP** provides application-layer authorization. It answers: "Does this authenticated peer have permission to execute this specific task?"
 
-Current systems cannot support delegation because they rely on symmetric keys—only the key holder can authenticate. SCAP uses asymmetric signatures: anyone can verify a capability token, but only the operator can issue one. This enables:
+Current systems cannot support delegation because they rely on symmetric keys—only the key holder can authenticate. SCRAP uses asymmetric signatures: anyone can verify a capability token, but only the operator can issue one. This enables:
 
 - Delegation chains (satellite A authorizes satellite B to command satellite C)
 - Capability attenuation (delegate can only narrow permissions, never expand)
@@ -78,13 +78,13 @@ Current systems cannot support delegation because they rely on symmetric keys—
 
 See [../research/CNC_RESEARCH.md](../research/CNC_RESEARCH.md) §7 "Gap Analysis" for detailed comparison with CCSDS SDLS, commercial APIs, and emerging ISL authentication protocols.
 
-> **Naming**: SCAP complements the protocol stack: **SISL** (Secure Inter-Satellite Link) at the link layer, **SCAP** at the payment/authorization layer, and **SAT-CAP** tokens for capability delegation.
+> **Naming**: SCRAP complements the protocol stack: **SISL** (Secure Inter-Satellite Link) at the link layer, **SCRAP** at the payment/authorization layer, and **SAT-CAP** tokens for capability delegation.
 
 ### 1.5 System Overview
 
 ```
 +-----------------------------------------------------------------------------+
-|                         SCAP ARCHITECTURE                                    |
+|                         SCRAP ARCHITECTURE                                    |
 +-----------------------------------------------------------------------------+
 |                                                                             |
 |                              PRE-MISSION                                    |
@@ -394,7 +394,7 @@ These are **operator implementation details**:
 
 **Key Insight**: Satellite-to-satellite channels don't work due to sparse ISL connectivity. Multi-hop Lightning requires real-time coordination that's impossible with intermittent ISL windows. Moving payment logic to operators (who are always online) solves this.
 
-See [CHANNELS.md](CHANNELS.md) §2.3 "Why Satellite Channels Don't Work" for detailed analysis.
+See [CHANNELS.md](../future/CHANNELS.md) §2.3 "Why Satellite Channels Don't Work" for detailed analysis.
 
 ### 3.2 HTLC Mechanics
 
@@ -461,7 +461,7 @@ ENDIF
 
 ### 4.1 Task Request Message
 
-The commanding satellite sends a task request that includes both authorization and payment setup. SCAP messages are **transport-agnostic**; framing and integrity checks are provided by the transport binding (see §16 Transport Bindings).
+The commanding satellite sends a task request that includes both authorization and payment setup. SCRAP messages are **transport-agnostic**; framing and integrity checks are provided by the transport binding (see §16 Transport Bindings).
 
 ```
 +----------------------------------------------------------------+
@@ -806,7 +806,7 @@ Payments route through the same path using standard Lightning onion routing:
 
 ### 5.5 Routing Model
 
-SCAP uses **source routing** with **onion encryption**:
+SCRAP uses **source routing** with **onion encryption**:
 
 | Property | Description |
 |----------|-------------|
@@ -840,7 +840,7 @@ Satellite D (final):
 
 **Rationale**: Source routing simplifies satellite firmware (no routing protocol needed), enables route privacy (intermediate hops don't know full path), and allows ground operators to optimize routes based on current orbital geometry.
 
-See [PTLC.md](PTLC.md) §7 for detailed onion packet format.
+See [PTLC-FALLBACK.md](PTLC-FALLBACK.md) §7 for detailed onion packet format.
 
 ### 5.6 Ground Relay Hops
 
@@ -864,7 +864,7 @@ PTLC[0]      PTLC[1]                 PTLC[2]          PTLC[3]
 | **Separate hops** | Downlink and uplink are separate capability tokens and payments |
 | **Different operators** | Ground_1 and Ground_2 may be operated by different entities |
 | **Parallel operation** | Both satellites can communicate with ground simultaneously |
-| **Internet transit** | Data between ground stations uses standard internet routing; no SCAP hop required |
+| **Internet transit** | Data between ground stations uses standard internet routing; no SCRAP hop required |
 
 **Ground hop capability tokens** follow the same structure as satellite tokens:
 - `aud`: Ground station identifier
@@ -942,7 +942,7 @@ Task-for-payment is a fair exchange problem:
 
 ### 6.3 Settlement Model: Timeout-Default (Favor Executor)
 
-The primary settlement model for SCAP is **timeout-default**, which favors the executor (payee) and requires the customer (payer) to actively dispute if unsatisfied.
+The primary settlement model for SCRAP is **timeout-default**, which favors the executor (payee) and requires the customer (payer) to actively dispute if unsatisfied.
 
 **Rationale**: In satellite operations, the executor bears real costs (fuel, opportunity, wear) regardless of whether the customer is satisfied. Requiring active dispute rather than active approval:
 1. Protects executors from unresponsive customers
@@ -1078,7 +1078,7 @@ class DisputeEvidence:
 
 ### 6.8 Proof Model: Delivery Only
 
-SCAP proves **delivery**, not **correctness**:
+SCRAP proves **delivery**, not **correctness**:
 
 | Task Type | Proof | What It Proves |
 |-----------|-------|----------------|
@@ -1167,7 +1167,7 @@ Ground stations handle on-chain settlement and watchtower functions, but do NOT 
   - Current Lightning (2024): 2-of-2 OP_CHECKMULTISIG (P2WSH)
   - Taproot channels (experimental): MuSig2 aggregate key (P2TR)
 
-  SCAP is designed to work with either. Taproot channels provide smaller
+  SCRAP is designed to work with either. Taproot channels provide smaller
   on-chain footprint and improved privacy but require MuSig2 support in
   LDK (available in LDK 0.0.123+, experimental).
 ```
@@ -1506,7 +1506,7 @@ HTLC timeouts require accurate timekeeping. Two configurations are supported:
 
 #### 11.1.1 Default: secp256k1 Only (Recommended)
 
-SCAP uses **secp256k1 exclusively** for all cryptographic operations:
+SCRAP uses **secp256k1 exclusively** for all cryptographic operations:
 
 | Operation | Curve | Algorithm | Frequency |
 |-----------|-------|-----------|-----------|
@@ -1566,7 +1566,7 @@ P-256 (secp256r1) may be used for **SISL link-layer authentication only** when:
 │    Storage: ATECC608 secure element (if available)              │
 │    Derivation: HKDF(operator_seed, "sisl-p256" || sat_id)      │
 │                                                                 │
-│  secp256k1 Keys (SCAP/Lightning):                               │
+│  secp256k1 Keys (SCRAP/Lightning):                               │
 │    Purpose: Payments, capability tokens, proofs, onion routing  │
 │    Storage: RAM (derived at boot)                               │
 │    Derivation: BIP-32 m/7227'/0'/sat_id'/...                   │
@@ -1576,7 +1576,7 @@ P-256 (secp256r1) may be used for **SISL link-layer authentication only** when:
 **Dual-curve costs**:
 - Trust list storage doubles (two public keys per satellite)
 - Two key derivation paths to implement and verify
-- SISL and SCAP use different identity keys
+- SISL and SCRAP use different identity keys
 - Complexity increases attack surface
 
 **P-256 is NEVER used for**:
@@ -1591,8 +1591,8 @@ P-256 (secp256r1) may be used for **SISL link-layer authentication only** when:
 | Deployment | Recommended Curve(s) | Rationale |
 |------------|---------------------|-----------|
 | Commercial LEO constellation | secp256k1 only | Simplicity, Lightning-native |
-| Government/military | P-256 (SISL) + secp256k1 (SCAP) | FIPS compliance |
-| CCSDS ground integration | P-256 (SISL) + secp256k1 (SCAP) | Legacy compatibility |
+| Government/military | P-256 (SISL) + secp256k1 (SCRAP) | FIPS compliance |
+| CCSDS ground integration | P-256 (SISL) + secp256k1 (SCRAP) | Legacy compatibility |
 | Deep space / high radiation | secp256k1 only (FPGA) | No COTS secure elements viable |
 
 **Default choice: secp256k1 only.** Add P-256 only when contractually required.
@@ -1674,11 +1674,11 @@ For ISL windows of 5+ minutes, software ECDSA is acceptable on all listed proces
 
 #### 12.3.1 Derivation Path Rationale
 
-**Purpose index 7227'**: SCAP uses a dedicated BIP-32 purpose to avoid collision with standard wallet derivation paths (BIP-44 uses 44', BIP-84 uses 84', etc.). The value 7227 is arbitrary but memorable ("SCAP" → 7227 on phone keypad).
+**Purpose index 7227'**: SCRAP uses a dedicated BIP-32 purpose to avoid collision with standard wallet derivation paths (BIP-44 uses 44', BIP-84 uses 84', etc.). The value 7227 is arbitrary but memorable ("SCRAP" → 7227 on phone keypad).
 
 | Path Component | Value | Description |
 |----------------|-------|-------------|
-| Purpose | 7227' | SCAP-specific (hardened) |
+| Purpose | 7227' | SCRAP-specific (hardened) |
 | Coin type | 0' | Bitcoin mainnet (hardened) |
 | Account | sat_id' | NORAD catalog ID (hardened) |
 | Change | 0/1/2 | Key category (identity/channel/session) |
@@ -1976,7 +1976,7 @@ The initial demonstration uses **UHF inter-satellite links** on existing CubeSat
 
 ```
 +---------------------------+
-|     SCAP Protocol         |  <- Capability tokens, proofs
+|     SCRAP Protocol         |  <- Capability tokens, proofs
 +---------------------------+
 |     LDK (Lightning)       |  <- HTLC management, channels
 +---------------------------+
@@ -2037,7 +2037,7 @@ The initial demonstration uses **UHF inter-satellite links** on existing CubeSat
 |                    LDK SATELLITE INTEGRATION                                 |
 +-----------------------------------------------------------------------------+
 |                                                                             |
-|  SCAP Layer                                                                 |
+|  SCRAP Layer                                                                 |
 |  +-----------------------------------------------------------------------+  |
 |  |  CapabilityTokenVerifier  |  ExecutionProofGenerator  |  Dispatcher  |  |
 |  +-----------------------------------------------------------------------+  |
@@ -2317,16 +2317,16 @@ When Point Time-Locked Contracts become available in Lightning Network, task exe
 
 ## 16. Transport Bindings
 
-SCAP is **transport-agnostic**. The core protocol (capability tokens, task messages, proofs, Lightning messages) is independent of the underlying transport layer. This section defines bindings for specific transports.
+SCRAP is **transport-agnostic**. The core protocol (capability tokens, task messages, proofs, Lightning messages) is independent of the underlying transport layer. This section defines bindings for specific transports.
 
 ### 16.1 Transport Independence
 
-SCAP messages have a common structure regardless of transport:
+SCRAP messages have a common structure regardless of transport:
 
 ```
-SCAP Message (transport-independent):
+SCRAP Message (transport-independent):
 +----------------+--------+----------------------------------------+
-| SCAP Msg Type  | Length | SCAP Message Body (CBOR-encoded)       |
+| SCRAP Msg Type  | Length | SCRAP Message Body (CBOR-encoded)       |
 | 1 byte         | 2 bytes| Variable (≤65535 bytes)                |
 +----------------+--------+----------------------------------------+
 ```
@@ -2342,16 +2342,16 @@ Each transport binding specifies how this message is framed, secured, and delive
 
 ### 16.2 SISL Binding (Default for ISL)
 
-When operating over SISL (Secure Inter-Satellite Link), SCAP messages are carried in SISL frame payloads. SISL provides link-layer security (X3DH authentication, AES-256-GCM encryption).
+When operating over SISL (Secure Inter-Satellite Link), SCRAP messages are carried in SISL frame payloads. SISL provides link-layer security (X3DH authentication, AES-256-GCM encryption).
 
 **Protocol Stack:**
 
 ```
 +-----------------------------------------------------------------------------+
-|                    SCAP OVER SISL PROTOCOL STACK                             |
+|                    SCRAP OVER SISL PROTOCOL STACK                             |
 +-----------------------------------------------------------------------------+
 |                                                                             |
-|  Layer 7: SCAP Application                                                  |
+|  Layer 7: SCRAP Application                                                  |
 |  +-----------------------------------------------------------------------+  |
 |  |  Capability Tokens | Task Requests | Proofs | Lightning Messages      |  |
 |  +-----------------------------------------------------------------------+  |
@@ -2382,27 +2382,27 @@ When operating over SISL (Secure Inter-Satellite Link), SCAP messages are carrie
 ```
 SISL Frame:
 +-------+------------+-----+----+---------------------+----------+----------+
-| ASM   | Frame Hdr  | Seq | IV | SCAP Message        | Auth Tag | CRC-32C  |
+| ASM   | Frame Hdr  | Seq | IV | SCRAP Message        | Auth Tag | CRC-32C  |
 | 4 B   | 4 B        | 4 B |12 B| ≤2000 bytes         | 16 B     | 4 B      |
 +-------+------------+-----+----+---------------------+----------+----------+
 ```
 
-SISL provides: authentication, encryption, integrity, replay protection, and fragmentation. SCAP messages are simply placed in the payload field.
+SISL provides: authentication, encryption, integrity, replay protection, and fragmentation. SCRAP messages are simply placed in the payload field.
 
 ### 16.3 SPP Binding (CCSDS 133.0-B)
 
-For CCSDS-compliant missions, SCAP messages are encapsulated in Space Packets per CCSDS 133.0-B-2.
+For CCSDS-compliant missions, SCRAP messages are encapsulated in Space Packets per CCSDS 133.0-B-2.
 
 **Packet Format:**
 
 ```
-Space Packet with SCAP Payload:
+Space Packet with SCRAP Payload:
 +-----------------------------------------------------------------------------+
 | Primary Header (6 bytes)                                                     |
 | +-- Version Number: 000 (always)                                            |
 | +-- Packet Type: 1 (TC) for requests, 0 (TM) for responses                  |
 | +-- Secondary Header Flag: 1                                                 |
-| +-- APID: Allocated for SCAP (operator-assigned, recommend 0x100-0x1FF)     |
+| +-- APID: Allocated for SCRAP (operator-assigned, recommend 0x100-0x1FF)     |
 | +-- Sequence Flags: 11 (unsegmented)                                        |
 | +-- Packet Sequence Count: 0-16383 (rolling)                                |
 | +-- Packet Data Length: (total length - 7)                                  |
@@ -2411,29 +2411,29 @@ Space Packet with SCAP Payload:
 | +-- Timestamp (CCSDS CUC or CDS format)                                     |
 +-----------------------------------------------------------------------------+
 | User Data Field                                                              |
-| +-- SCAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + CBOR body)                                |
 +-----------------------------------------------------------------------------+
 ```
 
 **APID Allocation:**
 | APID Range | Usage |
 |------------|-------|
-| 0x100 | SCAP TaskRequest/TaskAccept/TaskReject |
-| 0x101 | SCAP ProofOfExecution |
-| 0x102 | SCAP DisputeMessage |
-| 0x110 | SCAP LightningMessage |
-| 0x111 | SCAP CapabilityToken |
+| 0x100 | SCRAP TaskRequest/TaskAccept/TaskReject |
+| 0x101 | SCRAP ProofOfExecution |
+| 0x102 | SCRAP DisputeMessage |
+| 0x110 | SCRAP LightningMessage |
+| 0x111 | SCRAP CapabilityToken |
 
-**Security:** SPP itself provides no security. Use with CCSDS SDLS (355.0-B) for link-layer encryption, or rely on SCAP's application-layer signatures for authentication.
+**Security:** SPP itself provides no security. Use with CCSDS SDLS (355.0-B) for link-layer encryption, or rely on SCRAP's application-layer signatures for authentication.
 
 ### 16.4 AX.25 Binding (Amateur/CubeSat)
 
-For CubeSat missions using amateur radio, SCAP messages are encapsulated in AX.25 UI (Unnumbered Information) frames.
+For CubeSat missions using amateur radio, SCRAP messages are encapsulated in AX.25 UI (Unnumbered Information) frames.
 
 **Frame Format:**
 
 ```
-AX.25 UI Frame with SCAP Payload:
+AX.25 UI Frame with SCRAP Payload:
 +-----------------------------------------------------------------------------+
 | Flag: 0x7E                                                                   |
 +-----------------------------------------------------------------------------+
@@ -2447,7 +2447,7 @@ AX.25 UI Frame with SCAP Payload:
 | PID: 0xF0 (no layer 3)                                                       |
 +-----------------------------------------------------------------------------+
 | Information Field                                                            |
-| +-- SCAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + CBOR body)                                |
 | +-- Maximum 256 bytes recommended for UHF                                   |
 +-----------------------------------------------------------------------------+
 | FCS: 16-bit CRC-CCITT                                                        |
@@ -2458,46 +2458,46 @@ AX.25 UI Frame with SCAP Payload:
 
 **Callsign Mapping:** Satellite NORAD ID maps to callsign via operator's amateur license. Example: NORAD 51070 → "ICEYE1-0".
 
-**Security:** AX.25 provides no encryption (regulatory requirement for amateur). SCAP capability token signatures provide authentication. For sensitive operations, use licensed spectrum with SISL binding instead.
+**Security:** AX.25 provides no encryption (regulatory requirement for amateur). SCRAP capability token signatures provide authentication. For sensitive operations, use licensed spectrum with SISL binding instead.
 
-**Fragmentation:** Large SCAP messages (>256 bytes) should be fragmented at the application layer. Include fragment sequence numbers in a SCAP extension field.
+**Fragmentation:** Large SCRAP messages (>256 bytes) should be fragmented at the application layer. Include fragment sequence numbers in a SCRAP extension field.
 
 ### 16.5 IP/UDP Binding (Commercial Relay)
 
-For commercial relay services (Starlink, AWS Ground Station, etc.), SCAP messages are carried over IP/UDP.
+For commercial relay services (Starlink, AWS Ground Station, etc.), SCRAP messages are carried over IP/UDP.
 
 **Packet Format:**
 
 ```
-UDP Datagram with SCAP Payload:
+UDP Datagram with SCRAP Payload:
 +-----------------------------------------------------------------------------+
 | IP Header (20 bytes, IPv4)                                                   |
 +-----------------------------------------------------------------------------+
 | UDP Header (8 bytes)                                                         |
 | +-- Source Port: Ephemeral                                                  |
-| +-- Destination Port: 7227 (SCAP default, "SCAP" on phone keypad)          |
-| +-- Length: UDP header + SCAP message                                       |
+| +-- Destination Port: 7227 (SCRAP default, "SCRAP" on phone keypad)          |
+| +-- Length: UDP header + SCRAP message                                       |
 | +-- Checksum                                                                |
 +-----------------------------------------------------------------------------+
 | UDP Payload                                                                  |
-| +-- SCAP Message (Type + Length + CBOR body)                                |
+| +-- SCRAP Message (Type + Length + CBOR body)                                |
 +-----------------------------------------------------------------------------+
 ```
 
-**Port Assignment:** Default port 7227 (mnemonic: "SCAP"). Operators MAY use alternate ports.
+**Port Assignment:** Default port 7227 (mnemonic: "SCRAP"). Operators MAY use alternate ports.
 
 **Security:** UDP provides no security. Options:
 1. **DTLS 1.3**: Recommended for ground-to-ground relay
-2. **Application-layer**: SCAP signatures sufficient for authentication; add encryption wrapper if confidentiality needed
+2. **Application-layer**: SCRAP signatures sufficient for authentication; add encryption wrapper if confidentiality needed
 3. **VPN/IPsec**: If operating over private network
 
-**MTU Considerations:** UDP over satellite relay may have restricted MTU. Fragment SCAP messages if needed; use SCAP extension field for reassembly.
+**MTU Considerations:** UDP over satellite relay may have restricted MTU. Fragment SCRAP messages if needed; use SCRAP extension field for reassembly.
 
 ### 16.6 Key Sharing (SISL Binding)
 
-When using the SISL binding, SCAP and SISL share cryptographic infrastructure:
+When using the SISL binding, SCRAP and SISL share cryptographic infrastructure:
 
-| Key Type | SISL Usage | SCAP Usage |
+| Key Type | SISL Usage | SCRAP Usage |
 |----------|------------|------------|
 | Identity key (`m/7227'/0'/sat_id'/0/0`) | X3DH static key | Capability token verification, proof signing |
 | Ephemeral keys | X3DH session establishment | Not used (SISL handles) |
@@ -2505,12 +2505,12 @@ When using the SISL binding, SCAP and SISL share cryptographic infrastructure:
 
 **Single Key Benefit**: Satellites maintain one identity key pair for both link authentication and application-layer authorization. This simplifies key management but requires that:
 1. The identity key is protected with the same rigor as SISL requires
-2. Key compromise affects both SISL links and SCAP authorizations
+2. Key compromise affects both SISL links and SCRAP authorizations
 
 ### 16.7 Session Lifecycle (SISL Binding)
 
 ```
-SISL establishes                SCAP operates over
+SISL establishes                SCRAP operates over
 authenticated link              encrypted channel
        |                              |
        v                              v
@@ -2530,7 +2530,7 @@ authenticated link              encrypted channel
        | SISL P2P channel established
        v
 +-------------+                +----------------+
-| SISL        |  Task Request  | SCAP           |
+| SISL        |  Task Request  | SCRAP           |
 | P2P_ACTIVE  |<-------------->| Task-Payment   |
 |             |  over SISL     | Protocol       |
 +------+------+                +----------------+
@@ -2544,10 +2544,10 @@ authenticated link              encrypted channel
 
 ### 16.8 Trust List Alignment (SISL Binding)
 
-SISL trust lists and SCAP capability tokens use the same identity keys:
+SISL trust lists and SCRAP capability tokens use the same identity keys:
 
 - **SISL trust list**: `{norad_id: pubkey}` mappings for link-layer authentication
-- **SCAP capability token**: `cmd_pub` field contains the same identity pubkey
+- **SCRAP capability token**: `cmd_pub` field contains the same identity pubkey
 
 A satellite MUST verify that:
 1. The ISL peer's SISL identity matches a trust list entry
@@ -2558,7 +2558,7 @@ def verify_scap_request_over_sisl(
     sisl_session: SISLSession,
     scap_request: TaskRequest,
 ) -> bool:
-    """Verify SCAP request came from authenticated SISL peer."""
+    """Verify SCRAP request came from authenticated SISL peer."""
 
     # Get SISL-authenticated peer identity
     peer_pubkey = sisl_session.peer_identity_pubkey
@@ -2576,16 +2576,16 @@ def verify_scap_request_over_sisl(
 
 ### 16.9 Timing Considerations (SISL Binding)
 
-SISL sessions have limited duration (ISL contact window). SCAP must complete within this window:
+SISL sessions have limited duration (ISL contact window). SCRAP must complete within this window:
 
 | Phase | Typical Duration | SISL Dependency |
 |-------|------------------|-----------------|
 | SISL handshake | 100-500ms | Required first |
-| SCAP task negotiation | 200-500ms | Over SISL P2P |
+| SCRAP task negotiation | 200-500ms | Over SISL P2P |
 | Task execution | 1-300s | SISL may timeout |
 | Proof + settlement | 200-500ms | Over SISL P2P |
 
-**If SISL session ends before SCAP completes**:
+**If SISL session ends before SCRAP completes**:
 - HTLC remains locked until timeout
 - Proof can be delivered via alternate path (different ISL contact, ground relay)
 - Settlement completes when parties reconnect or via timeout-default
@@ -2711,7 +2711,7 @@ Output:
 ### 18.5 BIP-32 Key Derivation
 
 ```
-TEST VECTOR 5: SCAP Key Derivation Path
+TEST VECTOR 5: SCRAP Key Derivation Path
 =======================================
 
 Input:
@@ -2742,7 +2742,7 @@ master key above to compute derived keys for your implementation.
 
 ```python
 #!/usr/bin/env python3
-"""SCAP Test Vector Generator - Verified"""
+"""SCRAP Test Vector Generator - Verified"""
 
 import hashlib
 import hmac
@@ -2798,5 +2798,5 @@ if __name__ == "__main__":
     assert master_secret.hex() == "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35"
     assert chain_code.hex() == "873dff81c02f525623fd1fe5167eac3a55a049de3d314bb42ee227ffed37d508"
 
-    print("All SCAP test vectors verified!")
+    print("All SCRAP test vectors verified!")
 ```

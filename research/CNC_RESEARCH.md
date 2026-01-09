@@ -2064,9 +2064,9 @@ At 9.6 kbps (typical S-band TT&C):
 
 For time-critical operations, 0.7 second savings per command is significant.
 
-### 11.14 Implications for SCAP
+### 11.14 Implications for SCRAP
 
-The capability token and auction models suggest SCAP should support:
+The capability token and auction models suggest SCRAP should support:
 
 ```python
 # === Authorization Layer ===
@@ -2141,7 +2141,7 @@ class CBBAAuction:
 
 ---
 
-## 12. Summary: SCAP Design Considerations
+## 12. Summary: SCRAP Design Considerations
 
 ### Key Design Requirements
 

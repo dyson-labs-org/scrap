@@ -342,14 +342,14 @@ DOCS_INDEX_TEMPLATE = '''<!DOCTYPE html>
 <body>
     <div class="nav"><a href="/">← Presentations</a></div>
     <h1>Documentation</h1>
-    <p class="subtitle">SCAP Protocol Specifications and Strategy Documents</p>
+    <p class="subtitle">SCRAP Protocol Specifications and Strategy Documents</p>
 
     <h2>Specifications</h2>
     <ul>
-        <li><a href="/docs/spec/SCAP.md">SCAP.md</a> <span class="desc">Primary protocol specification</span></li>
+        <li><a href="/docs/spec/SCRAP.md">SCRAP.md</a> <span class="desc">Primary protocol specification</span></li>
         <li><a href="/docs/spec/SISL.md">SISL.md</a> <span class="desc">Secure Inter-Satellite Link protocol</span></li>
         <li><a href="/docs/spec/HTLC.md">HTLC.md</a> <span class="desc">Lightning HTLC payment protocol</span></li>
-        <li><a href="/docs/spec/PTLC.md">PTLC.md</a> <span class="desc">On-chain PTLC payments</span></li>
+        <li><a href="/docs/spec/PTLC-FALLBACK.md">PTLC-FALLBACK.md</a> <span class="desc">On-chain PTLC payments</span></li>
         <li><a href="/docs/spec/OPERATOR_API.md">OPERATOR_API.md</a> <span class="desc">Operator service API</span></li>
     </ul>
 
@@ -831,7 +831,7 @@ if __name__ == "__main__":
     print(f"    http://YOUR_IP:{PORT}/darpa.html     - DARPA deck")
     print(f"\n  Documentation (markdown rendered as HTML):")
     print(f"    http://YOUR_IP:{PORT}/docs/          - Documentation index")
-    print(f"    http://YOUR_IP:{PORT}/docs/spec/SCAP.md - Protocol spec")
+    print(f"    http://YOUR_IP:{PORT}/docs/spec/SCRAP.md - Protocol spec")
     print(f"\n  Add new user:")
     print(f"    ./serve.py --add-user newuser password")
     print(f"\n  Press Ctrl+C to stop.\n")

@@ -119,7 +119,7 @@ This proposal describes a payment channel architecture for satellite task paymen
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Entity Definitions**: See PTLC.md "Entity Definitions" section for the complete glossary of terms including Customer, Satellite, Operator, Gateway, Ground Station, and Watchtower. This document uses consistent terminology.
+**Entity Definitions**: See PTLC-FALLBACK.md "Entity Definitions" section for the complete glossary of terms including Customer, Satellite, Operator, Gateway, Ground Station, and Watchtower. This document uses consistent terminology.
 
 ---
 
@@ -443,7 +443,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │  ───────────────                                                            │
 │    Operators are online → can coordinate adaptor signatures in real-time    │
 │    Satellites don't participate in payment → no ISL timing constraints      │
-│    Same cryptography as PTLC.md, just in channels not on-chain     │
+│    Same cryptography as PTLC-FALLBACK.md, just in channels not on-chain     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1281,7 +1281,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │    Channels can carry task payments AND autonomous payments                 │
 │    interleaved, without conflict.                                           │
 │                                                                             │
-│  UNIFIED ADAPTOR CONVENTION (same as PTLC.md):                     │
+│  UNIFIED ADAPTOR CONVENTION (same as PTLC-FALLBACK.md):                     │
 │  ──────────────────────────────────────────────────────                     │
 │    □ Receiver creates adaptor signature using own key                       │
 │    □ Script: <P_receiver> OP_CHECKSIG                                       │
@@ -2422,7 +2422,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │                    TWO PAYMENT SYSTEMS                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  SYSTEM 1: ON-CHAIN PTLCs (PTLC.md)                                │
+│  SYSTEM 1: ON-CHAIN PTLCs (PTLC-FALLBACK.md)                                │
 │  ───────────────────────────────────────────                                │
 │    Purpose: Gateway-coordinated task payments                               │
 │    Flow: Customer → Gateway → PTLC chain → Operators                        │
@@ -3180,14 +3180,14 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │                    KEY HIERARCHY FOR CHANNELS                               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  UNIFIED INFRASTRUCTURE: See PTLC.md Section 14 for the complete   │
+│  UNIFIED INFRASTRUCTURE: See PTLC-FALLBACK.md Section 14 for the complete   │
 │  unified key hierarchy, nonce pool, and HSM interface shared between        │
 │  on-chain PTLCs (Phase 1) and payment channels (Phase 2).                   │
 │                                                                             │
 │  This section documents channel-specific key derivations that extend        │
 │  the unified hierarchy.                                                     │
 │                                                                             │
-│  ROOT KEY (same as PTLC.md):                                       │
+│  ROOT KEY (same as PTLC-FALLBACK.md):                                       │
 │  ─────────────────────────────────────                                      │
 │    k_root = generated at manufacture, stored in HSM                         │
 │    Never exported, used only for derivation                                 │
@@ -3236,7 +3236,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │                                                                             │
 │  RELATIONSHIP TO ON-CHAIN PTLC KEYS:                                        │
 │  ────────────────────────────────────                                       │
-│    On-chain PTLC model (PTLC.md):                                  │
+│    On-chain PTLC model (PTLC-FALLBACK.md):                                  │
 │      k_payment = HKDF(k_root, "payment" || satellite_id || version)         │
 │      Used for: On-chain PTLC claims, ack signatures                         │
 │                                                                             │
@@ -3258,7 +3258,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │                                                                             │
 │  OPERATOR RECOVERY:                                                         │
 │  ──────────────────                                                         │
-│    Same recovery mechanism as PTLC.md:                             │
+│    Same recovery mechanism as PTLC-FALLBACK.md:                             │
 │      - Funds sent to recovery-enabled addresses                             │
 │      - Operator can recover after 6-month CLTV if satellite fails           │
 │      - Channel settlement outputs use same recovery structure               │
@@ -3441,7 +3441,7 @@ due to ISL connectivity constraints. They are preserved here for reference.
 │                                                                             │
 │    Operator fund recovery:                                                  │
 │      - Settlement outputs include operator recovery path                    │
-│      - Operator can claim after 6-month CLTV (see PTLC.md)         │
+│      - Operator can claim after 6-month CLTV (see PTLC-FALLBACK.md)         │
 │      - Prevents total loss of channel funds                                 │
 │                                                                             │
 │  SCENARIO 4: FAILURE DURING PTLC                                            │
@@ -3612,14 +3612,14 @@ due to ISL connectivity constraints. They are preserved here for reference.
 
 ## 13. Upgrade Path from On-Chain PTLCs
 
-This document describes Phase 2 of the satellite payment system. For a smooth upgrade from Phase 1 (on-chain PTLCs), see PTLC.md Section 14-15 for the unified infrastructure and upgrade path documentation.
+This document describes Phase 2 of the satellite payment system. For a smooth upgrade from Phase 1 (on-chain PTLCs), see PTLC-FALLBACK.md Section 14-15 for the unified infrastructure and upgrade path documentation.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                    RELATIONSHIP TO PTLC.md                         │
+│                    RELATIONSHIP TO PTLC-FALLBACK.md                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  PHASE 1 (PTLC.md): On-Chain PTLCs                                 │
+│  PHASE 1 (PTLC-FALLBACK.md): On-Chain PTLCs                                 │
 │  ───────────────────────────────────────────                                │
 │    Status: Implementable today                                              │
 │    Dependencies: None (uses existing Bitcoin features)                      │
@@ -3672,7 +3672,7 @@ This document describes Phase 2 of the satellite payment system. For a smooth up
 │       - Task payments: faster, cheaper than on-chain                        │
 │       - Autonomous payments: now practical (instant settlement)             │
 │                                                                             │
-│  UNIFIED INFRASTRUCTURE (PTLC.md Section 14):                      │
+│  UNIFIED INFRASTRUCTURE (PTLC-FALLBACK.md Section 14):                      │
 │  ─────────────────────────────────────────────────────                      │
 │    14.1 Unified Adaptor Signature Convention                                │
 │    14.2 Unified Key Hierarchy                                               │

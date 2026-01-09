@@ -1,8 +1,8 @@
-# SCAP/SISL Academic Partnerships
+# SCRAP/SISL Academic Partnerships
 
 Last updated: 2025-12-29
 
-This document identifies potential academic partners for SCAP (Satellite Capability and Payment Protocol) and SISL (Secure Inter-Satellite Link) research and development.
+This document identifies potential academic partners for SCRAP (Secure Capabilities and Routed Authorization Protocol) and SISL (Secure Inter-Satellite Link) research and development.
 
 ---
 
@@ -148,7 +148,7 @@ Florida's Space Coast location and strong aerospace industry make Florida univer
 **Why Partner:**
 - **Directly focused on satellite network security** - near-perfect alignment
 - Quantum-resistant cryptography for satellites
-- Decentralized security approach matches SCAP philosophy
+- Decentralized security approach matches SCRAP philosophy
 - 6G/NextG perspective bridges terrestrial and space
 
 **Recommendation:** **Top choice for NSF collaboration** given direct satellite security focus.
@@ -255,7 +255,7 @@ Florida's Space Coast location and strong aerospace industry make Florida univer
 | Focus | Autonomous rendezvous and proximity operations |
 
 **Why Partner:**
-- RPO expertise aligns with SCAP user stories 09, 10
+- RPO expertise aligns with SCRAP user stories 09, 10
 - Stanford brand recognition
 - Strong VC/industry connections
 
@@ -350,7 +350,7 @@ Florida's Space Coast location and strong aerospace industry make Florida univer
 
 ## Next Steps
 
-1. **Contact Dr. Yavuz (USF)** - Introduce SCAP/SISL, explore NSF SaTC collaboration
+1. **Contact Dr. Yavuz (USF)** - Introduce SCRAP/SISL, explore NSF SaTC collaboration
 2. **Contact Dr. Azarderakhsh (FAU)** - Discuss PQC integration for SISL
 3. **Contact Dr. Otero (Florida Tech)** - Explore L3Harris partnership pathway
 4. **Florida Space NOI** - Prepare for 2026-27 cycle with Florida partner
@@ -375,4 +375,4 @@ Florida's Space Coast location and strong aerospace industry make Florida univer
 
 ---
 
-*Document maintained for SCAP/SISL academic partnership tracking. Last updated: 2025-12-29.*
+*Document maintained for SCRAP/SISL academic partnership tracking. Last updated: 2025-12-29.*

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate cryptographic test vectors for SCAP protocol.
+Generate cryptographic test vectors for SCRAP protocol.
 
 Requires:
     pip install secp256k1 cbor2
@@ -221,7 +221,7 @@ def main():
     vectors = {
         "version": "1.0.0",
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "description": "Computed test vectors for SCAP protocol",
+        "description": "Computed test vectors for SCRAP protocol",
 
         "capability_token": generate_capability_token_vector(),
         "execution_proof": generate_execution_proof_vector(),

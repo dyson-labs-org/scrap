@@ -1,8 +1,8 @@
-# SCAP: Satellite Capability and Authorization Protocol
+# SCRAP: Secure Capabilities and Routed Authorization Protocol
 
 A protocol specification for trustless inter-satellite task execution combining cryptographic capability tokens (SAT-CAP) with Bitcoin Lightning payments.
 
-SCAP complements **SISL** (Secure Inter-Satellite Link) at the link layer.
+SCRAP complements **SISL** (Secure Inter-Satellite Link) at the link layer.
 
 ## Status
 
@@ -14,7 +14,7 @@ SCAP complements **SISL** (Secure Inter-Satellite Link) at the link layer.
 
 ## Overview
 
-SCAP enables satellites to:
+SCRAP enables satellites to:
 - **Authorize tasks** via delegated capability tokens (ECDSA-signed, CBOR-encoded)
 - **Pay for services** using Bitcoin Lightning HTLCs during ISL contact windows
 - **Route tasks** through multi-hop satellite constellations with capability attenuation
@@ -27,11 +27,11 @@ SCAP enables satellites to:
 ```
 scap/
 ├── spec/                      # Normative protocol specifications
-│   ├── SCAP.md                #   Primary protocol specification
+│   ├── SCRAP.md                #   Primary protocol specification
 │   ├── SISL.md                #   Secure Inter-Satellite Link protocol
 │   ├── OPERATOR_API.md        #   Operator service API
 │   ├── HTLC.md                #   Lightning HTLC payment protocol
-│   └── PTLC.md                #   PTLC upgrade path (future)
+│   └── PTLC-FALLBACK.md                #   PTLC upgrade path (future)
 │
 ├── research/                  # Background research documents
 │   ├── CNC_RESEARCH.md        #   Satellite C2 protocols survey
@@ -82,11 +82,11 @@ scap/
 
 | Document | Status | Description |
 |----------|--------|-------------|
-| [spec/SCAP.md](spec/SCAP.md) | **Primary** | Unified protocol specification |
+| [spec/SCRAP.md](spec/SCRAP.md) | **Primary** | Unified protocol specification |
 | [spec/SISL.md](spec/SISL.md) | **Primary** | Secure Inter-Satellite Link protocol (X3DH, encryption) |
 | [spec/OPERATOR_API.md](spec/OPERATOR_API.md) | Normative | Operator service API (token issuance, pubkey distribution) |
 | [spec/HTLC.md](spec/HTLC.md) | Normative | Lightning HTLC payment protocol |
-| [spec/PTLC.md](spec/PTLC.md) | Normative | On-chain PTLC payments (Taproot/Schnorr) |
+| [spec/PTLC-FALLBACK.md](spec/PTLC-FALLBACK.md) | Normative | On-chain PTLC payments (Taproot/Schnorr) |
 
 ### Background Research
 
@@ -120,7 +120,7 @@ Modular markdown slides with Mermaid diagrams, built with reveal-md:
 
 | Directory | Contents |
 |-----------|----------|
-| [common/](presentations/common/) | 13 shared slides (title, problem, vision, SISL, SCAP, etc.) |
+| [common/](presentations/common/) | 13 shared slides (title, problem, vision, SISL, SCRAP, etc.) |
 | [nasa/](presentations/nasa/) | NASA-specific: CCSDS alignment, TRL, SBIR CTA |
 | [darpa/](presentations/darpa/) | DARPA-specific: Contested environments, program alignment |
 | [commercial/](presentations/commercial/) | Investor-specific: Market opportunity, funding stages |
@@ -236,7 +236,7 @@ Cryptographic test vectors for interoperability testing:
 
 ## Cryptographic Architecture
 
-**Default: secp256k1 only** for all operations (SISL link layer, SCAP application layer, Lightning payments).
+**Default: secp256k1 only** for all operations (SISL link layer, SCRAP application layer, Lightning payments).
 
 | Operation | Curve | Notes |
 |-----------|-------|-------|
@@ -249,7 +249,7 @@ Cryptographic test vectors for interoperability testing:
 
 **P-256 option**: May be used for SISL link authentication only when FIPS 140-2/3 compliance or CCSDS SDLS interoperability is contractually required. Never used for payment operations.
 
-See [spec/SCAP.md §11.1](spec/SCAP.md#111-elliptic-curve-selection) for hardware options and detailed guidance.
+See [spec/SCRAP.md §11.1](spec/SCRAP.md#111-elliptic-curve-selection) for hardware options and detailed guidance.
 
 ---
 
@@ -302,7 +302,7 @@ Demonstrate protocol correctness using existing CubeSats with **UHF ISL** (435-4
 
 **Regulatory**: UHF 435-438 MHz is amateur/experimental allocation (jurisdiction-dependent).
 
-See [spec/SCAP.md §14](spec/SCAP.md#14-cubesat-testbed-demonstration) for testbed architecture.
+See [spec/SCRAP.md §14](spec/SCRAP.md#14-cubesat-testbed-demonstration) for testbed architecture.
 
 ### Phase 2: Production ISL Deployment
 
@@ -334,7 +334,7 @@ Twelve scenarios demonstrating the protocol across different satellite operation
 | 11 | [Disaster Response](user_stories/11_disaster_response_multi_constellation.md) | Multi-constellation coordination* | High |
 | 12 | [Orbital Data Center](user_stories/12_orbital_data_center.md) | On-orbit processing, data routing | Medium |
 
-\* Stories marked with asterisk use CBBA auction mechanism (see [future/AUCTION.md](future/AUCTION.md)), which is illustrative and not part of core SCAP.
+\* Stories marked with asterisk use CBBA auction mechanism (see [future/AUCTION.md](future/AUCTION.md)), which is illustrative and not part of core SCRAP.
 
 **CubeSat Testbed Candidates**: Stories 01, 05, 07 (single-operator, manageable ISL geometry)
 
@@ -388,14 +388,14 @@ PAYMENT FLOW (Ground, via Lightning):
 
 | Component | Status | Location |
 |-----------|--------|----------|
-| Capability token spec | Draft | spec/SCAP.md §2 |
+| Capability token spec | Draft | spec/SCRAP.md §2 |
 | Operator API spec | Draft | spec/OPERATOR_API.md |
 | HTLC payment protocol | Draft | spec/HTLC.md |
 | Channel management | Draft | future/CHANNELS.md |
 | SISL link protocol | Draft | spec/SISL.md |
-| Timeout-default arbiter | Draft | spec/SCAP.md §6.3-6.6 |
-| CubeSat testbed design | Draft | spec/SCAP.md §14 |
-| Space security model | Draft | spec/SCAP.md §11.2 |
+| Timeout-default arbiter | Draft | spec/SCRAP.md §6.3-6.6 |
+| CubeSat testbed design | Draft | spec/SCRAP.md §14 |
+| Space security model | Draft | spec/SCRAP.md §11.2 |
 | CDDL message schemas | Complete | schemas/scap.cddl |
 | Test vectors | Complete | test-vectors/computed.json |
 | Rust core library | In Progress | scap-core/ |
@@ -414,7 +414,7 @@ This repository includes Git submodules for Lightning implementations:
 | `lnd/` | [lightningnetwork/lnd](https://github.com/lightningnetwork/lnd) | LND reference |
 | `cln/` | [ElementsProject/lightning](https://github.com/ElementsProject/lightning) | CLN reference |
 
-These are reference implementations for API compatibility; SCAP uses LDK via `scap-lightning`.
+These are reference implementations for API compatibility; SCRAP uses LDK via `scap-lightning`.
 
 ---
 

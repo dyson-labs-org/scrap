@@ -19,7 +19,7 @@ Cryptographic authorization and payment infrastructure for autonomous satellite 
 
 ### Why This Matters
 
-| Current State | With SCAP |
+| Current State | With SCRAP |
 |---------------|-----------|
 | 47-minute ground station wait | Minutes via inter-satellite link |
 | Manual operator coordination | Cryptographic authorization |

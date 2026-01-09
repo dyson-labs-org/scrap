@@ -1,4 +1,4 @@
-# SCAP/SISL Technology Readiness Roadmap
+# SCRAP/SISL Technology Readiness Roadmap
 
 ## Current State Assessment
 
@@ -6,7 +6,7 @@
 
 | Component | Status | Maturity |
 |-----------|--------|----------|
-| SCAP Specification | Complete draft (132KB) | TRL 3 |
+| SCRAP Specification | Complete draft (132KB) | TRL 3 |
 | SISL Specification | Complete draft (59KB) | TRL 3 |
 | Rust `scap-core` | Partial implementation (see §Gap Analysis) | TRL 2 |
 | Test vectors | Generated, verified | TRL 3 |
@@ -41,12 +41,12 @@
 
 ## Prioritized Development Path
 
-**Strategy**: SCAP-first, SISL deferred
+**Strategy**: SCRAP-first, SISL deferred
 
 Given current resources (Raspberry Pis, BitAxe units, RX-only SDR) and no GNU Radio experience, the optimal path is:
 
 ```
-PHASE A: SCAP Demo (6-10 weeks)          PHASE B: SISL Demo (deferred)
+PHASE A: SCRAP Demo (6-10 weeks)          PHASE B: SISL Demo (deferred)
 ─────────────────────────────────        ─────────────────────────────
 Sprint 2: Complete scap-core (2-4w)      Sprint 4-5: GNU Radio DSSS
 Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
@@ -61,10 +61,10 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 └─────────────────────────┘              └─────────────────────────┘
          │                                        │
          ▼                                        ▼
-    TRL 4 (SCAP layer)                     TRL 4 (SISL layer)
+    TRL 4 (SCRAP layer)                     TRL 4 (SISL layer)
 ```
 
-**Why SCAP-first**:
+**Why SCRAP-first**:
 1. Uses hardware already available (Pis, BitAxe)
 2. No SDR TX capability needed
 3. No GNU Radio learning curve
@@ -73,16 +73,16 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 6. SISL can be added later without rework
 
 **BitAxe Integration**: Same company, Bitcoin payment angle. Demo concept:
-- Raspberry Pi runs SCAP node
+- Raspberry Pi runs SCRAP node
 - BitAxe provides SHA256 compute service
-- Customer pays for compute via SCAP capability token + PTLC
+- Customer pays for compute via SCRAP capability token + PTLC
 - Demonstrates pay-per-compute business model
 
 ---
 
 ## NASA TRL Definitions Reference
 
-| TRL | Definition | SCAP Milestone |
+| TRL | Definition | SCRAP Milestone |
 |-----|------------|----------------|
 | 1 | Basic principles observed | Research complete |
 | 2 | Technology concept formulated | Specifications drafted |
@@ -102,13 +102,13 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 
 ### TRL 3 → TRL 4: Component Validation in Laboratory
 
-#### Demo 1: SCAP Token Exchange (Ground Simulation)
+#### Demo 1: SCRAP Token Exchange (Ground Simulation)
 
 **Devices**: 3-4 Raspberry Pi 4 or similar ARM boards
 
-**Objective**: Prove SCAP capability token issuance, delegation, and verification works across multiple nodes communicating via a simulated ISL (TCP/UDP over local network).
+**Objective**: Prove SCRAP capability token issuance, delegation, and verification works across multiple nodes communicating via a simulated ISL (TCP/UDP over local network).
 
-**TRL Scope**: This demo achieves **TRL 4 for SCAP application layer only**. It does not validate SISL physical layer (RF, spread spectrum).
+**TRL Scope**: This demo achieves **TRL 4 for SCRAP application layer only**. It does not validate SISL physical layer (RF, spread spectrum).
 
 **What to demonstrate**:
 1. Operator issues capability token to Satellite A
@@ -172,11 +172,11 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 
 ---
 
-#### Demo 3: Integrated SCAP + SISL End-to-End
+#### Demo 3: Integrated SCRAP + SISL End-to-End
 
 **Devices**: 3 nodes, each with Raspberry Pi + SDR
 
-**Objective**: Full protocol stack - SISL link establishment followed by SCAP task exchange over actual RF.
+**Objective**: Full protocol stack - SISL link establishment followed by SCRAP task exchange over actual RF.
 
 **SDR Configuration**: Since recommended SDRs (HackRF, LimeSDR) have different duplex capabilities:
 - **LimeSDR Mini**: Full duplex - one unit per node sufficient
@@ -264,7 +264,7 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 
 **TRL**: 5-6 (system in relevant environment)
 
-**Objective**: Prove SCAP protocol works in actual space environment.
+**Objective**: Prove SCRAP protocol works in actual space environment.
 
 **Prerequisites**:
 - Partner with UHF CubeSat capability (see [ROADMAP.md](ROADMAP.md))
@@ -278,7 +278,7 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 4. Ground-to-space-to-ground message relay
 5. On-chain PTLC settlement from space-originated proof
 
-**Note**: This demo validates SCAP over UHF (~9.6 kbps), not the full SISL spread spectrum physical layer. SISL validation requires satellites with SDR-capable ISL.
+**Note**: This demo validates SCRAP over UHF (~9.6 kbps), not the full SISL spread spectrum physical layer. SISL validation requires satellites with SDR-capable ISL.
 
 **Success criteria**:
 - Firmware operates without anomaly for 30+ days
@@ -385,7 +385,7 @@ For spread spectrum systems in the 2.4 GHz ISM band:
 
 ## Hardware Shopping Lists
 
-### Tier 1: Minimum Viable Demo (SCAP-only, ground simulation)
+### Tier 1: Minimum Viable Demo (SCRAP-only, ground simulation)
 
 | Item | Qty | Unit Price | Total |
 |------|-----|------------|-------|
@@ -396,11 +396,11 @@ For spread spectrum systems in the 2.4 GHz ISM band:
 | Network switch (8-port) | 1 | $25 | $25 |
 | **Total** | | | **$365** |
 
-**Demonstrates**: TRL 4 for **SCAP layer only** (token exchange, verification, delegation, on-chain PTLC)
+**Demonstrates**: TRL 4 for **SCRAP layer only** (token exchange, verification, delegation, on-chain PTLC)
 
 ---
 
-### Tier 2: Full Demo (SCAP + SISL RF bench test)
+### Tier 2: Full Demo (SCRAP + SISL RF bench test)
 
 | Item | Qty | Unit Price | Total |
 |------|-----|------------|-------|
@@ -414,7 +414,7 @@ For spread spectrum systems in the 2.4 GHz ISM band:
 | USB 3.0 hub (powered) | 3 | $25 | $75 |
 | **Total** | | | **$1,110** |
 
-**Demonstrates**: TRL 4 for complete SCAP+SISL stack (3-node relay with RF)
+**Demonstrates**: TRL 4 for complete SCRAP+SISL stack (3-node relay with RF)
 
 ---
 
@@ -463,16 +463,16 @@ The BitAxe miner can demonstrate **payment-for-computation** but with important 
 **What BitAxe does NOT provide**:
 - secp256k1 / ECDSA capability (ASICs only do SHA256)
 - Radiation tolerance (commercial components)
-- Sufficient controller performance for SCAP (ESP32 is slow)
+- Sufficient controller performance for SCRAP (ESP32 is slow)
 
 **Demo concept**: BitAxe as "compute service provider"
-1. Raspberry Pi runs SCAP stack, interfaces with BitAxe via USB/UART
-2. Customer requests compute task via SCAP
+1. Raspberry Pi runs SCRAP stack, interfaces with BitAxe via USB/UART
+2. Customer requests compute task via SCRAP
 3. Pi verifies token, forwards work to BitAxe ASIC
 4. BitAxe returns SHA256 result
 5. Pi generates proof-of-execution, settles PTLC
 
-This demonstrates pay-per-compute but requires external SCAP node (Pi) - BitAxe alone cannot run SCAP.
+This demonstrates pay-per-compute but requires external SCRAP node (Pi) - BitAxe alone cannot run SCRAP.
 
 | Model | Chip | Hashrate | Power | Price |
 |-------|------|----------|-------|-------|
@@ -483,7 +483,7 @@ This demonstrates pay-per-compute but requires external SCAP node (Pi) - BitAxe 
 
 ## Implementation Tasks
 
-### PHASE A: SCAP Demo (Immediate - 6-10 weeks)
+### PHASE A: SCRAP Demo (Immediate - 6-10 weeks)
 
 #### A1: Complete scap-core (2-4 weeks)
 
@@ -511,7 +511,7 @@ Most structs already implemented. Remaining work:
 
 ```
 [ ] Project structure (separate crate or workspace member)
-[ ] TCP listener for SCAP messages (tokio or async-std)
+[ ] TCP listener for SCRAP messages (tokio or async-std)
 [ ] UDP listener option for ISL simulation
 [ ] Token verification pipeline with timing metrics
 [ ] SQLite-based used-token cache
@@ -541,12 +541,12 @@ Most structs already implemented. Remaining work:
 [ ] Integration with scap-node task handler
 ```
 
-**Exit criteria**: BitAxe responds to SCAP compute task, proof-of-execution generated
+**Exit criteria**: BitAxe responds to SCRAP compute task, proof-of-execution generated
 
 #### A4: Demo harness and recording (1 week)
 
 ```
-[ ] Docker-compose for multi-node SCAP setup
+[ ] Docker-compose for multi-node SCRAP setup
 [ ] UDP multicast ISL simulation mode
 [ ] Message sequence diagram generator
 [ ] Latency and throughput metrics dashboard
@@ -560,10 +560,10 @@ Most structs already implemented. Remaining work:
 
 **Demo scenarios to record**:
 1. **Token relay**: Node A → B → C with delegation chain verification
-2. **Pay-per-compute**: Customer pays BitAxe node for SHA256 work via SCAP
+2. **Pay-per-compute**: Customer pays BitAxe node for SHA256 work via SCRAP
 3. **Proof-of-execution**: Verifiable result hash with testnet PTLC settlement
 
-**Phase A total: 6-10 weeks** → TRL 4 for SCAP layer
+**Phase A total: 6-10 weeks** → TRL 4 for SCRAP layer
 
 ---
 
@@ -628,7 +628,7 @@ Most structs already implemented. Remaining work:
 
 **Exit criteria**: Over-the-air link at 1m with 37 dB ±3 dB measured processing gain
 
-#### B5: SCAP+SISL integration (3-4 weeks)
+#### B5: SCRAP+SISL integration (3-4 weeks)
 
 ```
 [ ] SISL ↔ scap-node integration layer
@@ -640,9 +640,9 @@ Most structs already implemented. Remaining work:
 [ ] Documentation updates
 ```
 
-**Exit criteria**: Full SCAP+SISL demo video published, test report complete
+**Exit criteria**: Full SCRAP+SISL demo video published, test report complete
 
-**Phase B total: 14-19 weeks** → TRL 4 for complete SCAP+SISL stack
+**Phase B total: 14-19 weeks** → TRL 4 for complete SCRAP+SISL stack
 
 ---
 
@@ -673,9 +673,9 @@ Most structs already implemented. Remaining work:
 
 | Venue | Topic | Submission Deadline | Conference |
 |-------|-------|---------------------|------------|
-| IEEE Aerospace Conference | SCAP architecture | Oct 2026 | Mar 2027 |
+| IEEE Aerospace Conference | SCRAP architecture | Oct 2026 | Mar 2027 |
 | ACM CCS | Capability token security | Feb 2027 | Nov 2027 |
-| CCSDS Technical Meeting | SCAP Green Book draft | Ongoing | Biannual |
+| CCSDS Technical Meeting | SCRAP Green Book draft | Ongoing | Biannual |
 | arXiv | Full spec + demo results | After Demo 1 | N/A |
 
 **Note**: IEEE Aerospace Conference: abstract ~July, full paper ~October, conference March. ACM CCS: submission ~February, conference November. Dates above target 2027 conferences to allow time for demo completion.
@@ -714,7 +714,7 @@ Most structs already implemented. Remaining work:
 ## References
 
 - [ROADMAP.md](ROADMAP.md) - Strategic roadmap with funding and partnerships
-- [../spec/SCAP.md](../spec/SCAP.md) - SCAP protocol specification
+- [../spec/SCRAP.md](../spec/SCRAP.md) - SCRAP protocol specification
 - [../spec/SISL.md](../spec/SISL.md) - SISL link layer specification
 - [FUNDING.md](FUNDING.md) - Grant opportunities
 - [ACADEMIC.md](ACADEMIC.md) - Academic partnerships

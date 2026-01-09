@@ -15,6 +15,6 @@
 **Stack:**
 | Layer | Function |
 |-------|----------|
-| SCAP | Capability tokens, task authorization |
+| SCRAP | Capability tokens, task authorization |
 | SISL | X3DH key agreement, AES-256-GCM |
 | Physical | RF or optical ISL |

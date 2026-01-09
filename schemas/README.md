@@ -1,6 +1,6 @@
-# SCAP Message Schemas
+# SCRAP Message Schemas
 
-CDDL (Concise Data Definition Language, RFC 8610) schemas for SCAP protocol messages.
+CDDL (Concise Data Definition Language, RFC 8610) schemas for SCRAP protocol messages.
 
 ## Files
 

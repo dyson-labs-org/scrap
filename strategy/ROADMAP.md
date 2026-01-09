@@ -1,4 +1,4 @@
-# SCAP Strategy: From UHF Demo to Production Deployment
+# SCRAP Strategy: From UHF Demo to Production Deployment
 
 ## Executive Summary
 
@@ -114,7 +114,7 @@ Characterize commercial ASIC chip operation in LEO radiation environment. Valida
 3. Propose as secondary payload on Fox-Plus or future mission
 4. Coordinate frequency allocation with IARU
 
-### Combined BitAxe + SCAP Mission
+### Combined BitAxe + SCRAP Mission
 
 **Concept:** Single CubeSat with both products:
 
@@ -123,7 +123,7 @@ Characterize commercial ASIC chip operation in LEO radiation environment. Valida
 │                    1U-3U CubeSat                            │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────────┐    ┌─────────────────────────────────┐ │
-│  │   BitAxe ASIC   │    │        SCAP/SISL Stack          │ │
+│  │   BitAxe ASIC   │    │        SCRAP/SISL Stack          │ │
 │  │                 │    │                                 │ │
 │  │  - Mining chip  │◄──►│  - Capability tokens            │ │
 │  │  - Thermal mgmt │    │  - X3DH authentication          │ │
@@ -140,7 +140,7 @@ Characterize commercial ASIC chip operation in LEO radiation environment. Valida
 
 **Benefits:**
 - Single launch validates both products
-- BitAxe provides compute, SCAP provides secure comms
+- BitAxe provides compute, SCRAP provides secure comms
 - Demonstrates space computing + payment in one mission
 - Reduces total launch costs
 
@@ -273,7 +273,7 @@ See [FUNDING.md](FUNDING.md) for full details.
 ## Phase 1: Protocol Demonstration (6-12 months)
 
 ### Objective
-Validate SCAP/SISL protocol correctness via firmware update to existing flying satellites.
+Validate SCRAP/SISL protocol correctness via firmware update to existing flying satellites.
 
 ### Why This Is Easier Than Hardware
 
@@ -377,7 +377,7 @@ For DARPA:
 
 | Deliverable | Description |
 |-------------|-------------|
-| Flight firmware | SCAP/SISL stack for target CubeSat platform |
+| Flight firmware | SCRAP/SISL stack for target CubeSat platform |
 | Ground software | Task bundle creation, settlement monitoring |
 | Demo report | Results, latency measurements, lessons learned |
 | Open source release | Reference implementation (Rust) |
@@ -388,7 +388,7 @@ For DARPA:
 ## Phase 2: Standardization (24-36 months)
 
 ### Objective
-Establish SCAP as recognized standard through CCSDS and Bitcoin communities.
+Establish SCRAP as recognized standard through CCSDS and Bitcoin communities.
 
 ### CCSDS Path
 
@@ -727,7 +727,7 @@ PHASE 4 DEPENDENCIES:
 - PTLCs: Requires signature aggregation, not yet activated
 - LN-Symmetry (Eltoo): Requires SIGHASH_ANYPREVOUT, not yet activated
 
-### SCAP Implications
+### SCRAP Implications
 
 **Today:**
 - On-chain PTLCs with Schnorr adaptor signatures: AVAILABLE

@@ -249,7 +249,7 @@ def generate_task_responses():
 
 
 def generate_isl_message():
-    """Generate an ISL-encapsulated SCAP message."""
+    """Generate an ISL-encapsulated SCRAP message."""
     msg = {
         "version": 1,
         "msg_type": "TASK_REQUEST",

@@ -98,7 +98,7 @@ INDEX_HTML = '''<!DOCTYPE html>
     <div class="container">
         <header>
             <h1>Dyson Labs</h1>
-            <p class="tagline">SCAP: Satellite Capability and Authorization Protocol</p>
+            <p class="tagline">SCRAP: Satellite Capability and Authorization Protocol</p>
         </header>
         <div class="nav-hint">
             <strong>Presentation Controls:</strong> Use <code>→</code> / <code>←</code> to navigate slides,
@@ -109,7 +109,7 @@ INDEX_HTML = '''<!DOCTYPE html>
             <div class="grid">
                 <a href="commercial.html" class="card">
                     <h3>Commercial / Investor</h3>
-                    <p>Business model, market opportunity, and investment thesis for SCAP.</p>
+                    <p>Business model, market opportunity, and investment thesis for SCRAP.</p>
                     <span class="badge recommended">Recommended</span>
                 </a>
                 <a href="cofounder.html" class="card">
@@ -134,14 +134,14 @@ INDEX_HTML = '''<!DOCTYPE html>
             <div class="grid">
                 <a href="/docs/" class="card">
                     <h3>Protocol Specifications</h3>
-                    <p>SCAP, SISL, HTLC/PTLC specs, strategy docs, and research.</p>
+                    <p>SCRAP, SISL, HTLC/PTLC specs, strategy docs, and research.</p>
                     <span class="badge">Reference</span>
                 </a>
             </div>
         </div>
         <div class="section">
             <h2>User Stories</h2>
-            <p style="color: var(--muted); margin-bottom: 1rem;">Real-world scenarios demonstrating SCAP capabilities</p>
+            <p style="color: var(--muted); margin-bottom: 1rem;">Real-world scenarios demonstrating SCRAP capabilities</p>
             <div class="grid">
                 <a href="stories.html" class="card">
                     <h3>All Stories (Slideshow)</h3>

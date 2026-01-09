@@ -5,7 +5,7 @@
 Dyson Labs is seeking a co-founder with business development, government contracting, and operational expertise to complement our technical foundation. This is a full-time operational role focused on business development, fundraising, and government contracting.
 
 **Company Stage:** Pre-seed / Pre-revenue
-**Technology:** SCAP (Satellite Capability and Authorization Protocol) - TRL 2-3
+**Technology:** SCRAP (Secure Capabilities and Routed Authorization Protocol) - TRL 2-3
 **Target Markets:** DoD, NASA, commercial satellite operators
 **Equity:** Open to negotiation based on contribution and fit
 
@@ -116,7 +116,7 @@ Dyson Labs is seeking a co-founder with business development, government contrac
 
 | Asset | Description |
 |-------|-------------|
-| **Complete Protocol Specification** | SCAP and SISL specs ready for implementation (TRL 2-3) |
+| **Complete Protocol Specification** | SCRAP and SISL specs ready for implementation (TRL 2-3) |
 | **Rust Reference Implementation** | Working code, test vectors, CDDL schemas |
 | **Clear Technical Roadmap** | UHF demo → Standardization → Production (48+ months) |
 | **Funding Pipeline Identified** | NSF, NASA, DARPA, Space Force opportunities mapped |
@@ -258,7 +258,7 @@ Equity allocation depends on:
 
 ### Company Materials
 
-- [SCAP Specification](spec/SCAP.md) - Primary protocol document
+- [SCRAP Specification](spec/SCRAP.md) - Primary protocol document
 - [SISL Specification](spec/SISL.md) - Link layer security
 - [Roadmap](strategy/ROADMAP.md) - Development phases
 - [Funding Opportunities](strategy/FUNDING.md) - Grant and contract pipeline

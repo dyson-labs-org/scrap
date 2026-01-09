@@ -7,7 +7,7 @@
 - **Space-BACN**: Optical crosslinks
 - **Future**: Contested space ops
 
-**SCAP/SISL Capabilities**
+**SCRAP/SISL Capabilities**
 - No pre-shared secrets required
 - First-contact authentication
 - Ground-independent operation

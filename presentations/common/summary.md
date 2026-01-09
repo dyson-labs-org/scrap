@@ -9,7 +9,7 @@
 - Emergency response waits for ground passes
 - No standard for cross-operator tasking
 
-**With SCAP:**
+**With SCRAP:**
 - Any satellite can request services from any operator
 - Pre-authorized emergency response in minutes
 - Cryptographic proof of execution

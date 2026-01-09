@@ -2,9 +2,9 @@
 
 ## Status: Future / Illustrative
 
-This document describes distributed auction mechanisms (CBBA) for constellation-wide task allocation. This is an **advanced capability** not part of the core SCAP specification.
+This document describes distributed auction mechanisms (CBBA) for constellation-wide task allocation. This is an **advanced capability** not part of the core SCRAP specification.
 
-**Initial SCAP deployments use pre-negotiated capability tokens without real-time auction.**
+**Initial SCRAP deployments use pre-negotiated capability tokens without real-time auction.**
 
 The auction mechanism documented here is illustrative of a potential future extension. It requires:
 - Satellites with sufficient compute for bid optimization
@@ -123,19 +123,19 @@ def compute_bid(satellite: Satellite, task: Task) -> float:
 
 ---
 
-## 5. Integration with SCAP
+## 5. Integration with SCRAP
 
-When auction is used, it **precedes** the standard SCAP flow:
+When auction is used, it **precedes** the standard SCRAP flow:
 
 ```
 1. Customer broadcasts task request (via Starlink mesh or ground)
 2. Satellites compute bids and propagate via ISL
 3. CBBA converges to winner selection (~5-30 minutes)
 4. Winner's operator issues capability token to customer
-5. Standard SCAP flow proceeds (token → task → payment)
+5. Standard SCRAP flow proceeds (token → task → payment)
 ```
 
-**Auction output**: The auction determines WHO executes. SCAP handles HOW (authorization, payment).
+**Auction output**: The auction determines WHO executes. SCRAP handles HOW (authorization, payment).
 
 ---
 
@@ -156,4 +156,4 @@ If auction mechanisms are formalized:
 - Define CBBA message formats in CDDL
 - Specify convergence guarantees and timeout handling
 - Address Sybil resistance (fake bids from malicious actors)
-- Integrate with SCAP capability token issuance
+- Integrate with SCRAP capability token issuance
