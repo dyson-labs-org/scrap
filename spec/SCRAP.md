@@ -1344,7 +1344,40 @@ class ProofOfExecution:
     executor_signature: bytes      # Schnorr signature
 ```
 
-### 10.2 Verification Functions
+### 10.2 Helper Functions
+
+```python
+import hashlib
+
+def tagged_hash(tag: str, msg: bytes) -> bytes:
+    """
+    BIP-340 style tagged hash with domain separation.
+    Prevents cross-protocol attacks by binding hash to specific context.
+    """
+    tag_hash = hashlib.sha256(tag.encode('utf-8')).digest()
+    return hashlib.sha256(tag_hash + tag_hash + msg).digest()
+
+def schnorr_verify(message_hash: bytes, signature: bytes, pubkey: bytes) -> bool:
+    """
+    Verify BIP-340 Schnorr signature.
+
+    Args:
+        message_hash: 32-byte hash of message
+        signature: 64-byte Schnorr signature
+        pubkey: 32-byte x-only pubkey (or 33-byte compressed, first byte stripped)
+
+    Returns:
+        True if signature is valid
+
+    Note: Use a proper cryptographic library (secp256k1, libsecp256k1-py)
+    for production implementation.
+    """
+    # Implementation depends on crypto library
+    # Example: return secp256k1.schnorr_verify(message_hash, signature, pubkey)
+    raise NotImplementedError("Use secp256k1 library")
+```
+
+### 10.3 Verification Functions
 
 ```python
 def verify_capability_token(token: CapabilityToken,
@@ -1427,11 +1460,11 @@ def verify_delegation_chain(token: CapabilityToken,
     return True
 ```
 
-### 10.3 Used-Token Cache Management
+### 10.4 Used-Token Cache Management
 
 The `used_tokens` cache prevents replay attacks but must be bounded to prevent memory exhaustion.
 
-#### 10.3.1 Cache Structure
+#### 10.4.1 Cache Structure
 
 ```python
 from dataclasses import dataclass
@@ -1499,7 +1532,7 @@ class UsedTokenCache:
             del self.entries[tid]
 ```
 
-#### 10.3.2 Eviction Policy
+#### 10.4.2 Eviction Policy
 
 | Trigger | Action |
 |---------|--------|
@@ -1508,14 +1541,14 @@ class UsedTokenCache:
 | Periodic maintenance (every 1 hour) | Evict all expired entries |
 | Satellite reboot | Load persisted cache from NVM |
 
-#### 10.3.3 Persistence Requirements
+#### 10.4.3 Persistence Requirements
 
 - Cache MUST be persisted to non-volatile memory on modification
 - Persistence frequency: after every 100 additions or every 5 minutes (whichever first)
 - On reboot: load cache from NVM before accepting any tokens
 - **Critical**: Failure to persist cache enables replay attacks after reboot
 
-#### 10.3.4 Security Considerations
+#### 10.4.4 Security Considerations
 
 **Attack: Cache exhaustion via expired tokens**
 - Adversary submits many tokens with `exp` far in future
@@ -1526,7 +1559,7 @@ class UsedTokenCache:
 - Mitigation: Expired entries are evicted first; active tokens survive longer
 - Mitigation: Tokens with `exp` in the past are rejected before cache check
 
-#### 10.3.5 Atomic Verification Order
+#### 10.4.5 Atomic Verification Order
 
 Token verification MUST follow this exact order to prevent race conditions and ensure atomic replay protection:
 
@@ -1594,7 +1627,7 @@ def verify_and_mark_token(token: CapabilityToken, target: Satellite) -> VerifyRe
 
 **Critical Invariant:** The cache addition (step 5b) MUST happen atomically with the cache check (step 5a) and MUST occur before returning success. If these are not atomic, two concurrent verifications of the same token could both pass the check before either marks it used.
 
-### 10.4 Satellite Node Requirements
+### 10.5 Satellite Node Requirements
 
 | Component | Requirement | Notes |
 |-----------|-------------|-------|
@@ -1604,7 +1637,7 @@ def verify_and_mark_token(token: CapabilityToken, target: Satellite) -> VerifyRe
 | **RNG** | Hardware TRNG | Key/nonce generation |
 | **Clock** | See timing requirements below | HTLC timeouts |
 
-#### 11.4.1 Timing Requirements
+#### 10.5.1 Timing Requirements
 
 HTLC timeouts require accurate timekeeping. Two configurations are supported:
 
@@ -1628,7 +1661,7 @@ HTLC timeouts require accurate timekeeping. Two configurations are supported:
 
 **GPS Receiver Prevalence**: Research indicates GPS/GNSS receivers are standard on most operational CubeSats requiring orbit determination or precise timing, but may be absent on educational or technology demonstration missions. Implementations SHOULD support ground-uplinked time as fallback.
 
-#### 10.4.2 Clock Security
+#### 10.5.2 Clock Security
 
 Clock manipulation is a critical attack vector because SCRAP uses Bitcoin timelocks (CLTV) for HTLC expiration. An adversary who can shift perceived time can:
 
@@ -2069,9 +2102,9 @@ class BoundTaskRequest:
 
     def verify_binding(self, requester_pubkey: bytes) -> bool:
         return schnorr_verify(
-            requester_pubkey,
             self.binding_hash(),
-            self.binding_sig
+            self.binding_sig,
+            requester_pubkey
         )
 ```
 
@@ -3049,7 +3082,7 @@ Computation:
   binding_hash = SHA256(tag_hash || tag_hash || binding_msg)
 
 Output:
-  binding_hash = <implementation should compute with tagged_hash>
+  binding_hash = 0x77b72bb25ba9fbf110799924773bae55bca6834f8d34f9bf431a4a0430b32ff1
 
 Note: The binding uses the 16-byte token_id (TLV type 12), not the
 string format. This provides a fixed-size binding input.
@@ -3070,18 +3103,18 @@ Input:
   payment_hash = 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   output_hash = 0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
   execution_timestamp = 1705320045
-  execution_timestamp (big-endian, 8 bytes) = 0x0000000065a51e6d
+  execution_timestamp (big-endian, 4 bytes) = 0x65a51e6d
 
 Proof hash (domain-separated):
   proof_msg = task_token_id +
               payment_hash +
               output_hash +
-              execution_timestamp.to_bytes(8, 'big')
+              execution_timestamp.to_bytes(4, 'big')
   proof_hash = tagged_hash("SCRAP/proof/v1", proof_msg)
              = SHA256(tag_hash || tag_hash || proof_msg)
 
 Output:
-  proof_hash = <implementation should compute with tagged_hash>
+  proof_hash = 0x0b2656da895e0f245df96830f33fff12414b277d7587bf1db2832a06fab22982
 
 Note: Uses the 16-byte binary token_id, not the string format.
 ```
@@ -3146,7 +3179,7 @@ def compute_binding_hash(token_id: bytes, payment_hash: bytes) -> bytes:
 def compute_proof_hash(task_token_id: bytes, payment_hash: bytes,
                        output_hash: bytes, timestamp: int) -> bytes:
     """Compute execution proof hash (domain separated)."""
-    msg = task_token_id + payment_hash + output_hash + timestamp.to_bytes(8, 'big')
+    msg = task_token_id + payment_hash + output_hash + timestamp.to_bytes(4, 'big')
     return tagged_hash("SCRAP/proof/v1", msg)
 
 def compute_bip32_master(seed: bytes) -> tuple[bytes, bytes]:
@@ -3168,14 +3201,14 @@ if __name__ == "__main__":
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     )
     binding = compute_binding_hash(token_id, payment_hash)
-    # Note: hash value changes with domain separation
+    assert binding.hex() == "77b72bb25ba9fbf110799924773bae55bca6834f8d34f9bf431a4a0430b32ff1"
 
     # Test Vector 4: Proof hash (domain separated)
     output_hash = bytes.fromhex(
         "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
     )
     proof = compute_proof_hash(token_id, payment_hash, output_hash, 1705320045)
-    # Note: hash value changes with domain separation
+    assert proof.hex() == "0b2656da895e0f245df96830f33fff12414b277d7587bf1db2832a06fab22982"
 
     # Test Vector 5: BIP-32 master key
     seed = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
