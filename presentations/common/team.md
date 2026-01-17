@@ -6,7 +6,7 @@
 |--|--------------|----------------|
 | **Role** | Technical Lead | Business & Operations |
 | **Background** | Theoretical Physics → Bitcoin | USMC Combat Veteran → Aerospace |
-| **Education** | PhD Physics, Northwestern | BS Aerospace Engineering, Purdue |
+| **Education** | PhD Physics, Northwestern | BS Mechanical Engineering, Purdue |
 
 ---
 
@@ -29,12 +29,12 @@
 ### Calvin England — Business & Operations
 
 **Aerospace Industry**
-- **Blue Origin** — Launch operations
+- **Blue Origin** — Special Thermal & Chemical Processes
 - **Space Coast** companies — Melbourne/Titusville, FL
-- **Purdue Space Program Liquids** — LNG-LOx engine development
+- **Purdue Space Program Liquids** — Energetics development
 
 **Military Service**
-- **USMC Combat Veteran** — Camp Lejeune, NC
+- **USMC Combat Veteran** — Operation Enduring Freedom
 - Service-disabled veteran (SDVOSB eligible)
 
 **Leadership**
