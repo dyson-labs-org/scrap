@@ -33,23 +33,17 @@ stateDiagram-v2
     VALIDATED --> EXECUTING: role == EXECUTOR
     VALIDATED --> IN_CUSTODY: role == RELAY
 
-    %% ========================
-    %% EXECUTOR PATH
-    %% ========================
     EXECUTING --> DELIVERED: ER(DONE)
     EXECUTING --> DELIVERED: ER(ALREADY_DONE)
     EXECUTING --> DELIVERED: ER(IN_PROGRESS)
     EXECUTING --> DELIVERED: ER(REFUSED)
 
     note right of EXECUTING
-      Idempotent execution
+      Idempotent execution.
       If TaskID already seen:
       return ER(ALREADY_DONE / IN_PROGRESS)
     end note
 
-    %% ========================
-    %% RELAY / FORWARD PATH
-    %% ========================
     IN_CUSTODY --> FORWARDING: select_next_hop
     FORWARDING --> WAIT_DOWNSTREAM: TASK_FORWARD sent
 
@@ -59,22 +53,13 @@ stateDiagram-v2
     WAIT_TERMINAL --> DELIVERED: ER or DR received
     WAIT_TERMINAL --> IN_CUSTODY: terminal timeout (fallback)
 
-    note right of IN_CUSTODY
-      Holds custody
-      Enforces retries, budgets,
-      and capability attenuation
-    end note
-
-    %% ========================
-    %% ACK RETURN PATH
-    %% ========================
     DELIVERED --> ACKING: begin ACK return
     ACKING --> ACKING: ACK timeout (fallback)
     ACKING --> COMPLETE: ACK accepted
 
     COMPLETE --> [*]
     FAILED --> [*]
-
+```
 
 ## Control Loop with Capability Attenuation
 
