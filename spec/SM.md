@@ -14,6 +14,7 @@ chaotic transports (MANET, DTN, satellite links).
 
 ## Task Lifecycle State Machine
 
+```mermaid
 stateDiagram-v2
     direction LR
 
@@ -86,8 +87,6 @@ stateDiagram-v2
     WAIT_TERMINAL --> IN_CUSTODY: T_terminal expires\n(escalate if near deadline)\nmaybe switch mode=multi\nopt_idx++ or widen cand_set\nrestart T_offer(opt_idx)
 
     %% Global deadline / budget exhaustion (hard stop)
-    state VALIDATED {
-    }
     VALIDATED --> FAILED: now > D_abs (or B_rem<=0)
     IN_CUSTODY --> FAILED: now > D_abs (or B_rem<=0)
     FORWARDING --> FAILED: now > D_abs (or B_rem<=0)
@@ -108,10 +107,9 @@ stateDiagram-v2
 
     COMPLETE --> [*]
     FAILED --> [*]
-E -->|adjust u_{k+1}| C2
-```
 
 
+## Control Loop with Capability Attenuation
 flowchart LR
     %%========================
     %% SCRAP / SISL CONTROL LOOP (with Capability Attenuation)
@@ -135,3 +133,4 @@ flowchart LR
     PLANT -->|y_k: receipts & delays| MEASURE
     MEASURE --> UPDATE
     UPDATE -->|u_{k+1}: updated constraints\nand route/timeout tuning| C2
+
