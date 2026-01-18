@@ -63,18 +63,15 @@ stateDiagram-v2
 
 ## Control Loop with Capability Attenuation
 
+```mermaid
 flowchart LR
-    %%========================
-    %% SCRAP / SISL CONTROL LOOP (with Capability Attenuation)
-    %%========================
-
-    C2[Controller / C2\nGlobal view (imperfect)\nTask planning + constraints]
-    CAP[Capability Construction\n+ Attenuation Policy\n(monotone: only tighten)]
-    INTENT[Task Intent Packet\nIntent + CapToken\nRouteOptions + Timeouts]
-    PLANT[Chaotic Transport Plant\n(MANET / DTN / Satcom)\n+ Per-Node FSMs\n+ Local enforcement]
-    ENF[Local Enforcement\nValidate cap, enforce budgets\nOptional delegation => cap' ⪯ cap]
-    MEASURE[Feedback Signals\nCryptographic Receipts:\nCR (custody), DR (delivery), ER (execution)\n+ Timeout / failure events]
-    UPDATE[Belief Update + Replan\nAdjust RouteOptions/timeouts\nAdjust attenuation/budgets]
+    C2["Controller / C2<br/>Global view (imperfect)<br/>Task planning + constraints"]
+    CAP["Capability Construction<br/>Attenuation policy (monotone: only tighten)"]
+    INTENT["Task Intent Packet<br/>Intent + CapToken<br/>RouteOptions + Timeouts"]
+    PLANT["Chaotic Transport Plant<br/>(MANET / DTN / Satcom)<br/>Per-node FSMs<br/>Local enforcement"]
+    ENF["Local Enforcement<br/>Validate cap, enforce budgets<br/>Optional delegation: cap2 <= cap1"]
+    MEASURE["Feedback Signals<br/>Crypto receipts: CR (custody), DR (delivery), ER (execution)<br/>Timeout / failure events"]
+    UPDATE["Belief Update + Replan<br/>Tune RouteOptions/timeouts<br/>Tune attenuation/budgets"]
 
     C2 -->|mission goals / policy| CAP
     CAP -->|u_k: cap + constraints| INTENT
@@ -83,7 +80,9 @@ flowchart LR
     PLANT --> ENF
     ENF --> PLANT
 
-    PLANT -->|y_k: receipts & delays| MEASURE
+    PLANT -->|y_k: receipts + delays| MEASURE
     MEASURE --> UPDATE
-    UPDATE -->|u_{k+1}: updated constraints\nand route/timeout tuning| C2
+    UPDATE -->|u_k+1: updated constraints + tuning| C2
+```
+
 
