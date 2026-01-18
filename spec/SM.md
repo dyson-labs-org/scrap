@@ -18,98 +18,66 @@ chaotic transports (MANET, DTN, satellite links).
 stateDiagram-v2
     direction LR
 
-    %%========================
-    %% SCRAP/SISL TASK FSM (per-node, per TaskID)
-    %% Annotated with timers + variables
-    %%========================
-
     [*] --> NONE
-
-    NONE --> RECEIVED: TASK_OFFER(TaskID, Intent, Policy, RoutePlan)
+    NONE --> RECEIVED: TASK_OFFER
 
     state RECEIVED {
         [*] --> VALIDATING
-        VALIDATING: start T_validate
         VALIDATING --> [*]: validate_ok
         VALIDATING --> [*]: validate_fail
     }
 
-    RECEIVED --> FAILED: validate_fail\n(send CUSTODY_REFUSE optional)
+    RECEIVED --> FAILED: validate_fail
+    RECEIVED --> VALIDATED: validate_ok
 
-    RECEIVED --> VALIDATED: validate_ok\n(set role, init vars)
+    VALIDATED --> EXECUTING: role == EXECUTOR
+    VALIDATED --> IN_CUSTODY: role == RELAY
 
-    %% Vars initialized at VALIDATED:
-    %% D_abs: absolute deadline (or remaining budget B_rem)
-    %% k_max: max concurrent copies (multi-copy escalation cap)
-    %% RoutePlan: ordered list of options
-    %% opt_idx: current option index
-    %% cand_set: candidate next-hops for current option (IDs or capability-class)
-    %% retries[opt_idx]: retries left for option
-    %% T_offer(opt_idx): max wait for downstream custody accept for this option
-    %% T_term(opt_idx): max wait for terminal receipt after custody accepted
-    %% T_ack(opt_idx): max wait for upstream ACK progress/accept
-    %% mode: single-copy or multi-copy (may change near deadline)
-    %% status: {NEW, IN_PROGRESS, DONE, ALREADY_DONE, REFUSED}
-
-    VALIDATED --> EXECUTING: role==EXECUTOR\n(start T_exec if needed)
-    VALIDATED --> IN_CUSTODY: role==RELAY\n(emit CUSTODY_ACCEPT upstream)\n(start T_offer for selected option)
-
-    %%========================
+    %% ========================
     %% EXECUTOR PATH
-    %%========================
-    EXECUTING: enforce idempotency cache\nif seen(TaskID) => return ER(ALREADY_DONE/IN_PROGRESS)
-    EXECUTING --> DELIVERED: ER(DONE)\n(store ER; stop T_exec)
+    %% ========================
+    EXECUTING --> DELIVERED: ER(DONE)
     EXECUTING --> DELIVERED: ER(ALREADY_DONE)
-    EXECUTING --> DELIVERED: ER(IN_PROGRESS)  %% optional early receipt
+    EXECUTING --> DELIVERED: ER(IN_PROGRESS)
     EXECUTING --> DELIVERED: ER(REFUSED)
 
-    %%========================
+    note right of EXECUTING
+      Idempotent execution
+      If TaskID already seen:
+      return ER(ALREADY_DONE / IN_PROGRESS)
+    end note
+
+    %% ========================
     %% RELAY / FORWARD PATH
-    %%========================
-    IN_CUSTODY: choose option opt_idx\ncand_set = candidates(opt_idx)\nmode may be single/multi\nstart T_offer(opt_idx)
+    %% ========================
+    IN_CUSTODY --> FORWARDING: select_next_hop
+    FORWARDING --> WAIT_DOWNSTREAM: TASK_FORWARD sent
 
-    IN_CUSTODY --> FORWARDING: select_next_hop(j)\n(or select K hops if mode=multi)\nattach hop_budget / deadlines
-    FORWARDING --> WAIT_DOWNSTREAM: send TASK_FORWARD to j\nstart T_downstream_accept(j)=T_offer(opt_idx)
+    WAIT_DOWNSTREAM --> WAIT_TERMINAL: CUSTODY_ACCEPT
+    WAIT_DOWNSTREAM --> IN_CUSTODY: hop timeout (fallback)
 
-    WAIT_DOWNSTREAM: awaiting CUSTODY_ACCEPT from j
+    WAIT_TERMINAL --> DELIVERED: ER or DR received
+    WAIT_TERMINAL --> IN_CUSTODY: terminal timeout (fallback)
 
-    WAIT_DOWNSTREAM --> WAIT_TERMINAL: CUSTODY_ACCEPT(from=j)\nrecord CR_j\nstop T_downstream_accept(j)\nstart T_terminal=T_term(opt_idx)
+    note right of IN_CUSTODY
+      Holds custody
+      Enforces retries, budgets,
+      and capability attenuation
+    end note
 
-    %% Fallback trigger #1: downstream didn't accept custody in time
-    WAIT_DOWNSTREAM --> IN_CUSTODY: T_downstream_accept(j) expires\nmark j failed\nretries[opt_idx]--\n(if retries==0 => opt_idx++)\nrestart T_offer(opt_idx)
-
-    %% Terminal receipt comes back (ER/DR) or cached by idempotency
-    WAIT_TERMINAL: have downstream custody\nawait terminal receipt ER/DR\nstart/continue T_terminal
-
-    WAIT_TERMINAL --> DELIVERED: ER/DR received\nvalidate signature\nstop T_terminal\ncancel outstanding forwards
-
-    %% Fallback trigger #2: terminal receipt didn't return in time
-    WAIT_TERMINAL --> IN_CUSTODY: T_terminal expires\n(escalate if near deadline)\nmaybe switch mode=multi\nopt_idx++ or widen cand_set\nrestart T_offer(opt_idx)
-
-    %% Global deadline / budget exhaustion (hard stop)
-    VALIDATED --> FAILED: now > D_abs (or B_rem<=0)
-    IN_CUSTODY --> FAILED: now > D_abs (or B_rem<=0)
-    FORWARDING --> FAILED: now > D_abs (or B_rem<=0)
-    WAIT_DOWNSTREAM --> FAILED: now > D_abs (or B_rem<=0)
-    WAIT_TERMINAL --> FAILED: now > D_abs (or B_rem<=0)
-    EXECUTING --> FAILED: now > D_abs (or B_rem<=0)
-
-    %%========================
+    %% ========================
     %% ACK RETURN PATH
-    %%========================
-    DELIVERED: absorbing state for forward retries\nhave ReceiptBundle (ER/DR/Hash)\nprepare return path
-
-    DELIVERED --> ACKING: begin_ack_return\nselect upstream candidates\nstart T_ack (per option or per hop)
-
-    ACKING: send ACK_FORWARD upstream\n(optional: require custody accept for ACK)
-    ACKING --> ACKING: T_ack expires\ntry alternate upstream hop\n(opt_idx++ or widen upstream cand_set)\nrestart T_ack
-    ACKING --> COMPLETE: ACK accepted upstream\n(or best-effort if no accept required)
+    %% ========================
+    DELIVERED --> ACKING: begin ACK return
+    ACKING --> ACKING: ACK timeout (fallback)
+    ACKING --> COMPLETE: ACK accepted
 
     COMPLETE --> [*]
     FAILED --> [*]
 
 
 ## Control Loop with Capability Attenuation
+
 flowchart LR
     %%========================
     %% SCRAP / SISL CONTROL LOOP (with Capability Attenuation)
