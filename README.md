@@ -441,4 +441,4 @@ These are reference implementations for API compatibility; SCRAP uses LDK via `s
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+Apache 2.0 - See [LICENSE](LICENSE) for details.
