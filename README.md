@@ -8,7 +8,7 @@ SCRAP complements **SISL** (Secure Inter-Satellite Link) at the link layer.
 
 **Current Phase**: Specification development for CubeSat testbed demonstration
 
-**Target**: Flight demonstration on CubeSat constellation with ISL capability
+**Target**: Flight demonstration in orbit with ISL capability
 
 **TRL**: 4 (Technology validated in the lab)
 
