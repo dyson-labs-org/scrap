@@ -348,8 +348,11 @@ _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 # Detection threshold for "is there a signal here at all?" — matched-filter
 # peak magnitude must exceed SIGNAL_FLOOR_RATIO × median. For a clean TX
 # under attenuators, the signal peak is ~CHIPS_PER_SYMBOL (≈1023); noise
-# floor is ~30. Ratio of 10 rejects pure noise cheaply.
-_SIGNAL_FLOOR_RATIO = 10.0
+# floor is ~30. A ratio of 20 rejects Gaussian noise (5σ peak / 0.67σ
+# median ≈ 7.5) and also handles structured RF interference like WiFi
+# bursts at 2437 MHz, which can correlate with random codes above the
+# pure-Gaussian extreme.
+_SIGNAL_FLOOR_RATIO = 20.0
 
 
 def _decode_one_hail_in_block(
@@ -359,64 +362,82 @@ def _decode_one_hail_in_block(
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
-    Iterates over all `samps_per_chip` possible sub-chip decimation phases
-    (HackRF RX starts at an arbitrary sample relative to the TX chip grid);
-    the first phase that both locks the matched filter AND contains a
-    detectable SISL frame is used.
+    Performs a cheap no-signal check on phase 0 first; if that fails,
+    returns immediately (noise blocks are the common case when no TX is
+    running, and we don't want to spend the full 8-phase search on them).
+    On a positive detection, iterates sub-chip phases 0..samps_per_chip-1
+    and returns the first phase that yields a parseable SISL hail frame.
 
     Returns a status dict. Statuses:
-      no_signal       — no matched-filter peak above noise in any phase
-      no_lock         — signal present but find_frame_start rejected
-      short_block     — not enough chips after the lock for one hail
-      no_hail         — locked but decoded bytes contain no SISL ASM
+      short_block     — fewer than one code period of samples
+      no_signal       — phase-0 matched filter peak / median below threshold
+      no_hail         — signal present but no SISL ASM in any decoded phase
       decrypt_fail    — hail found but Poly1305 tag mismatch (wrong key)
       decrypt_ok      — hail decoded and decrypted under responder_static
     """
-    any_signal = False
-    attempted_decode = False
+    chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
 
-    for phase in range(samps_per_chip):
+    def _decimate_at_phase(phase: int) -> Optional[np.ndarray]:
         trimmed = samples[phase:]
         n_full = (len(trimmed) // samps_per_chip) * samps_per_chip
         if n_full < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
-            # Need at least 200 chips worth of stream to matter
-            continue
-
+            return None
         i = trimmed[:n_full].real.astype(np.float32)
-        chips = i.reshape(-1, samps_per_chip).mean(axis=1)
+        return i.reshape(-1, samps_per_chip).mean(axis=1)
 
-        mag = sf.matched_filter_magnitude(chips)
-        if len(mag) == 0:
-            continue
-        peak_mag = float(mag.max())
-        median_mag = float(np.median(mag))
-        if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
-            continue    # no signal at this phase
+    # ── Fast-path no-signal check on phase 0 only ─────────────────────────
+    chips0 = _decimate_at_phase(0)
+    if chips0 is None:
+        return {"status": "short_block"}
+    mag0 = sf.matched_filter_magnitude(chips0)
+    if len(mag0) == 0:
+        return {"status": "short_block"}
+    peak0 = float(mag0.max())
+    median0 = float(np.median(mag0))
+    if median0 == 0.0 or peak0 < _SIGNAL_FLOOR_RATIO * median0:
+        return {
+            "status": "no_signal",
+            "peak_mag": peak0,
+            "median_mag": median0,
+        }
 
-        any_signal = True
+    # ── Signal present — full 8-phase search for a SISL frame ─────────────
+    for phase in range(samps_per_chip):
+        if phase == 0:
+            chips = chips0
+            peak_mag = peak0
+            median_mag = median0
+        else:
+            chips = _decimate_at_phase(phase)
+            if chips is None:
+                continue
+            mag = sf.matched_filter_magnitude(chips)
+            if len(mag) == 0:
+                continue
+            peak_mag = float(mag.max())
+            median_mag = float(np.median(mag))
+            if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
+                continue
+
         offset = sf.find_frame_start(chips)
         if offset is None:
             continue
 
-        # Decode twice a hail's worth — ensures the ASM (and entire frame)
-        # fits within the decoded bytes regardless of alignment.
-        chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
         target_bytes = 2 * sc.HAIL_FRAME_LEN
         avail_chips = len(chips) - offset
         n_bytes = min(target_bytes, avail_chips // chips_per_byte)
         if n_bytes < sc.HAIL_FRAME_LEN:
-            continue                       # not enough room in this phase
+            continue
         needed = n_bytes * chips_per_byte
         decoded = sf.rx_chips_to_bytes(
             chips[offset:offset + needed], n_bytes
         )
-        attempted_decode = True
 
         info = identify_sisl_frame(decoded)
         if info is None or info["frame_type"] != "hail":
-            continue                       # try next phase
+            continue
         if info["frame_bytes"] is None:
-            continue                       # ASM near end of decoded block
+            continue
 
         decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
         if decoded_hail is None:
@@ -437,14 +458,21 @@ def _decode_one_hail_in_block(
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
 
-    if not any_signal:
-        return {"status": "no_signal"}
-    if attempted_decode:
-        return {"status": "no_hail"}
-    return {"status": "no_lock"}
+    # Signal was present but no phase yielded a SISL hail frame — this is
+    # almost certainly non-SISL RF interference (WiFi burst, etc.).
+    return {
+        "status": "no_hail",
+        "peak_mag": peak0,
+        "median_mag": median0,
+    }
 
 
-def _print_live_event(block_num: int, result: dict) -> None:
+def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
+    """Print one line describing a block's processing result.
+
+    `quiet=True` suppresses the "no signal" and "interference" output so
+    the operator only sees genuine SISL events (decrypt ok / fail).
+    """
     s = result["status"]
     if s == "decrypt_ok":
         b = result["body"]
@@ -456,13 +484,18 @@ def _print_live_event(block_num: int, result: dict) -> None:
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  phase={result['phase']}  "
               f"asm@byte{result['asm_at_byte']}  — DECRYPT FAILED "
-              f"(wrong target key)")
+              f"(not addressed to this key)")
+    elif quiet:
+        return
     elif s == "no_hail":
-        print(f"[{block_num:4d}] locked but no SISL hail in decoded bytes")
-    elif s == "no_lock":
-        print(f"[{block_num:4d}] signal present but no frame lock")
+        print(f"[{block_num:4d}] interference: signal present "
+              f"(peak={result.get('peak_mag', 0):.0f}, "
+              f"median={result.get('median_mag', 0):.0f}) "
+              f"but no SISL ASM")
     elif s == "no_signal":
-        print(f"[{block_num:4d}] no signal (noise only)")
+        print(f"[{block_num:4d}] no signal "
+              f"(peak={result.get('peak_mag', 0):.0f}, "
+              f"median={result.get('median_mag', 0):.0f})")
     elif s == "short_block":
         print(f"[{block_num:4d}] short block (processing gap)")
 
@@ -521,8 +554,10 @@ def live_rx_decode(
     stats = {
         "ok": True,
         "blocks_processed": 0,
-        "hails_detected": 0,
-        "hails_decrypted": 0,
+        "hails_detected": 0,     # frame header parsed (decrypt ok OR fail)
+        "hails_decrypted": 0,    # decrypt_ok only
+        "interference": 0,       # signal crossed threshold but no SISL ASM
+        "overflows": 0,
     }
     t_start = time.time()
 
@@ -550,8 +585,7 @@ def live_rx_decode(
 
             if filled < block_samples // 2:
                 if overflow:
-                    print("  OVERFLOW — processing can't keep up, "
-                          "drop block")
+                    stats["overflows"] += 1
                 continue
 
             stats["blocks_processed"] += 1
@@ -562,11 +596,14 @@ def live_rx_decode(
             result = _decode_one_hail_in_block(buf[:filled], responder_static)
             _print_live_event(stats["blocks_processed"], result)
 
-            if result["status"] == "decrypt_ok":
+            s = result["status"]
+            if s == "decrypt_ok":
                 stats["hails_detected"] += 1
                 stats["hails_decrypted"] += 1
-            elif result["status"] in ("decrypt_fail", "no_hail"):
+            elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
+            elif s == "no_hail":
+                stats["interference"] += 1
     except KeyboardInterrupt:
         print("  interrupted")
     finally:
@@ -798,8 +835,13 @@ def main() -> int:
         print("RX summary:")
         print(f"  elapsed:         {stats['elapsed_s']:.1f} s")
         print(f"  blocks:          {stats['blocks_processed']}")
-        print(f"  hails detected:  {stats['hails_detected']}")
-        print(f"  hails decrypted: {stats['hails_decrypted']}")
+        print(f"  overflows:       {stats.get('overflows', 0)}")
+        print(f"  interference:    {stats.get('interference', 0)} "
+              "(strong signal, non-SISL)")
+        print(f"  hails detected:  {stats['hails_detected']} "
+              "(SISL frame parsed)")
+        print(f"  hails decrypted: {stats['hails_decrypted']} "
+              "(Poly1305 verified)")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
     # mode == "tx"
