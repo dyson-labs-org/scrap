@@ -311,6 +311,51 @@ def test_offline_decode_hail_repeats():
         os.unlink(path)
 
 
+def test_find_sisl_frame_soft_topk_returns_candidates():
+    """Top-K search returns multiple candidates, sorted by |score|."""
+    block, _ = _make_block_with_hail()
+    # Extract peak_values manually to simulate what decode_one would see.
+    # Instead, run the decode and check that topk-like behavior is plumbed.
+    # Easier: synth a list of peak values with multiple plausible positions.
+    rng = np.random.default_rng(seed=99)
+    # 200 random peaks (std 1) with a clean ASM-aligned burst at position 60
+    peaks = rng.normal(0, 1, 200) + 1j * rng.normal(0, 1, 200)
+    peaks = peaks.astype(np.complex128)
+    # Inject a strong ASM-like signal at position 60 by setting peaks there
+    # to follow _ASM_BITS sign pattern with large magnitude.
+    asm_signs = np.where(dd._ASM_BITS == 0, 1.0, -1.0)
+    for i in range(32):
+        peaks[60 + i] = 10.0 * asm_signs[i]
+    results = dd.find_sisl_frame_soft_topk(
+        peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5,
+    )
+    assert len(results) > 0
+    assert len(results) <= 5
+    # Top result should be near position 60 (differential, so ±1 is fine)
+    top_offset, top_score, _ = results[0]
+    assert abs(top_offset - 59) <= 2 or abs(top_offset - 60) <= 2
+    assert abs(top_score) > 20
+    # Results must be sorted by |score| descending
+    scores = [abs(s) for _, s, _ in results]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_find_sisl_frame_soft_topk_separation():
+    """Results respect minimum separation — no two candidates adjacent."""
+    rng = np.random.default_rng(seed=100)
+    peaks = (rng.normal(0, 1, 500) + 1j * rng.normal(0, 1, 500)).astype(np.complex128)
+    results = dd.find_sisl_frame_soft_topk(
+        peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5, min_separation=4,
+    )
+    offsets = sorted(off for off, _, _ in results)
+    for a, b in zip(offsets, offsets[1:]):
+        assert b - a > 4, f"candidates {a} and {b} too close"
+
+
+def test_find_sisl_frame_soft_topk_empty_on_short():
+    assert dd.find_sisl_frame_soft_topk([1+0j]*10) == []
+
+
 def test_chase_decrypt_body_recovers_single_bit_error():
     """Chase-II must find a 1-bit body error in a demo hail frame."""
     frame = dd.build_demo_hail()

@@ -607,73 +607,21 @@ _ASM_DIFF_POLARITY = np.where(
 ).astype(np.float64)
 
 
-def find_sisl_frame_soft(
-    peak_values: list,
-    frame_len: int = sc.HAIL_FRAME_LEN,
-) -> Optional[tuple[int, int, float, bytes]]:
-    """Soft-decision sliding ASM search over complex correlator peaks.
+def _extract_soft_frame_bits(
+    soft: np.ndarray,
+    n_soft: int,
+    best_offset: int,
+    best_score: float,
+    n_bits: int,
+    n_peaks: int,
+) -> bytes:
+    """Hard-decision bit extraction given a soft correlator match position.
 
-    Per Gallager: the hard-bit + Hamming-distance ASM search throws away
-    the correlator magnitude, which is the confidence information. This
-    function correlates the SIGNED differential dot products with the
-    ASM's same/diff polarity template, yielding a continuous score per
-    alignment that preserves 15+ dB of effective SNR versus hard bits.
-
-    For each consecutive peak pair we compute:
-        soft_diff[k] = Re(peak[k+1] · conj(peak[k])) / (|peak[k+1]|·|peak[k]|)
-
-    The numerator is the differential dot product; division by the
-    magnitude product normalizes to [-1, +1] per symbol, so the score
-    is roughly bounded in [-31, +31] over a 32-bit ASM window. A clean
-    signal hits ~+31 (perfect correlation); random noise is Gaussian
-    with std √31 ≈ 5.5.
-
-    Returns (bit_offset, symbol_offset, soft_score, frame_bytes) with
-    the frame bytes extracted via hard decisions from the matched
-    position. Returns None if too few peaks.
-
-    NOTE: Because differential decoding has an absolute bit-polarity
-    ambiguity, we try BOTH signs of the template correlation and take
-    whichever gives the larger |score|. The sign of score then tells
-    us which polarity to use for the hard-decision frame extraction.
+    Used by find_sisl_frame_soft_topk to produce a bit-level frame from
+    each candidate ASM position. If the match is near the end of
+    peak_values and not enough peaks remain, zero-pad the tail.
     """
-    n_bits = frame_len * 8
-    n_peaks = len(peak_values)
-    # Need only enough peaks to fit the ASM template + one search position
-    if n_peaks < 33:
-        return None
-
-    peaks = np.array(peak_values, dtype=np.complex128)
-    diffs = (peaks[1:] * np.conj(peaks[:-1])).real
-    mags = np.abs(peaks[1:]) * np.abs(peaks[:-1])
-    soft = np.where(mags > 1e-12, diffs / mags, 0.0).astype(np.float64)
-
-    template = _ASM_DIFF_POLARITY                          # length 31
-    n_soft = len(soft)
-    if n_soft < 31:
-        return None
-
-    # Slide ASM template across soft values. No frame-length constraint
-    # on the search range — find the best ASM match anywhere in the
-    # available soft stream. Frame extraction below will handle
-    # truncation if fewer than n_bits peaks remain after the match.
-    best_score = 0.0
-    best_offset = -1
-    for offset in range(n_soft - 30):
-        window = soft[offset:offset + 31]
-        raw = float(np.dot(window, template))
-        if abs(raw) > abs(best_score):
-            best_score = raw
-            best_offset = offset
-
-    if best_offset < 0:
-        return None
     best_sign = +1 if best_score >= 0 else -1
-
-    # Extract hard-decision frame bits from the matched position. If the
-    # match is near the end of peak_values and there aren't enough peaks
-    # for a full frame, zero-pad the tail — decrypt will fail but the
-    # soft_score diagnostic is what the caller needs.
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0
     bits_available = min(n_bits, n_peaks - best_offset)
@@ -686,9 +634,76 @@ def find_sisl_frame_soft(
         bits[bits_available:] = 0
     if best_sign < 0:
         bits = 1 - bits
+    return np.packbits(bits).tobytes()
 
-    frame_bytes = np.packbits(bits).tobytes()
-    return best_offset, best_offset, float(best_score), frame_bytes
+
+def find_sisl_frame_soft_topk(
+    peak_values: list,
+    frame_len: int = sc.HAIL_FRAME_LEN,
+    k: int = 5,
+    min_separation: int = 4,
+) -> list:
+    """Return the top-K ASM candidate positions by |soft_score|.
+
+    At marginal SNR, the argmax soft score may be a noise-driven winner
+    while the true ASM sits at a lower-but-plausible position. Searching
+    the top K candidates lets the downstream coherent+chase decode try
+    each alternative before giving up.
+
+    `min_separation` enforces that returned candidates are at least N
+    bit positions apart, so adjacent samples in the same peak neighborhood
+    don't all crowd the top-K list.
+
+    Returns a list of (bit_offset, soft_score, frame_bytes) tuples, sorted
+    by |soft_score| descending, at most K entries long. Empty list if the
+    buffer is too short.
+    """
+    n_bits = frame_len * 8
+    n_peaks = len(peak_values)
+    if n_peaks < 33:
+        return []
+
+    peaks = np.array(peak_values, dtype=np.complex128)
+    diffs = (peaks[1:] * np.conj(peaks[:-1])).real
+    mags = np.abs(peaks[1:]) * np.abs(peaks[:-1])
+    soft = np.where(mags > 1e-12, diffs / mags, 0.0).astype(np.float64)
+
+    template = _ASM_DIFF_POLARITY
+    n_soft = len(soft)
+    if n_soft < 31:
+        return []
+
+    # Compute all positions' soft scores in one vectorized pass.
+    n_positions = n_soft - 30
+    windowed = np.lib.stride_tricks.sliding_window_view(
+        soft, window_shape=31
+    )[:n_positions]
+    scores = windowed @ template     # shape (n_positions,)
+    abs_scores = np.abs(scores)
+
+    # Greedy top-K with minimum-separation constraint. We pick the highest
+    # |score|, mask out a ±min_separation neighborhood, repeat until we
+    # have K or run out of candidates.
+    taken = np.zeros(n_positions, dtype=bool)
+    results = []
+    for _ in range(k):
+        candidate_mask = ~taken
+        if not candidate_mask.any():
+            break
+        # Restrict argmax to untaken positions
+        masked = np.where(candidate_mask, abs_scores, -1.0)
+        idx = int(np.argmax(masked))
+        if masked[idx] <= 0:
+            break
+        score = float(scores[idx])
+        frame_bytes = _extract_soft_frame_bits(
+            soft, n_soft, idx, score, n_bits, n_peaks,
+        )
+        results.append((idx, score, frame_bytes))
+        lo = max(0, idx - min_separation)
+        hi = min(n_positions, idx + min_separation + 1)
+        taken[lo:hi] = True
+    return results
 
 
 def find_sisl_frame_best_match(
@@ -826,12 +841,102 @@ def find_sisl_frame_bitwise(
 _SIGNAL_FLOOR_RATIO = 4.0
 
 
+def _try_coherent_decrypt_at_position(
+    peak_values: list,
+    soft_offset: int,
+    responder_static: ec.EllipticCurvePrivateKey,
+) -> Optional[dict]:
+    """Run the coherent decode + 6 XOR candidates + Chase-II at one ASM position.
+
+    Returns a dict with keys (decoded_hail, polarity, theta0, delta,
+    phase_rms, asm_errs, c_frame, c_soft, chase_flips) on decrypt success,
+    or a dict with decoded_hail=None and the diagnostic fields on failure.
+    """
+    aligned_peaks = peak_values[soft_offset:]
+    n_frame_bits = sc.HAIL_FRAME_LEN * 8
+    out = {
+        "decoded_hail": None,
+        "polarity": None,
+        "theta0_rad": None,
+        "delta_theta_per_sym": None,
+        "phase_rms_residual_rad": None,
+        "asm_errs_in_coherent": None,
+        "c_frame": None,
+        "c_soft": None,
+        "chase_flips": None,
+    }
+    if len(aligned_peaks) < n_frame_bits:
+        # Coherent decoder needs a full frame's worth of peaks; still
+        # do a lightweight fit for diagnostics.
+        if len(aligned_peaks) >= 32:
+            fit_diag = sf.fit_phase_from_known_bits(
+                aligned_peaks, 0, _ASM_BITS)
+            if fit_diag is not None:
+                t0, dd_, rms_ = fit_diag
+                out["theta0_rad"] = t0
+                out["delta_theta_per_sym"] = dd_
+                out["phase_rms_residual_rad"] = rms_
+        return out
+
+    coherent = sf.coherent_decode_from_pilot(
+        aligned_peaks, 0, _ASM_BITS, n_frame_bits,
+    )
+    if coherent is None:
+        return out
+    c_frame, c_soft, c_theta0, c_delta, c_rms = coherent
+    out["c_frame"] = c_frame
+    out["c_soft"] = c_soft
+    out["theta0_rad"] = c_theta0
+    out["delta_theta_per_sym"] = c_delta
+    out["phase_rms_residual_rad"] = c_rms
+
+    # How many of the first 32 decoded bits match the ASM? >8 wrong means
+    # the linear fit probably settled on a slope off by ±π/symbol.
+    c_bits_first32 = np.unpackbits(
+        np.frombuffer(c_frame[:4], dtype=np.uint8))
+    c_asm_errs = int(np.sum(c_bits_first32 != _ASM_BITS))
+    out["asm_errs_in_coherent"] = c_asm_errs
+
+    def _xor_alt(b: bytes, even_mask: int, odd_mask: int) -> bytes:
+        o = bytearray(len(b))
+        for i, x in enumerate(b):
+            o[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
+        return bytes(o)
+    candidates = [
+        ("coherent", c_frame),
+        ("coherent-inv", bytes(x ^ 0xFF for x in c_frame)),
+        ("coherent-alt", bytes(x ^ 0xAA for x in c_frame)),
+        ("coherent-alt2", bytes(x ^ 0x55 for x in c_frame)),
+        ("coherent-alt-inv", _xor_alt(c_frame, 0x55, 0xAA)),
+        ("coherent-alt2-inv", _xor_alt(c_frame, 0xAA, 0x55)),
+    ]
+    for label, candidate in candidates:
+        decoded_hail = sc.decode_hail(candidate, responder_static)
+        if decoded_hail is not None:
+            out["decoded_hail"] = decoded_hail
+            out["polarity"] = label
+            return out
+
+    # Chase-II on the base coherent frame if the fit is clean.
+    if c_asm_errs <= 2 and c_soft is not None:
+        chase = _chase_decrypt_body(
+            c_frame, c_soft, responder_static, k=12,
+        )
+        if chase is not None:
+            decoded_hail, n_flips = chase
+            out["decoded_hail"] = decoded_hail
+            out["polarity"] = f"coherent-chase{n_flips}"
+            out["chase_flips"] = n_flips
+    return out
+
+
 def _decode_one_hail_in_block(
     samples: np.ndarray,
     responder_static: ec.EllipticCurvePrivateKey,
     samps_per_chip: int = SAMPS_PER_CHIP,
     samp_hz: float = SAMP_RATE_HZ,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
@@ -1025,176 +1130,117 @@ def _decode_one_hail_in_block(
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
 
-    # ── Fallback 3: soft-decision ASM search on peak values ───────
+    # ── Fallback 3: top-K soft-decision ASM search ───────────────
     # Per Gallager's panel feedback: hard-decision decoding throws away
     # 10-15 dB of effective SNR. Run the soft correlator directly on
-    # the complex peak values, bypassing the hard bit decisions entirely.
-    # This can catch frames at SNRs where exact/fuzzy hard-bit search
-    # fails.
+    # the complex peak values and inspect the top-K candidate ASM
+    # positions, not just the argmax. At marginal SNR the true ASM may
+    # be at the 2nd or 3rd strongest position while noise wins the top.
     soft_result = None
-    if peak_values and len(peak_values) >= 33:
-        soft = find_sisl_frame_soft(peak_values, sc.HAIL_FRAME_LEN)
-        if soft is not None:
-            soft_offset, _, soft_score, soft_frame = soft
+    best_attempt = None          # dict returned by _try_coherent_decrypt_at_position
+    best_soft_score = 0.0
+    best_soft_offset = -1
+    best_soft_frame = None
+    if peak_values and len(peak_values) >= 33 and top_k_soft > 0:
+        topk = find_sisl_frame_soft_topk(
+            peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
+        )
+        if topk:
+            soft_offset, soft_score, soft_frame = topk[0]
             soft_result = (soft_offset, soft_score, soft_frame)
-            # Threshold: score > 10 is real signal (max ~31, noise std ~5.5)
-            if abs(soft_score) > 10.0:
-                decoded_hail = sc.decode_hail(soft_frame, responder_static)
+            best_soft_score = soft_score
+            best_soft_offset = soft_offset
+            best_soft_frame = soft_frame
+
+            # Walk top-K candidates in order of |score|.
+            for cand_offset, cand_score, cand_frame in topk:
+                if abs(cand_score) <= 10.0:
+                    continue   # below threshold, stop here
+                # First try the differential soft frame directly.
+                decoded_hail = sc.decode_hail(cand_frame, responder_static)
                 if decoded_hail is not None:
-                    # Full win: soft detection AND crypto verification.
                     return {
                         "status": "decrypt_ok",
                         "start_sample": positions[0] if positions else 0,
-                        "asm_at_byte": f"soft-bit{soft_offset}",
+                        "asm_at_byte": f"soft-bit{cand_offset}",
                         "peak_mag": peak_mag,
                         "median_mag": median_mag,
-                        "polarity": "soft" if soft_score >= 0 else "soft-inv",
+                        "polarity": "soft" if cand_score >= 0 else "soft-inv",
                         "rad_per_sample": rad_per_sample,
                         "freq_offset_hz": freq_hz,
-                        "soft_score": soft_score,
+                        "soft_score": cand_score,
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                     }
+                # Then try the coherent + chase pipeline.
+                attempt = _try_coherent_decrypt_at_position(
+                    peak_values, cand_offset, responder_static,
+                )
+                if attempt["decoded_hail"] is not None:
+                    decoded_hail = attempt["decoded_hail"]
+                    return {
+                        "status": "decrypt_ok",
+                        "start_sample": positions[0] if positions else 0,
+                        "asm_at_byte": f"{attempt['polarity']}-bit{cand_offset}",
+                        "peak_mag": peak_mag,
+                        "median_mag": median_mag,
+                        "polarity": attempt["polarity"],
+                        "rad_per_sample": rad_per_sample,
+                        "freq_offset_hz": freq_hz,
+                        "soft_score": cand_score,
+                        "theta0_rad": attempt["theta0_rad"],
+                        "delta_theta_per_sym": attempt["delta_theta_per_sym"],
+                        "phase_rms_residual_rad": attempt["phase_rms_residual_rad"],
+                        "asm_errs_in_coherent": attempt["asm_errs_in_coherent"],
+                        "chase_flips": attempt["chase_flips"],
+                        "body": decoded_hail.body,
+                        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                    }
+                # Remember the best (highest |score|) failed attempt for
+                # the frame_soft / noise_lock diagnostic below. The first
+                # candidate is always the highest |score|, so only take
+                # the first failed one.
+                if best_attempt is None:
+                    best_attempt = attempt
+                    best_soft_score = cand_score
+                    best_soft_offset = cand_offset
+                    best_soft_frame = cand_frame
 
-                # Pilot-aided coherent decode: use the 32 ASM bits as a
-                # known pilot to fit absolute phase θ₀ and per-symbol drift
-                # Δθ, then coherently demodulate the whole frame. Coherent
-                # BPSK is 3 dB better than differential and eliminates the
-                # drift accumulation that breaks long frames.
-                aligned_peaks = peak_values[soft_offset:]
-                n_frame_bits = sc.HAIL_FRAME_LEN * 8
-                c_frame = None
-                c_soft = None
-                c_theta0 = c_delta = c_rms = None
-                c_asm_errs = None
-                if len(aligned_peaks) >= n_frame_bits:
-                    coherent = sf.coherent_decode_from_pilot(
-                        aligned_peaks, 0, _ASM_BITS, n_frame_bits,
-                    )
-                    if coherent is not None:
-                        c_frame, c_soft, c_theta0, c_delta, c_rms = coherent
-                        # How many of the first 32 decoded bits match the
-                        # ASM? If >8 wrong, the linear fit likely settled
-                        # on a slope off by ±π/symbol (common at residual
-                        # freq offsets near half the symbol rate).
-                        c_bits_first32 = np.unpackbits(
-                            np.frombuffer(c_frame[:4], dtype=np.uint8))
-                        c_asm_errs = int(np.sum(c_bits_first32 != _ASM_BITS))
-
-                        # Candidate decrypts. In addition to the π global
-                        # phase ambiguity (XOR 0xFF per byte), we also try
-                        # the "π/symbol" ambiguity: alternating bit flips
-                        # via XOR 0xAA/0x55 which undo a polyfit slope
-                        # settled on slope±π/symbol.
-                        def _xor_bytes(b: bytes, mask: int) -> bytes:
-                            return bytes(x ^ mask for x in b)
-                        def _xor_alt(b: bytes, even_mask: int,
-                                      odd_mask: int) -> bytes:
-                            out = bytearray(len(b))
-                            for i, x in enumerate(b):
-                                out[i] = x ^ (even_mask if i % 2 == 0
-                                              else odd_mask)
-                            return bytes(out)
-                        candidates = [
-                            ("coherent", c_frame),
-                            ("coherent-inv", _xor_bytes(c_frame, 0xFF)),
-                            ("coherent-alt",
-                             bytes(x ^ 0xAA for x in c_frame)),
-                            ("coherent-alt2",
-                             bytes(x ^ 0x55 for x in c_frame)),
-                            ("coherent-alt-inv",
-                             _xor_alt(c_frame, 0x55, 0xAA)),
-                            ("coherent-alt2-inv",
-                             _xor_alt(c_frame, 0xAA, 0x55)),
-                        ]
-                        for label, candidate in candidates:
-                            decoded_hail = sc.decode_hail(
-                                candidate, responder_static)
-                            if decoded_hail is not None:
-                                return {
-                                    "status": "decrypt_ok",
-                                    "start_sample": positions[0] if positions else 0,
-                                    "asm_at_byte": f"{label}-bit{soft_offset}",
-                                    "peak_mag": peak_mag,
-                                    "median_mag": median_mag,
-                                    "polarity": label,
-                                    "rad_per_sample": rad_per_sample,
-                                    "freq_offset_hz": freq_hz,
-                                    "soft_score": soft_score,
-                                    "theta0_rad": c_theta0,
-                                    "delta_theta_per_sym": c_delta,
-                                    "phase_rms_residual_rad": c_rms,
-                                    "asm_errs_in_coherent": c_asm_errs,
-                                    "body": decoded_hail.body,
-                                    "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-                                }
-
-                        # None of the 6 XOR candidates verified. If the
-                        # base coherent frame has a perfect or near-perfect
-                        # ASM match (fit is clean, errors are in the body),
-                        # run Chase-II soft decoding: flip the k weakest
-                        # body bits in all 2^k combinations and retry.
-                        if c_asm_errs is not None and c_asm_errs <= 2 and c_soft is not None:
-                            chase = _chase_decrypt_body(
-                                c_frame, c_soft, responder_static, k=12,
-                            )
-                            if chase is not None:
-                                decoded_hail, n_flips = chase
-                                return {
-                                    "status": "decrypt_ok",
-                                    "start_sample": positions[0] if positions else 0,
-                                    "asm_at_byte": f"chase{n_flips}-bit{soft_offset}",
-                                    "peak_mag": peak_mag,
-                                    "median_mag": median_mag,
-                                    "polarity": f"coherent-chase{n_flips}",
-                                    "rad_per_sample": rad_per_sample,
-                                    "freq_offset_hz": freq_hz,
-                                    "soft_score": soft_score,
-                                    "theta0_rad": c_theta0,
-                                    "delta_theta_per_sym": c_delta,
-                                    "phase_rms_residual_rad": c_rms,
-                                    "asm_errs_in_coherent": c_asm_errs,
-                                    "chase_flips": n_flips,
-                                    "body": decoded_hail.body,
-                                    "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-                                }
-                # Soft correlator found the frame but Poly1305 body
-                # verification failed (all coherent ambiguity candidates
-                # AND the soft differential frame). NOT a false positive:
-                # this is real signal at SNR where body bit errors prevent
-                # AEAD verification. Report as frame_soft for demo purposes.
-                # Use coherent fit diagnostics from the attempt above.
-                if c_theta0 is None:
-                    # Coherent decode never ran (frame too short after
-                    # aligned_peaks). Do a lightweight fit on just the
-                    # pilot so we can still report phase_rms.
-                    aligned_peaks_diag = peak_values[soft_offset:]
-                    if len(aligned_peaks_diag) >= 32:
-                        fit_diag = sf.fit_phase_from_known_bits(
-                            aligned_peaks_diag, 0, _ASM_BITS)
-                        if fit_diag is not None:
-                            c_theta0, c_delta, c_rms = fit_diag
-                coherent_hex = (c_frame[:16].hex()
-                                 if c_frame is not None else None)
-                return {
-                    "status": "frame_soft",
-                    "start_sample": positions[0] if positions else 0,
-                    "asm_at_bit": soft_offset,
-                    "peak_mag": peak_mag,
-                    "median_mag": median_mag,
-                    "polarity": "soft" if soft_score >= 0 else "soft-inv",
-                    "rad_per_sample": rad_per_sample,
-                    "freq_offset_hz": freq_hz,
-                    "soft_score": soft_score,
-                    "first_16_bytes_hex": soft_frame[:16].hex(),
-                    "coherent_16_bytes_hex": coherent_hex,
-                    "asm_errs_in_coherent": c_asm_errs,
-                    "drift_per_symbol_rad": track_result.get(
-                        "drift_per_symbol_rad", 0.0),
-                    "theta0_rad": c_theta0,
-                    "delta_theta_per_sym": c_delta,
-                    "phase_rms_residual_rad": c_rms,
-                }
+    if best_attempt is not None:
+        # None of the top-K candidates decrypted. Use the best failed
+        # attempt (highest |soft_score|) for the diagnostic report.
+        c_rms = best_attempt["phase_rms_residual_rad"]
+        c_asm_errs = best_attempt["asm_errs_in_coherent"]
+        c_frame = best_attempt["c_frame"]
+        coherent_hex = (c_frame[:16].hex()
+                         if c_frame is not None else None)
+        # Noise rejection: if phase_rms is clearly bad AND asm_errs is
+        # clearly bad, this is a spurious interference lock, not a real
+        # SISL frame we failed to decrypt. Downgrade to noise_lock so
+        # quiet mode suppresses it and real events stand out.
+        is_noise = (c_rms is not None and c_rms > 0.9
+                    and c_asm_errs is not None and c_asm_errs > 4)
+        status = "noise_lock" if is_noise else "frame_soft"
+        return {
+            "status": status,
+            "start_sample": positions[0] if positions else 0,
+            "asm_at_bit": best_soft_offset,
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "polarity": "soft" if best_soft_score >= 0 else "soft-inv",
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "soft_score": best_soft_score,
+            "first_16_bytes_hex": (best_soft_frame[:16].hex()
+                                    if best_soft_frame is not None else ""),
+            "coherent_16_bytes_hex": coherent_hex,
+            "asm_errs_in_coherent": c_asm_errs,
+            "drift_per_symbol_rad": track_result.get(
+                "drift_per_symbol_rad", 0.0),
+            "theta0_rad": best_attempt["theta0_rad"],
+            "delta_theta_per_sym": best_attempt["delta_theta_per_sym"],
+            "phase_rms_residual_rad": c_rms,
+        }
 
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match
     # If so, return a diagnostic status showing the decoder found the
@@ -1318,6 +1364,20 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         print(f"[{block_num:4d}] TRACK LOST: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
               f"Δf={foff:+.0f}Hz")
+    elif s == "noise_lock" and not quiet:
+        # Suppress in quiet mode: these are spurious soft-correlator
+        # triggers on interference (phase_rms > 0.9 AND asm_errs > 4).
+        # In verbose mode, show a short one-liner so operators can see
+        # the rejection activity but not confuse it with frame events.
+        ss = result.get("soft_score", 0.0)
+        rms = result.get("phase_rms_residual_rad")
+        rms_str = f"{rms:.2f}" if rms is not None else "n/a"
+        asm_errs = result.get("asm_errs_in_coherent")
+        errs_str = f"{asm_errs}/32" if asm_errs is not None else "n/a"
+        print(f"[{block_num:4d}] noise-lock  "
+              f"soft={ss:+.1f}/31  "
+              f"phase_rms={rms_str}  asm_errs={errs_str}  "
+              f"Δf={foff:+.0f}Hz  (rejected)")
     elif quiet:
         return
     elif s == "no_hail":
@@ -1381,6 +1441,7 @@ def live_rx_decode(
     center_hz: float = CENTER_FREQ_HZ,
     device_name: str = "hackrf",
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -1520,6 +1581,7 @@ def live_rx_decode(
                 samps_per_chip=samps_per_chip,
                 samp_hz=samp_hz,
                 signal_threshold=signal_threshold,
+                top_k_soft=top_k_soft,
             )
             _print_live_event(stats["blocks_processed"], result)
 
@@ -1533,6 +1595,8 @@ def live_rx_decode(
                 stats["frames_soft"] = stats.get("frames_soft", 0) + 1
             elif s == "frame_fuzzy":
                 stats["frames_fuzzy"] += 1
+            elif s == "noise_lock":
+                stats["noise_locks"] = stats.get("noise_locks", 0) + 1
             elif s == "no_hail":
                 stats["interference"] += 1
     except KeyboardInterrupt:
@@ -1715,6 +1779,15 @@ def main() -> int:
                              f"weak signals; raise to ~20 to avoid wasted "
                              f"attempts on interference. Pure Gaussian "
                              f"noise sits around 7-8.")
+    parser.add_argument("--top-k", type=int, default=5,
+                        help="rx: number of top ASM candidate positions "
+                             "to try in the soft correlator (default 5). "
+                             "At marginal SNR the true ASM may not be the "
+                             "argmax soft score; trying the top-K plausible "
+                             "positions catches these. Cost: ~5x the "
+                             "per-block decode compute. Set to 1 to match "
+                             "old behavior, or 10 for very low SNR / "
+                             "noisy environments.")
     parser.add_argument("--device", choices=list(DEVICES.keys()),
                         default="hackrf",
                         help="rx: which SDR to use. 'hackrf' (default) "
@@ -1825,6 +1898,7 @@ def main() -> int:
             center_hz=args.freq * 1e6,
             device_name=args.device,
             signal_threshold=args.signal_threshold,
+            top_k_soft=args.top_k,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -1837,6 +1911,8 @@ def main() -> int:
         print(f"  overflows:       {stats.get('overflows', 0)}")
         print(f"  interference:    {stats.get('interference', 0)} "
               "(strong signal, non-SISL)")
+        print(f"  noise locks:     {stats.get('noise_locks', 0)} "
+              "(spurious soft-correlator triggers, rejected)")
         print(f"  soft detected:   {stats.get('frames_soft', 0)} "
               "(soft correlator found ASM, body noisy)")
         print(f"  fuzzy matches:   {stats.get('frames_fuzzy', 0)} "
