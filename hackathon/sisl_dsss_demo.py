@@ -2410,6 +2410,23 @@ def main() -> int:
             fec=args.fec,
         )
 
+        if args.fec:
+            print(f"FEC decode:    status={result.get('fec_status')!r}, "
+                  f"polarity={result.get('fec_polarity')!r}")
+            decoded_hail = result["decoded_hail"]
+            if decoded_hail is None:
+                print("TRIAL DECRYPT: FAILED (FEC body decoded but Poly1305 "
+                      "rejected — likely phase-drift wrap in the back half "
+                      "of the 2096-bit codeword; needs DBPSK in production)")
+                return 1
+            body = decoded_hail.body
+            print("TRIAL DECRYPT: OK (this hail was for us)")
+            print(f"  center_freq_offset: +{body.center_freq_offset} MHz")
+            print(f"  bandwidth_code:     0x{body.bandwidth_code:02x}")
+            print(f"  mode:               0x{body.mode:02x}")
+            print(f"  body_nonce:         {body.body_nonce.hex()}")
+            return 0
+
         offset = result["offset"]
         data = result["decoded_bytes"]
         frame = result["frame"]

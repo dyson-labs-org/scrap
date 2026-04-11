@@ -416,13 +416,24 @@ def decode_with_freq_tracking(
     # running median of the first block of peaks, which is outlier-
     # resistant and reflects the actual per-symbol energy.
     initial_peak = float(mag[pos])
-    lock_floor = lock_threshold_frac * initial_peak
-    # Long-codeword relaxation: at 2096-symbol FEC frames, a single
-    # transient noise dip could otherwise abort the tracker before
-    # the bootstrap re-anchor takes effect. Halve the initial floor
-    # when we know the caller needs a long track.
-    if n_bits >= 1500:
-        lock_floor *= 0.5
+    # Lock floor anchored to the GLOBAL noise floor (median of |MF|),
+    # not just a fixed fraction of one possibly-lucky peak. The pure
+    # `lock_threshold_frac * initial_peak` form fails on long codewords
+    # because (a) the initial peak can be a noise-driven argmax, in
+    # which case subsequent real peaks fall below the floor, and
+    # (b) a single per-symbol noise dip can push local_peak under the
+    # floor, aborting the entire tracker. Two combined gates here:
+    #   1. peak must be >= 2× median(|MF|) — i.e. clearly above the
+    #      noise floor, regardless of how the initial peak was chosen
+    #   2. peak must be >= lock_threshold_frac * initial_peak softened
+    #      by sqrt(n_bits / 256), so longer codewords get a more
+    #      permissive threshold (more chances to hit a noise dip)
+    median_mag = float(np.median(mag))
+    length_softening = max(1.0, float(np.sqrt(n_bits / 256.0)))
+    lock_floor = max(
+        median_mag * 2.0,
+        lock_threshold_frac * initial_peak / length_softening,
+    )
 
     ref_angle = float(np.angle(corr_c[pos]))
 
