@@ -963,6 +963,7 @@ def _decode_one_hail_in_block(
             if abs(soft_score) > 10.0:
                 decoded_hail = sc.decode_hail(soft_frame, responder_static)
                 if decoded_hail is not None:
+                    # Full win: soft detection AND crypto verification.
                     return {
                         "status": "decrypt_ok",
                         "start_sample": positions[0] if positions else 0,
@@ -976,6 +977,24 @@ def _decode_one_hail_in_block(
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                     }
+                # Soft correlator found the frame but Poly1305 body
+                # verification failed. NOT a false positive: this is
+                # real signal at SNR where body bit errors prevent AEAD
+                # verification. Report as frame_soft for demo purposes.
+                return {
+                    "status": "frame_soft",
+                    "start_sample": positions[0] if positions else 0,
+                    "asm_at_bit": soft_offset,
+                    "peak_mag": peak_mag,
+                    "median_mag": median_mag,
+                    "polarity": "soft" if soft_score >= 0 else "soft-inv",
+                    "rad_per_sample": rad_per_sample,
+                    "freq_offset_hz": freq_hz,
+                    "soft_score": soft_score,
+                    "first_16_bytes_hex": soft_frame[:16].hex(),
+                    "drift_per_symbol_rad": track_result.get(
+                        "drift_per_symbol_rad", 0.0),
+                }
 
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match
     # If so, return a diagnostic status showing the decoder found the
@@ -1060,6 +1079,20 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"— frame detected with {d} bit errors, "
               f"too noisy to decrypt")
         print(f"       first 16 bytes: {result.get('first_16_bytes_hex','')}")
+    elif s == "frame_soft":
+        ss = result.get("soft_score", 0.0)
+        drift = result.get("drift_per_symbol_rad", 0.0)
+        drift_deg = drift * 180.0 / 3.14159265
+        print(f"[{block_num:4d}] FRAME SOFT-DETECTED  "
+              f"asm@bit{result['asm_at_bit']}  "
+              f"soft={ss:+.1f}/31  "
+              f"peak={result['peak_mag']:.3g}  "
+              f"Δf={foff:+.0f}Hz  "
+              f"drift={drift_deg:+.1f}°/sym  "
+              f"pol={result.get('polarity', '?')}  "
+              f"— SISL frame detected via soft correlator, body bit "
+              f"errors prevent Poly1305 verification")
+        print(f"       first 16 bytes: {result.get('first_16_bytes_hex', '')}")
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
@@ -1225,6 +1258,7 @@ def live_rx_decode(
         "blocks_processed": 0,
         "hails_detected": 0,     # frame header parsed (decrypt ok OR fail)
         "hails_decrypted": 0,    # decrypt_ok only
+        "frames_soft": 0,        # soft correlator detected frame (|score|>10)
         "frames_fuzzy": 0,       # ASM found with 1-3 bit errors
         "interference": 0,       # signal crossed threshold but no SISL ASM
         "overflows": 0,
@@ -1277,6 +1311,8 @@ def live_rx_decode(
                 stats["hails_decrypted"] += 1
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
+            elif s == "frame_soft":
+                stats["frames_soft"] = stats.get("frames_soft", 0) + 1
             elif s == "frame_fuzzy":
                 stats["frames_fuzzy"] += 1
             elif s == "no_hail":
@@ -1572,6 +1608,8 @@ def main() -> int:
         print(f"  overflows:       {stats.get('overflows', 0)}")
         print(f"  interference:    {stats.get('interference', 0)} "
               "(strong signal, non-SISL)")
+        print(f"  soft detected:   {stats.get('frames_soft', 0)} "
+              "(soft correlator found ASM, body noisy)")
         print(f"  fuzzy matches:   {stats.get('frames_fuzzy', 0)} "
               "(ASM found with 1-3 bit errors, too noisy to decrypt)")
         print(f"  hails detected:  {stats['hails_detected']} "
