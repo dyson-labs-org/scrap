@@ -748,13 +748,17 @@ def main() -> int:
     parser.add_argument("--block-seconds", type=float, default=1.5,
                         help="rx: processing block duration (default 1.5 s)")
     parser.add_argument("--rx-lna", type=int, default=HACKRF_RX_LNA_DB,
-                        help=f"rx: HackRF LNA gain 0..40 dB "
+                        help=f"rx: HackRF LNA (Low-Noise Amplifier, RF "
+                             f"front-end gain, 0..40 dB in 8 dB steps) "
                              f"(default {HACKRF_RX_LNA_DB})")
     parser.add_argument("--rx-vga", type=int, default=HACKRF_RX_VGA_DB,
-                        help=f"rx: HackRF VGA gain 0..62 dB "
-                             f"(default {HACKRF_RX_VGA_DB})")
+                        help=f"rx: HackRF VGA (Variable Gain Amplifier, "
+                             f"baseband gain after mixer, 0..62 dB in 2 dB "
+                             f"steps) (default {HACKRF_RX_VGA_DB})")
     parser.add_argument("--rx-amp", action="store_true",
-                        help="rx: enable HackRF 14 dB AMP (off by default)")
+                        help="rx: enable HackRF AMP (switchable 14 dB RF "
+                             "preamplifier ahead of the LNA; off by default "
+                             "to avoid saturating the ADC)")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
