@@ -511,6 +511,53 @@ def offline_despread(cfile_path: str,
 # ── SISL frame auto-detection ──────────────────────────────────────────────
 
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
+# Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
+# bytes_to_bits / rx_chips_to_bytes conventions.
+_ASM_BITS = np.unpackbits(
+    np.frombuffer(_ASM_BYTES, dtype=np.uint8)
+).astype(np.uint8)
+
+
+def find_sisl_frame_bitwise(
+    decoded_bytes: bytes,
+    frame_len: int = sc.HAIL_FRAME_LEN,
+) -> Optional[tuple[int, bytes]]:
+    """Search the decoded bit stream for a SISL ASM at any bit offset.
+
+    The live decoder reconstructs bits in TX order but has no way of
+    knowing where the TX's byte boundaries fall — it picks up mid-frame
+    from wherever the matched filter first locks. So the decoded bytes
+    may be shifted by 1-7 bits relative to the TX frame structure, and
+    a byte-level ASM search will miss the frame entirely.
+
+    This function unpacks the decoded bytes into a bit array and slides
+    the 32-bit ASM pattern one bit at a time until it finds a match.
+    When found, it re-packs `frame_len` consecutive bytes starting from
+    that exact bit offset, yielding the correctly-aligned frame bytes.
+
+    Returns (bit_offset, frame_bytes) or None if not found. bit_offset
+    is the position within the input bit stream where the ASM starts.
+
+    False positive rate: ~2^-32 per bit offset × (N - 32) offsets.
+    For N = 2k bits, that's ~5e-7 — negligible.
+    """
+    n_frame_bits = frame_len * 8
+    if len(decoded_bytes) * 8 < n_frame_bits + 32:
+        return None
+
+    bits = np.unpackbits(np.frombuffer(decoded_bytes, dtype=np.uint8))
+    max_bit_offset = len(bits) - n_frame_bits
+    if max_bit_offset <= 0:
+        return None
+
+    asm_len = len(_ASM_BITS)
+    # Vectorized sliding comparison: convolve bits with a one-hot pattern
+    for bit_start in range(max_bit_offset + 1):
+        if np.array_equal(bits[bit_start:bit_start + asm_len], _ASM_BITS):
+            frame_bits = bits[bit_start:bit_start + n_frame_bits]
+            frame_bytes = np.packbits(frame_bits).tobytes()
+            return bit_start, frame_bytes
+    return None
 
 # ── Live RX: stream samples and decode hails in real time ─────────────────
 
@@ -622,18 +669,34 @@ def _decode_one_hail_in_block(
     # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
     decoded_inv = bytes(b ^ 0xFF for b in decoded)
     for variant_label, variant in (("normal", decoded), ("inverted", decoded_inv)):
+        # ── First: byte-aligned ASM search (fast, common case) ─────
         info = identify_sisl_frame(variant)
-        if info is None or info["frame_type"] != "hail":
-            continue
-        if info["frame_bytes"] is None:
+        frame_bytes = None
+        asm_location = None
+        if info is not None and info["frame_type"] == "hail" and info["frame_bytes"] is not None:
+            frame_bytes = info["frame_bytes"]
+            asm_location = f"byte{info['asm_offset']}"
+
+        # ── Fallback: bit-level sliding ASM search ─────────────────
+        # The live decoder reconstructs bits in TX order but has no
+        # idea where the TX's byte boundaries are — the first decoded
+        # bit could be at any of 8 possible sub-byte positions within
+        # a TX byte. Bit-level search catches this.
+        if frame_bytes is None:
+            bitwise = find_sisl_frame_bitwise(variant, sc.HAIL_FRAME_LEN)
+            if bitwise is not None:
+                bit_offset, frame_bytes = bitwise
+                asm_location = f"bit{bit_offset}"
+
+        if frame_bytes is None:
             continue
 
-        decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
+        decoded_hail = sc.decode_hail(frame_bytes, responder_static)
         if decoded_hail is None:
             return {
                 "status": "decrypt_fail",
                 "start_sample": positions[0] if positions else 0,
-                "asm_at_byte": info["asm_offset"],
+                "asm_at_byte": asm_location,
                 "peak_mag": peak_mag,
                 "median_mag": median_mag,
                 "polarity": variant_label,
@@ -643,7 +706,7 @@ def _decode_one_hail_in_block(
         return {
             "status": "decrypt_ok",
             "start_sample": positions[0] if positions else 0,
-            "asm_at_byte": info["asm_offset"],
+            "asm_at_byte": asm_location,
             "peak_mag": peak_mag,
             "median_mag": median_mag,
             "polarity": variant_label,
@@ -682,7 +745,7 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         b = result["body"]
         print(f"[{block_num:4d}] DECRYPTED  "
               f"sample={result['start_sample']}  "
-              f"asm@byte{result['asm_at_byte']}  "
+              f"asm@{result['asm_at_byte']}  "
               f"peak={result['peak_mag']:.3g}  "
               f"Δf={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
@@ -691,7 +754,7 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
               f"sample={result.get('start_sample', 0)}  "
-              f"asm@byte{result['asm_at_byte']}  "
+              f"asm@{result['asm_at_byte']}  "
               f"Δf={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
               f"— DECRYPT FAILED (not addressed to this key)")

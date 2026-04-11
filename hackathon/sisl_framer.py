@@ -295,7 +295,7 @@ def decode_with_freq_tracking(
     n_bytes: int,
     code: Optional[np.ndarray] = None,
     search_half_samples: Optional[int] = None,
-    lock_threshold_frac: float = 0.3,
+    lock_threshold_frac: float = 0.1,
     freq_offset_rad_per_sample: Optional[float] = None,
 ) -> Optional[dict]:
     """Full-stack decoder: carrier offset correction + complex MF + tracking.
