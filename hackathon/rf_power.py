@@ -52,6 +52,41 @@ except ImportError:
           file=sys.stderr)
     sys.exit(2)
 
+_PLUGIN_INSTALL_HINTS = {
+    "hackrf": "  Arch: sudo pacman -S soapyhackrf\n"
+              "  Debian: sudo apt install soapysdr-module-hackrf",
+    "rtlsdr": "  Arch: sudo pacman -S soapyrtlsdr\n"
+              "  Debian: sudo apt install soapysdr-module-rtlsdr",
+}
+
+
+def _diagnose_device_open(device_name: str, driver_str: str,
+                          err: Exception) -> None:
+    """Print a helpful error message when SoapySDR can't open a device."""
+    print(f"failed to open {device_name} ({driver_str}): {err}",
+          file=sys.stderr)
+    try:
+        enumerated = SoapySDR.Device.enumerate()
+    except Exception:
+        enumerated = []
+    print("SoapySDR enumerated devices:", file=sys.stderr)
+    if enumerated:
+        for i, d in enumerate(enumerated):
+            print(f"  [{i}] {dict(d)}", file=sys.stderr)
+    else:
+        print("  (none)", file=sys.stderr)
+    found = {str(d.get("driver", "")) for d in enumerated if hasattr(d, "get")}
+    wanted = driver_str.replace("driver=", "")
+    if wanted not in found:
+        print(file=sys.stderr)
+        print(f"The '{wanted}' SoapySDR plugin is not installed.",
+              file=sys.stderr)
+        hint = _PLUGIN_INSTALL_HINTS.get(wanted,
+                                         f"  (no install hint for {wanted})")
+        print(hint, file=sys.stderr)
+        print("Verify with: SoapySDRUtil --find", file=sys.stderr)
+
+
 # Per-device driver string + sample rate + frequency range.
 _DEVICES = {
     "hackrf": {
@@ -95,7 +130,11 @@ def watch(
         )
         return 2
 
-    dev = SoapySDR.Device(info["driver"])
+    try:
+        dev = SoapySDR.Device(info["driver"])
+    except RuntimeError as e:
+        _diagnose_device_open(device_name, info["driver"], e)
+        return 3
     dev.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     dev.setFrequency(SOAPY_SDR_RX, 0, center_hz)
 

@@ -122,6 +122,75 @@ DEVICES = {
 }
 
 
+# Suggest plugin install commands when a SoapySDR driver is missing
+_PLUGIN_INSTALL_HINTS = {
+    "hackrf": (
+        "  Arch:   sudo pacman -S soapyhackrf\n"
+        "  Debian: sudo apt install soapysdr-module-hackrf\n"
+        "  From source: https://github.com/pothosware/SoapyHackRF"
+    ),
+    "rtlsdr": (
+        "  Arch:   sudo pacman -S soapyrtlsdr\n"
+        "  Debian: sudo apt install soapysdr-module-rtlsdr\n"
+        "  From source: https://github.com/pothosware/SoapyRTLSDR"
+    ),
+}
+
+
+def _format_device_open_error(soapy_module, info: "DeviceInfo",
+                               err: Exception) -> str:
+    """Produce a human-readable explanation for SoapySDR device-open
+    failures that tells the user exactly which plugin is missing.
+    """
+    try:
+        enumerated = soapy_module.Device.enumerate()
+    except Exception:
+        enumerated = []
+
+    # SoapySDR.Device.enumerate() returns a list of dicts (or Kwargs objects
+    # that behave dict-like). Extract the driver field for human display.
+    found_drivers = []
+    for d in enumerated:
+        try:
+            drv = d.get("driver", "?") if hasattr(d, "get") else "?"
+        except Exception:
+            drv = "?"
+        found_drivers.append(str(drv))
+
+    lines = [
+        f"failed to open {info.name} with '{info.driver}': {err}",
+        "",
+        "SoapySDR enumerated the following devices:",
+    ]
+    if enumerated:
+        for i, d in enumerate(enumerated):
+            try:
+                lines.append(f"  [{i}] {dict(d)}")
+            except Exception:
+                lines.append(f"  [{i}] {d}")
+    else:
+        lines.append("  (none — no SoapySDR plugins found matching any device)")
+
+    driver_key = info.driver.replace("driver=", "")
+    if driver_key not in found_drivers:
+        lines.append("")
+        lines.append(
+            f"The '{driver_key}' driver is NOT among SoapySDR's loaded plugins."
+        )
+        lines.append(
+            f"Install the Soapy{driver_key.upper()} plugin and retry:"
+        )
+        hint = _PLUGIN_INSTALL_HINTS.get(driver_key,
+                                         f"  (no install hint for {driver_key})")
+        lines.append(hint)
+        lines.append("")
+        lines.append(
+            "After installing, verify with:  SoapySDRUtil --find"
+        )
+
+    return "\n".join(lines)
+
+
 # ── Suggested quieter frequencies ──────────────────────────────────────────
 #
 # 2.4 GHz ISM is saturated at hackathons and any venue with WiFi/BT. These
@@ -462,31 +531,30 @@ def _decode_one_hail_in_block(
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
-    Uses a SAMPLE-RATE matched filter (one FFT convolution over the whole
-    block against the spreading code upsampled to samps_per_chip samples
-    per chip). This is phase-agnostic: the sub-chip offset between the TX
-    chip grid and the RX sample grid is absorbed by the kernel's ZOH
-    upsampling. No 8-phase search needed.
+    Uses a SAMPLE-RATE matched filter for signal detection and then
+    a per-symbol peak-tracking decoder (sf.decode_with_tracking) to
+    extract bits. The tracker makes each symbol's decision at a locally-
+    found peak, so clock drift between TX and RX (typical 20-40 ppm
+    between cheap SDRs) is absorbed continuously rather than
+    accumulating across the frame.
 
-    Algorithm:
-      1. Sample-rate matched filter → magnitude at each sample index
-      2. Peak/median ratio test — bail if below _SIGNAL_FLOOR_RATIO
-      3. Locate first peak within 10% of the global max
-      4. Extract one symbol's chips from that sample offset forward
-         (mean-of-window decimation, now chip-grid-aligned by construction)
-      5. rx_chips_to_bytes → search for SISL ASM → decode_hail
+    BPSK phase ambiguity is resolved by trying both the decoded bytes
+    and their bitwise complement when searching for the SISL ASM —
+    a 180° carrier phase offset flips every bit, and one orientation
+    or the other will contain the framing marker.
 
     Returns a status dict. Statuses:
       short_block   — fewer than one code-period of samples
       no_signal     — matched filter peak/median below threshold
-      no_hail       — signal present but no SISL ASM in decoded bytes
+      track_lost    — tracker lost lock partway through the frame
+      no_hail       — decoded bytes contain no SISL ASM in either polarity
       decrypt_fail  — hail frame found but Poly1305 tag mismatch
       decrypt_ok    — hail decoded and decrypted under responder_static
     """
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
         return {"status": "short_block"}
 
-    # ── 1. Sample-rate matched filter (single pass) ───────────────────────
+    # ── 1. Signal detection via magnitude matched filter ─────────────────
     mag = sf.matched_filter_magnitude_sample_rate(samples, samps_per_chip)
     if len(mag) == 0:
         return {"status": "short_block"}
@@ -494,7 +562,6 @@ def _decode_one_hail_in_block(
     peak_mag = float(mag.max())
     median_mag = float(np.median(mag))
 
-    # ── 2. No-signal test ────────────────────────────────────────────────
     if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
         return {
             "status": "no_signal",
@@ -502,70 +569,68 @@ def _decode_one_hail_in_block(
             "median_mag": median_mag,
         }
 
-    # ── 3. Locate first symbol-boundary sample ───────────────────────────
-    # Use the same "first within 10% of max" approach as find_frame_start
-    # to handle float32 ULP rounding across adjacent symbol peaks.
-    near_peak = mag >= 0.9 * peak_mag
-    start_sample = int(np.argmax(near_peak))
-
-    # ── 4. Chip-aligned decimation from start_sample ──────────────────────
-    tail = samples[start_sample:]
-    n_full = (len(tail) // samps_per_chip) * samps_per_chip
-    if n_full < sc.HAIL_FRAME_LEN * 8 * sf.CHIPS_PER_SYMBOL:
-        return {
-            "status": "no_hail",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "note": "too few chips after lock for a full hail",
-        }
-    i = tail[:n_full].real.astype(np.float32)
-    chips = i.reshape(-1, samps_per_chip).mean(axis=1)
-
-    # ── 5. Decode bytes, find ASM, trial-decrypt ─────────────────────────
-    chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
+    # ── 2. Per-symbol tracking decode ────────────────────────────────────
+    # Decode 2x a hail worth so the ASM is inside the decoded bytes
+    # regardless of where it falls within the block.
     target_bytes = 2 * sc.HAIL_FRAME_LEN
-    n_bytes = min(target_bytes, len(chips) // chips_per_byte)
-    if n_bytes < sc.HAIL_FRAME_LEN:
-        return {
-            "status": "no_hail",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-        }
-    needed = n_bytes * chips_per_byte
-    decoded = sf.rx_chips_to_bytes(chips[:needed], n_bytes)
+    track_result = sf.decode_with_tracking(
+        samples,
+        samps_per_chip=samps_per_chip,
+        n_bytes=target_bytes,
+    )
+    if track_result is None:
+        # Fall back to decoding one hail worth — maybe we ran short
+        track_result = sf.decode_with_tracking(
+            samples,
+            samps_per_chip=samps_per_chip,
+            n_bytes=sc.HAIL_FRAME_LEN,
+        )
+        if track_result is None:
+            return {
+                "status": "track_lost",
+                "peak_mag": peak_mag,
+                "median_mag": median_mag,
+            }
+    decoded, positions = track_result
 
-    info = identify_sisl_frame(decoded)
-    if info is None or info["frame_type"] != "hail":
-        return {
-            "status": "no_hail",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "start_sample": start_sample,
-        }
-    if info["frame_bytes"] is None:
-        return {
-            "status": "no_hail",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "start_sample": start_sample,
-            "note": "ASM near end of decoded block, frame truncated",
-        }
+    # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
+    decoded_inv = bytes(b ^ 0xFF for b in decoded)
 
-    decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
-    if decoded_hail is None:
+    for variant_label, variant in (("normal", decoded), ("inverted", decoded_inv)):
+        info = identify_sisl_frame(variant)
+        if info is None or info["frame_type"] != "hail":
+            continue
+        if info["frame_bytes"] is None:
+            continue
+
+        decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
+        if decoded_hail is None:
+            return {
+                "status": "decrypt_fail",
+                "start_sample": positions[0] if positions else 0,
+                "asm_at_byte": info["asm_offset"],
+                "peak_mag": peak_mag,
+                "polarity": variant_label,
+            }
         return {
-            "status": "decrypt_fail",
-            "start_sample": start_sample,
+            "status": "decrypt_ok",
+            "start_sample": positions[0] if positions else 0,
             "asm_at_byte": info["asm_offset"],
             "peak_mag": peak_mag,
+            "polarity": variant_label,
+            "body": decoded_hail.body,
+            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
+
+    # Neither polarity contains a SISL ASM — either interference or
+    # drift/noise corrupted the bits beyond recognition.
     return {
-        "status": "decrypt_ok",
-        "start_sample": start_sample,
-        "asm_at_byte": info["asm_offset"],
+        "status": "no_hail",
         "peak_mag": peak_mag,
-        "body": decoded_hail.body,
-        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+        "median_mag": median_mag,
+        "start_sample": positions[0] if positions else 0,
+        "first_16_bytes_hex": decoded[:16].hex(),
+        "first_16_inv_hex": decoded_inv[:16].hex(),
     }
 
 
@@ -671,7 +736,13 @@ def live_rx_decode(
           f"(processing ~{int(block_seconds*samp_hz*8/1e6)} MB/block, "
           f"{samps_per_chip} samples/chip)")
 
-    device = SoapySDR.Device(info.driver)
+    try:
+        device = SoapySDR.Device(info.driver)
+    except RuntimeError as e:
+        return {
+            "ok": False,
+            "error": _format_device_open_error(SoapySDR, info, e),
+        }
     device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
 

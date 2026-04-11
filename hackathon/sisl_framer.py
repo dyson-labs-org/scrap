@@ -179,6 +179,124 @@ def matched_filter_magnitude(chips: np.ndarray,
     return np.abs(corr.astype(np.float32))
 
 
+def matched_filter_signed_sample_rate(
+    samples: np.ndarray,
+    samps_per_chip: int,
+    code: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Sample-rate matched filter returning SIGNED correlation.
+
+    Like `matched_filter_magnitude_sample_rate` but returns the raw real-
+    valued correlation instead of its magnitude. The sign at a symbol-
+    boundary peak is the BPSK bit value: positive → bit 0, negative →
+    bit 1. Used by `decode_with_tracking` to extract bit decisions
+    directly from correlator output without a second decimation pass.
+    """
+    if code is None:
+        code = public_hail_code()
+    if samps_per_chip < 1:
+        raise ValueError("samps_per_chip must be >= 1")
+    code_upsampled = np.repeat(
+        code.astype(np.float32), samps_per_chip
+    ).astype(np.float32)
+    i = np.asarray(samples, dtype=np.complex64).real.astype(np.float32)
+    if len(i) < len(code_upsampled):
+        return np.zeros(0, dtype=np.float32)
+    kernel = code_upsampled[::-1]
+    corr = _fftconvolve(i, kernel, mode="valid")
+    return corr.astype(np.float32)
+
+
+def decode_with_tracking(
+    samples: np.ndarray,
+    samps_per_chip: int,
+    n_bytes: int,
+    code: Optional[np.ndarray] = None,
+    search_half_samples: Optional[int] = None,
+    lock_threshold_frac: float = 0.3,
+) -> Optional[tuple[bytes, list[int]]]:
+    """Decode `n_bytes` from a baseband sample stream with per-symbol
+    peak tracking, robust to TX-RX clock drift.
+
+    Algorithm:
+      1. Compute signed matched filter at sample rate (phase-agnostic
+         with respect to integer-sample sub-chip offset).
+      2. Locate the first strong peak above threshold (0.5 × global max).
+      3. For each subsequent symbol, search a local window
+         (±search_half_samples, default = CHIPS_PER_SYMBOL*samps_per_chip/4)
+         around the predicted next-peak position and take the peak as
+         the decision point. Predicted position is updated from the
+         last ACTUAL peak, so clock drift is absorbed continuously.
+      4. Extract the sign at each peak → bit value → bytes.
+
+    Returns (decoded_bytes, peak_positions) or None if tracking lost
+    lock (a window's peak dropped below `lock_threshold_frac` × initial
+    peak, or the stream ran out of samples).
+
+    Note on BPSK phase ambiguity: this function returns ONE bit
+    orientation. The caller should try both the returned bytes and
+    their bitwise complement when searching for framing markers, since
+    a 180° carrier phase offset flips every bit.
+    """
+    if code is None:
+        code = public_hail_code()
+
+    n_bits = n_bytes * 8
+    samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip
+    if search_half_samples is None:
+        search_half_samples = samples_per_symbol // 4
+
+    corr = matched_filter_signed_sample_rate(samples, samps_per_chip, code)
+    if len(corr) == 0:
+        return None
+    mag = np.abs(corr)
+
+    global_peak = float(mag.max())
+    if global_peak == 0.0:
+        return None
+
+    # Locate initial lock: first index within 90% of the global max
+    high_threshold = 0.9 * global_peak
+    first_candidate = int(np.argmax(mag >= high_threshold))
+    if mag[first_candidate] < high_threshold:
+        return None
+
+    # Refine the initial position within a small local window
+    lo = max(0, first_candidate - search_half_samples)
+    hi = min(len(mag), first_candidate + search_half_samples + 1)
+    local_idx = int(np.argmax(mag[lo:hi]))
+    pos = lo + local_idx
+    initial_peak = float(mag[pos])
+    lock_floor = lock_threshold_frac * initial_peak
+
+    bits = np.empty(n_bits, dtype=np.uint8)
+    positions: list[int] = []
+
+    for bit_idx in range(n_bits):
+        lo = max(0, pos - search_half_samples)
+        hi = min(len(mag), pos + search_half_samples + 1)
+        if hi - lo < samps_per_chip:
+            return None
+        window_mag = mag[lo:hi]
+        local_idx = int(np.argmax(window_mag))
+        actual_pos = lo + local_idx
+        local_peak = float(window_mag[local_idx])
+
+        if local_peak < lock_floor:
+            # Lost track: signal faded or we ran past the frame
+            return None
+
+        sign = float(corr[actual_pos])
+        bits[bit_idx] = 0 if sign >= 0 else 1
+        positions.append(actual_pos)
+
+        # Next expected position — updated from the ACTUAL (not predicted)
+        # peak so clock drift is absorbed continuously.
+        pos = actual_pos + samples_per_symbol
+
+    return bits_to_bytes(bits), positions
+
+
 def matched_filter_magnitude_sample_rate(
     samples: np.ndarray,
     samps_per_chip: int,
