@@ -309,6 +309,39 @@ def build_tx_chips(message: bytes) -> np.ndarray:
     return sf.tx_bytes_to_chips(message)
 
 
+def build_demo_hail_fec_chips() -> tuple[np.ndarray, bytes]:
+    """Produce a FEC-encoded chip stream for one fresh demo hail.
+
+    Returns (chips, frame_bytes_for_diagnostics) where chips is the
+    int8 ±1 stream from tx_bits_to_chips applied to the 2096-bit FEC
+    channel array, and frame_bytes is the canonical 133-byte uncoded
+    hail (for printing/debugging — NOT what's on the wire).
+
+    This is the FEC TX path: encode_hail_fec produces 48 uncoded
+    header bits + 2048 FEC body bits (total 2096), each becoming
+    CHIPS_PER_SYMBOL=1023 chips on the air.
+    """
+    caller_static = demo_caller_key()
+    responder_static = demo_responder_key()
+    caller_eph = sc.Ephemeral()
+    body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
+        center_freq_offset=100,
+        bandwidth_code=0x03,
+        mode=0x01,
+        chip_rate_code=0x32,
+        body_nonce=os.urandom(8),
+        flags=0x03,
+    )
+    # Capture the canonical frame for printing/debugging by re-encoding
+    # under a separate ephemeral. The on-wire bits use the consumed eph.
+    diag_eph = sc.Ephemeral()
+    diag_frame = sc.encode_hail(diag_eph, responder_static.public_key(), body)
+    bits = sc.encode_hail_fec(caller_eph, responder_static.public_key(), body)
+    chips = sf.tx_bits_to_chips(bits)
+    return chips, diag_frame
+
+
 def upsample_chips_to_samples(chips: np.ndarray,
                               samps_per_chip: float = SAMPS_PER_CHIP
                               ) -> np.ndarray:
@@ -343,7 +376,8 @@ if _HAVE_GR:
                      tx_amp_on: bool = HACKRF_TX_AMP_ON,
                      center_hz: float = CENTER_FREQ_HZ,
                      hackrf_device: str = "hackrf=0",
-                     preamble_only: bool = False):
+                     preamble_only: bool = False,
+                     fec: bool = False):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
@@ -351,6 +385,7 @@ if _HAVE_GR:
             self.tx_amp_on = tx_amp_on
             self.center_hz = center_hz
             self.preamble_only = preamble_only
+            self.fec = fec
 
             if mode == "tx":
                 if preamble_only:
@@ -363,6 +398,15 @@ if _HAVE_GR:
                     frame = _ASM_BYTES
                     self.hail_frame = frame
                     chips = build_tx_chips(frame)
+                elif fec:
+                    # FEC TX path: encode_hail_fec produces a 2096-bit
+                    # channel array (48 uncoded header + 2048 FEC body).
+                    # Each bit becomes CHIPS_PER_SYMBOL chips. The on-air
+                    # waveform is twice as long per hail, but the FEC
+                    # body lets the RX accumulator decode at ~5 dB lower
+                    # chip SNR than the uncoded path.
+                    chips, frame = build_demo_hail_fec_chips()
+                    self.hail_frame = frame
                 else:
                     # Always TX a fresh SISL v3 hail targeting demo-responder.
                     # The frame contains a random per-call body_nonce and a
@@ -418,7 +462,8 @@ if _HAVE_GR:
 
 def tx_to_file(message: bytes, path: str,
                prefix_ms: float = 0.0,
-               repeats: int = 1) -> int:
+               repeats: int = 1,
+               fec: bool = False) -> int:
     """Synthesize a TX capture from `message` and write it as complex64.
 
     Bypasses GNU Radio and HackRF entirely. Useful for smoke-testing the
@@ -429,8 +474,14 @@ def tx_to_file(message: bytes, path: str,
     find_frame_start acquisition). Rounded to a whole-chip boundary so
     integer decimation at RX stays aligned.
     `repeats`: how many copies of the message to concatenate.
+    `fec`: when True, ignore `message` and synthesize a fresh FEC-encoded
+    demo hail via build_demo_hail_fec_chips. The on-air signal is twice
+    as long per hail (2096 channel symbols vs 1064).
     """
-    chips = build_tx_chips(message)
+    if fec:
+        chips, _diag_frame = build_demo_hail_fec_chips()
+    else:
+        chips = build_tx_chips(message)
     samples = upsample_chips_to_samples(chips)
     if repeats > 1:
         samples = np.tile(samples, repeats)
@@ -1253,6 +1304,7 @@ def _decode_one_hail_in_block(
     samp_hz: float = SAMP_RATE_HZ,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
+    fec: bool = False,
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
@@ -1385,6 +1437,65 @@ def _decode_one_hail_in_block(
     decoded = track_result["bytes"]
     positions = track_result["positions"]
     peak_values = track_result.get("peak_values", [])
+
+    # ── 5b. FEC fast path ─────────────────────────────────────────────
+    # In FEC mode the on-air frame is 2096 channel bits, not 1064. The
+    # byte-aligned ASM search below is meaningless for FEC waveforms
+    # (the body is convolutionally encoded, so 'finding ASM at byte N'
+    # only works for the first 6 bytes — and those are not byte-aligned
+    # in the bit stream after the FEC body anyway). Skip the
+    # hard-decision searches entirely. Extract fec_llrs at peak_values
+    # offset 0 (the tracker's first peak is the start of the frame),
+    # try sc.decode_hail_fec_from_llrs, and surface the result.
+    if fec:
+        llr_diag = _extract_llrs_at_position(peak_values, 0)
+        fec_llrs_arr = llr_diag.get("fec_llrs")
+        if fec_llrs_arr is None:
+            return {
+                "status": "track_lost",
+                "peak_mag": peak_mag,
+                "median_mag": median_mag,
+                "rad_per_sample": rad_per_sample,
+                "freq_offset_hz": freq_hz,
+                "note": "fec mode: peak_values too short for HAIL_FEC_TOTAL_BITS",
+            }
+        decoded_hail = sc.decode_hail_fec_from_llrs(
+            fec_llrs_arr, responder_static,
+        )
+        # Try inverted polarity (BPSK phase ambiguity) before giving up.
+        if decoded_hail is None:
+            decoded_hail = sc.decode_hail_fec_from_llrs(
+                -fec_llrs_arr, responder_static,
+            )
+            polarity_label = "fec-inv"
+        else:
+            polarity_label = "fec"
+        base = {
+            "start_sample": positions[0] if positions else 0,
+            "asm_at_byte": "fec",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "llrs": llr_diag["llrs"],
+            "fec_llrs": fec_llrs_arr,
+            "c_frame": llr_diag["c_frame"],
+            "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
+            "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
+        }
+        if decoded_hail is None:
+            return {
+                "status": "decrypt_fail",
+                "polarity": "fec",
+                **base,
+            }
+        return {
+            "status": "decrypt_ok",
+            "polarity": polarity_label,
+            "body": decoded_hail.body,
+            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+            **base,
+        }
 
     # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
     decoded_inv = bytes(b ^ 0xFF for b in decoded)
@@ -1823,6 +1934,7 @@ def live_rx_decode(
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     combine_copies: int = 0,
+    fec: bool = False,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -1931,11 +2043,18 @@ def live_rx_decode(
     # when combine_copies > 0; otherwise does nothing.
     accumulator = None
     if combine_copies > 0:
-        accumulator = LlrAccumulator(
-            n_bits=sc.HAIL_FRAME_LEN * 8,
-            pass_rms=0.3,           # only clean coherent fits
-            max_copies=combine_copies,
-        )
+        if fec:
+            accumulator = LlrAccumulator(
+                n_bits=sc.HAIL_FEC_TOTAL_BITS,
+                max_copies=combine_copies,
+                fec=True,
+            )
+        else:
+            accumulator = LlrAccumulator(
+                n_bits=sc.HAIL_FRAME_LEN * 8,
+                pass_rms=0.3,           # only clean coherent fits
+                max_copies=combine_copies,
+            )
 
     try:
         while time.time() - t_start < duration_s:
@@ -1975,6 +2094,7 @@ def live_rx_decode(
                 samp_hz=samp_hz,
                 signal_threshold=signal_threshold,
                 top_k_soft=top_k_soft,
+                fec=fec,
             )
             _print_live_event(stats["blocks_processed"], result)
 
@@ -2027,6 +2147,7 @@ def offline_decode_hail(
     cfile_path: str,
     responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
     max_search_chips: Optional[int] = None,
+    fec: bool = False,
 ) -> dict:
     """Full pipeline: capture → despread → detect hail → trial decrypt.
 
@@ -2037,9 +2158,36 @@ def offline_decode_hail(
         decoded_hail      — sisl_crypto.DecodedHail or None
         decrypted         — True iff the hail was for `responder_static`
         responder_label   — diagnostic string ("demo-responder", etc.)
+
+    `fec`: when True, route the entire capture through
+    _decode_one_hail_in_block(fec=True), which extracts 2096 channel
+    LLRs and runs sisl_fec.decode + decode_hail_fec_from_llrs.
     """
     if responder_static is None:
         responder_static = demo_responder_key()
+
+    if fec:
+        raw = np.fromfile(cfile_path, dtype=np.complex64)
+        decode_result = _decode_one_hail_in_block(
+            raw, responder_static, fec=True,
+        )
+        out: dict = {
+            "offset": None,
+            "decoded_bytes": b"",
+            "frame": None,
+            "decoded_hail": None,
+            "decrypted": False,
+            "fec_status": decode_result.get("status"),
+            "fec_polarity": decode_result.get("polarity"),
+        }
+        if decode_result.get("status") == "decrypt_ok":
+            out["decoded_hail"] = type("X", (), {  # tiny duck-type for callers
+                "body": decode_result["body"],
+                "caller_eph_pub_canonical":
+                    decode_result["caller_eph_pub_canonical"],
+            })()
+            out["decrypted"] = True
+        return out
 
     data, offset = offline_despread(
         cfile_path, max_search_chips=max_search_chips
@@ -2218,12 +2366,25 @@ def main() -> int:
                              "at 2 Msps with a single tuner gain; "
                              "useful as a second observer on sub-GHz "
                              "bands. tx mode is always HackRF.")
+    parser.add_argument("--fec", action="store_true",
+                        help="use the FEC-encoded hail variant. TX side "
+                             "emits a 2096-bit channel waveform "
+                             "(48 uncoded header + 2048 FEC body, ~2x "
+                             "the air time of an uncoded hail). RX side "
+                             "extracts 2096 channel LLRs, runs the soft "
+                             "Viterbi over the FEC body, and decrypts "
+                             "via decode_hail_fec_from_llrs. Combine "
+                             "with --combine N to chase-combine FEC "
+                             "frames across copies for the full ~5 dB "
+                             "(N=1) to ~13 dB (N=10) deeper-into-noise "
+                             "operating point.")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
         frame = build_demo_hail()
         n = tx_to_file(frame, args.capture,
-                       prefix_ms=args.prefix_ms, repeats=args.repeats)
+                       prefix_ms=args.prefix_ms, repeats=args.repeats,
+                       fec=args.fec)
         print(f"wrote {n} complex64 samples ({n * 8} bytes) to {args.capture}")
         print(f"  hail frame:    {len(frame)} bytes")
         print(f"  asm:           {frame[0:4].hex()}")
@@ -2246,6 +2407,7 @@ def main() -> int:
             args.capture,
             responder_static=responder,
             max_search_chips=args.max_search_chips,
+            fec=args.fec,
         )
 
         offset = result["offset"]
@@ -2321,6 +2483,7 @@ def main() -> int:
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
             combine_copies=args.combine,
+            fec=args.fec,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -2363,6 +2526,7 @@ def main() -> int:
         tx_amp_on=args.tx_amp,
         center_hz=args.freq * 1e6,
         preamble_only=args.tx_preamble,
+        fec=args.fec,
     )
     frame = tb.hail_frame
     if args.tx_preamble:
@@ -2373,8 +2537,15 @@ def main() -> int:
         print(f"  note:          no body, no crypto — expect frame_soft "
               f"with score ~31 at the RX, not decrypt_ok")
     else:
-        print(f"tx: transmitting demo hail ({len(frame)} bytes) "
-              f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
+        if args.fec:
+            print(f"tx: transmitting FEC demo hail to {args.freq:.1f} MHz "
+                  f"for {args.duration:.1f} s")
+            print(f"  on-air:        {sc.HAIL_FEC_TOTAL_BITS} channel bits "
+                  f"(48 uncoded header + 2048 FEC body)")
+            print(f"  underlying:    {len(frame)}-byte hail frame, FEC-encoded")
+        else:
+            print(f"tx: transmitting demo hail ({len(frame)} bytes) "
+                  f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
         print(f"  asm:           {frame[0:4].hex()}")
         print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
         print(f"  target key:    demo-responder (deterministic)")
