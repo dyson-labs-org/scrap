@@ -1167,26 +1167,39 @@ def _extract_llrs_at_position(
     if len(aligned_peaks) < n_frame_bits:
         return out
 
-    # When peak_values is long enough, decode at the FEC channel length
-    # so we can populate both the legacy 1064-bit `llrs` and the longer
-    # `fec_llrs` from a single coherent_decode_from_pilot call. The
-    # first 1064 LLRs are pilot-fit-identical regardless of how many we
-    # ask the decoder to produce.
-    decode_len = n_fec_bits if len(aligned_peaks) >= n_fec_bits else n_frame_bits
+    # Always run the legacy coherent decoder for the 1064-bit `llrs`
+    # (the non-FEC accumulator and the soft-correlator path consume
+    # this). It uses the existing pilot-only (θ₀, Δθ) fit which is
+    # accurate enough over a 1064-symbol codeword.
     coherent = sf.coherent_decode_from_pilot(
-        aligned_peaks, 0, _PILOT_BITS, decode_len,
+        aligned_peaks, 0, _PILOT_BITS, n_frame_bits,
     )
     if coherent is None:
         return out
-    c_frame_full, c_soft_full, _c_theta0, _c_delta, c_rms = coherent
-    out["c_frame"] = c_frame_full[: sc.HAIL_FRAME_LEN]
-    out["llrs"] = c_soft_full[: n_frame_bits]
-    if decode_len >= n_fec_bits:
-        out["fec_llrs"] = c_soft_full[: n_fec_bits]
+    c_frame, c_soft, _c_theta0, _c_delta, c_rms = coherent
+    out["c_frame"] = c_frame
+    out["llrs"] = c_soft
     out["phase_rms_residual_rad"] = c_rms
     c_bits_first32 = np.unpackbits(
-        np.frombuffer(c_frame_full[:4], dtype=np.uint8))
+        np.frombuffer(c_frame[:4], dtype=np.uint8))
     out["asm_errs_in_coherent"] = int(np.sum(c_bits_first32 != _ASM_BITS))
+
+    # If we have enough peaks for the FEC channel layout, run the
+    # DBPSK fast-path decoder over the longer span. This produces the
+    # 2096-bit `fec_llrs` vector that the FEC accumulator + soft Viterbi
+    # consume. The DBPSK decoder uses pilot-aided drift estimation
+    # (estimate_drift_per_symbol with pilot_bits) and differential
+    # demodulation across the body — the two-step fix mandated by the
+    # second reviewer's S4 critique to handle the back-half phase wrap
+    # that the legacy coherent decoder cannot recover from on a
+    # 2096-symbol codeword. See sisl_framer.dbpsk_decode_from_pilot.
+    if len(aligned_peaks) >= n_fec_bits:
+        dbpsk = sf.dbpsk_decode_from_pilot(
+            aligned_peaks, _PILOT_BITS, n_fec_bits,
+        )
+        if dbpsk is not None:
+            _fec_frame, fec_soft, _, _, _ = dbpsk
+            out["fec_llrs"] = fec_soft
     return out
 
 
@@ -1440,17 +1453,14 @@ def _decode_one_hail_in_block(
 
     # ── 5b. FEC fast path ─────────────────────────────────────────────
     # In FEC mode the on-air frame is 2096 channel bits, not 1064. The
-    # byte-aligned ASM search below is meaningless for FEC waveforms
-    # (the body is convolutionally encoded, so 'finding ASM at byte N'
-    # only works for the first 6 bytes — and those are not byte-aligned
-    # in the bit stream after the FEC body anyway). Skip the
-    # hard-decision searches entirely. Extract fec_llrs at peak_values
-    # offset 0 (the tracker's first peak is the start of the frame),
-    # try sc.decode_hail_fec_from_llrs, and surface the result.
+    # tracker's peak_values[0] is the global argmax of the matched
+    # filter — typically NOT the start of an ASM frame. We must find
+    # the actual ASM offset first via the soft-correlator search, then
+    # call dbpsk_decode_from_pilot at that offset. Without this step,
+    # the pilot fit interprets random body bits as the known pilot and
+    # produces garbage LLRs.
     if fec:
-        llr_diag = _extract_llrs_at_position(peak_values, 0)
-        fec_llrs_arr = llr_diag.get("fec_llrs")
-        if fec_llrs_arr is None:
+        if not peak_values or len(peak_values) < sc.HAIL_FEC_TOTAL_BITS:
             return {
                 "status": "track_lost",
                 "peak_mag": peak_mag,
@@ -1459,24 +1469,91 @@ def _decode_one_hail_in_block(
                 "freq_offset_hz": freq_hz,
                 "note": "fec mode: peak_values too short for HAIL_FEC_TOTAL_BITS",
             }
-        decoded_hail = sc.decode_hail_fec_from_llrs(
-            fec_llrs_arr, responder_static,
+
+        # Soft-correlator search for the ASM offset. The same function
+        # the non-FEC path uses, just with the longer FEC frame length.
+        topk = find_sisl_frame_soft_topk(
+            peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
         )
-        # Try inverted polarity (BPSK phase ambiguity) before giving up.
-        if decoded_hail is None:
-            decoded_hail = sc.decode_hail_fec_from_llrs(
-                -fec_llrs_arr, responder_static,
-            )
-            polarity_label = "fec-inv"
-        else:
-            polarity_label = "fec"
+
+        best_attempt: Optional[dict] = None
+        best_offset = -1
+        best_score = 0.0
+        best_pts_ratio = 0.0
+        decoded_hail: Optional[sc.DecodedHail] = None
+        polarity_label = "fec"
+
+        for cand_offset, cand_score, _cand_frame, cand_pts in topk:
+            # Need HAIL_FEC_TOTAL_BITS peaks starting at this offset.
+            if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
+                continue
+            # Two-stage gate matching the non-FEC path:
+            #   absolute soft-score threshold + peak-to-sidelobe ratio.
+            if abs(cand_score) <= 10.0 or cand_pts < 3.0:
+                continue
+
+            llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
+            fec_llrs_arr = llr_diag.get("fec_llrs")
+            if fec_llrs_arr is None:
+                continue
+
+            # Try the FEC decrypt at this offset.
+            attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
+            if attempt is None:
+                # Try inverted polarity in case of BPSK 180° flip
+                # (DBPSK is locally invariant but the pilot fit can
+                # land on +π or -π depending on which side the noise
+                # pushes the angle estimator).
+                attempt = sc.decode_hail_fec_from_llrs(
+                    -fec_llrs_arr, responder_static,
+                )
+                if attempt is not None:
+                    polarity_label = "fec-inv"
+            else:
+                polarity_label = "fec"
+
+            if attempt is not None:
+                decoded_hail = attempt
+                best_offset = int(cand_offset)
+                best_score = float(cand_score)
+                best_pts_ratio = float(cand_pts)
+                best_attempt = {
+                    "llr_diag": llr_diag,
+                    "fec_llrs": fec_llrs_arr,
+                }
+                break  # success — stop searching
+
+            # Remember the highest-score failed attempt for diagnostics
+            if best_attempt is None:
+                best_attempt = {
+                    "llr_diag": llr_diag,
+                    "fec_llrs": fec_llrs_arr,
+                }
+                best_offset = int(cand_offset)
+                best_score = float(cand_score)
+                best_pts_ratio = float(cand_pts)
+
+        if best_attempt is None:
+            return {
+                "status": "track_lost",
+                "peak_mag": peak_mag,
+                "median_mag": median_mag,
+                "rad_per_sample": rad_per_sample,
+                "freq_offset_hz": freq_hz,
+                "note": "fec mode: no soft-correlator candidate cleared the gate",
+            }
+
+        llr_diag = best_attempt["llr_diag"]
+        fec_llrs_arr = best_attempt["fec_llrs"]
         base = {
             "start_sample": positions[0] if positions else 0,
-            "asm_at_byte": "fec",
+            "asm_at_byte": f"soft-bit{best_offset}",
             "peak_mag": peak_mag,
             "median_mag": median_mag,
             "rad_per_sample": rad_per_sample,
             "freq_offset_hz": freq_hz,
+            "soft_score": best_score,
+            "pts_ratio": best_pts_ratio,
             "llrs": llr_diag["llrs"],
             "fec_llrs": fec_llrs_arr,
             "c_frame": llr_diag["c_frame"],

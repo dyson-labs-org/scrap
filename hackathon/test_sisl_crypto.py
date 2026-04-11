@@ -214,7 +214,8 @@ def test_hail_fec_round_trip_noiseless():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), body
     )
-    llrs = sc.bits_to_hard_llrs(bits, magnitude=10.0)
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=10.0)
     decoded = sc.decode_hail_fec_from_llrs(llrs, responder_static)
     assert decoded is not None
     assert decoded.body.center_freq_offset == body.center_freq_offset
@@ -252,7 +253,8 @@ def test_hail_fec_round_trip_with_awgn():
         bits = sc.encode_hail_fec(
             caller_eph, responder_static.public_key(), body
         )
-        clean_llrs = sc.bits_to_hard_llrs(bits, magnitude=4.0)
+        post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+        clean_llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
         noise = rng.normal(0.0, 1.0, len(clean_llrs)).astype(np.float32)
         noisy_llrs = clean_llrs + noise
         decoded = sc.decode_hail_fec_from_llrs(noisy_llrs, responder_static)
@@ -269,7 +271,8 @@ def test_hail_fec_wrong_receiver_rejected():
     bits = sc.encode_hail_fec(
         caller_eph, target_static.public_key(), _test_body()
     )
-    llrs = sc.bits_to_hard_llrs(bits)
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits)
     assert sc.decode_hail_fec_from_llrs(llrs, target_static) is not None
     assert sc.decode_hail_fec_from_llrs(llrs, other_static) is None
 
@@ -281,7 +284,8 @@ def test_hail_fec_truncated_input_rejected():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), _test_body()
     )
-    truncated = sc.bits_to_hard_llrs(bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    truncated = sc.bits_to_hard_llrs(post_dbpsk_bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
     assert sc.decode_hail_fec_from_llrs(truncated, responder_static) is None
 
 
@@ -294,7 +298,8 @@ def test_hail_fec_corrupted_header_cheap_rejected():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), _test_body()
     )
-    llrs = sc.bits_to_hard_llrs(bits)
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits)
     # Flip the first 32 LLRs (the ASM bits) to opposite polarity.
     llrs[:32] = -llrs[:32]
     assert sc.decode_hail_fec_from_llrs(llrs, responder_static) is None

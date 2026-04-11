@@ -303,10 +303,14 @@ def test_decode_one_hail_in_block_populates_fec_llrs():
         "if this fails the producer-side wiring is broken")
     assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
     assert result["fec_llrs"].dtype == np.float32
-    # First 1064 LLRs of fec_llrs must equal the legacy llrs (one decode
-    # call, two slices).
-    assert np.array_equal(result["fec_llrs"][: sc.HAIL_FRAME_LEN * 8],
-                          result["llrs"])
+    # llrs (1064-bit) and fec_llrs (2096-bit) come from DIFFERENT
+    # decoders now: llrs is the legacy coherent_decode_from_pilot output
+    # (pilot-fit Δθ), while fec_llrs is the dbpsk_decode_from_pilot
+    # output (V-V drift + differential body decode). They no longer
+    # share the first 1064 entries — they encode different things in
+    # different bases. Just verify both are present and well-shaped.
+    assert result["llrs"] is not None
+    assert result["llrs"].shape == (sc.HAIL_FRAME_LEN * 8,)
 
 
 def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
@@ -592,7 +596,12 @@ def _build_fec_result(responder_static, magnitude: float = 10.0,
     )
     eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
-    llrs = sc.bits_to_hard_llrs(bits, magnitude=magnitude)
+    # Convert to post-DBPSK basis (the FEC accumulator's try_decrypt
+    # consumes LLRs in the FEC code-bit basis, which is what
+    # dbpsk_decode_from_pilot produces in production after differentially
+    # decoding the body region).
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=magnitude)
     if noise_std > 0:
         rng = np.random.default_rng(seed=seed)
         llrs = llrs + rng.normal(0, noise_std, len(llrs)).astype(np.float32)
@@ -665,7 +674,8 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
     )
     eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
-    clean = sc.bits_to_hard_llrs(bits, magnitude=4.0)
+    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
+    clean = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
     rng = np.random.default_rng(seed=7)
     noisy1 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
     noisy2 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)

@@ -82,6 +82,68 @@ def bits_to_bytes(bits: np.ndarray) -> bytes:
     return np.packbits(bits.astype(np.uint8)).tobytes()
 
 
+# ── Differential bit encoding (for DBPSK) ───────────────────────────────────
+#
+# DBPSK eliminates the absolute-phase requirement by encoding each bit as
+# a TRANSITION (or non-transition) of the previous symbol, rather than as
+# an absolute symbol value. The receiver decodes via the differential dot
+# product Re(y_k · conj(y_{k−1})), which depends only on the inter-symbol
+# phase difference and is insensitive to a global phase rotation.
+#
+# Encoder:    e_{−1} = seed
+#             e_k    = e_{k−1} XOR b_k
+# Decoder:    b_k    = sign(Re(y_k · conj(y_{k−1}))) → 0 if positive, 1 if neg
+#
+# This file provides the bit-domain primitives. The DBPSK demodulator
+# (dbpsk_decode_from_pilot, defined below) uses them to recover bits from
+# complex peak values after V-V drift correction.
+#
+# Use case in SISL FEC: the 48-bit uncoded header stays coherent (the pilot
+# fit needs un-encoded symbols to estimate θ₀), and the 2048-bit FEC body
+# is differentially encoded with seed = the last header bit, so the first
+# body bit's differential decode anchors on the receiver's coherent estimate
+# of the last pilot symbol.
+
+def differential_encode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
+    """Differentially encode a uint8 0/1 bit array.
+
+    e_{−1} = seed (0 or 1)
+    e_k    = e_{k−1} XOR bits[k]   for k = 0 .. N−1
+
+    Returns the encoded bit array with the same shape and dtype as `bits`.
+    """
+    bits = np.ascontiguousarray(bits, dtype=np.uint8)
+    if bits.ndim != 1:
+        raise ValueError(f"bits must be 1-D, got shape {bits.shape}")
+    out = np.empty_like(bits)
+    prev = int(seed) & 1
+    for k in range(len(bits)):
+        prev = prev ^ int(bits[k])
+        out[k] = prev
+    return out
+
+
+def differential_decode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
+    """Inverse of differential_encode_bits, on hard-decided bit values.
+
+    b_k = bits[k] XOR bits[k−1]    for k = 1 .. N−1
+    b_0 = bits[0] XOR seed
+
+    This is the bit-domain inverse, used for testing and for paths that
+    do not have soft LLR access. The DBPSK soft demodulator computes the
+    LLRs directly via differential dot products and bypasses this.
+    """
+    bits = np.ascontiguousarray(bits, dtype=np.uint8)
+    if bits.ndim != 1:
+        raise ValueError(f"bits must be 1-D, got shape {bits.shape}")
+    out = np.empty_like(bits)
+    prev = int(seed) & 1
+    for k in range(len(bits)):
+        out[k] = int(bits[k]) ^ prev
+        prev = int(bits[k])
+    return out
+
+
 # ── TX: bytes → chip stream ─────────────────────────────────────────────────
 
 def tx_bytes_to_chips(data: bytes,
@@ -787,6 +849,189 @@ def coherent_decode_from_pilot(
     bits = (soft < 0).astype(np.uint8)
 
     # Pad to byte boundary if needed
+    pad = (-n_data_bits) % 8
+    if pad:
+        bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
+    frame_bytes = np.packbits(bits).tobytes()
+
+    return frame_bytes, soft, theta0, delta_theta, rms_residual
+
+
+def estimate_drift_per_symbol(
+    peak_values,
+    pilot_bits: Optional[np.ndarray] = None,
+) -> float:
+    """Estimate per-symbol phase drift Δθ in rad/symbol.
+
+    Two estimators are computed and combined:
+
+      • **V-V** (Viterbi-Viterbi squared estimator) on ALL peaks. This
+        is the existing per-block-tracker drift estimator. It uses
+        every peak so it is statistically efficient, but it operates
+        on the squared signal y² so its unambiguous range is bounded
+        to Δθ ∈ [−π/2, +π/2]. Beyond that range it aliases by π.
+
+      • **Pilot** (BPSK-demodulated adjacent differentials over the
+        known pilot region). Removes the BPSK modulation by multiplying
+        each pilot peak by its known sign, then computes adjacent
+        products whose phase is exactly Δθ (no squaring). Range is
+        unambiguous over [−π, +π], but only N_pilot ≈ 48 samples are
+        used so it is noisier than V-V.
+
+    When pilot_bits is given, V-V's [−π/2, +π/2] estimate is **unwrapped**
+    around the pilot-derived coarse estimate by adding the integer
+    multiple of π that minimises |delta_VV + k·π − delta_pilot|. This
+    gives the V-V accuracy AND the pilot's full unambiguous range.
+
+    When pilot_bits is None, only V-V is available and the range is
+    bounded to [−π/2, +π/2].
+
+    Returns Δθ in rad/symbol. Returns 0.0 on degenerate input
+    (too few peaks, all-zero signal).
+    """
+    peaks = np.asarray(peak_values, dtype=np.complex128)
+    n = len(peaks)
+    if n < 4:
+        return 0.0
+
+    # ── V-V over all peaks ──
+    # Squared signal y² = A² · exp(j·2(θ₀ + k·Δθ)). Adjacent product
+    # of squared peaks has phase 2·Δθ — independent of k for constant
+    # drift, so the sum is the ML estimator.
+    sq = peaks * peaks
+    diffs_vv = sq[1:] * np.conjugate(sq[:-1])
+    s_vv = complex(np.sum(diffs_vv))
+    if abs(s_vv) > 1e-12:
+        delta_vv: Optional[float] = float(np.angle(s_vv)) / 2.0
+    else:
+        delta_vv = None
+
+    if pilot_bits is None or len(pilot_bits) < 2:
+        # No pilot — V-V is all we have. Bounded to [−π/2, +π/2].
+        return delta_vv if delta_vv is not None else 0.0
+
+    # ── Pilot-aided unambiguous coarse estimate ──
+    n_pilot = int(min(len(pilot_bits), n))
+    if n_pilot < 2:
+        return delta_vv if delta_vv is not None else 0.0
+    pilot_signs = (1.0 - 2.0
+                    * np.asarray(pilot_bits[:n_pilot], dtype=np.float64))
+    pilot_peaks = peaks[:n_pilot]
+    clean = pilot_peaks * pilot_signs
+    adj_clean = clean[1:] * np.conjugate(clean[:-1])
+    s_pilot = complex(np.sum(adj_clean))
+    if abs(s_pilot) < 1e-12:
+        return delta_vv if delta_vv is not None else 0.0
+    delta_pilot = float(np.angle(s_pilot))
+
+    if delta_vv is None:
+        return delta_pilot
+
+    # ── Unwrap V-V around pilot estimate ──
+    # The true Δθ could be delta_vv, delta_vv + π, or delta_vv − π
+    # (V-V wraps every π). Pick whichever is closest to the pilot's
+    # unambiguous estimate.
+    candidates = (delta_vv, delta_vv + np.pi, delta_vv - np.pi)
+    best = min(candidates, key=lambda c: abs(c - delta_pilot))
+    return float(best)
+
+
+def dbpsk_decode_from_pilot(
+    peak_values,
+    pilot_bits: np.ndarray,
+    n_data_bits: int,
+) -> Optional[tuple[bytes, np.ndarray, float, float, float]]:
+    """Hybrid coherent-pilot + differential-body decoder for DBPSK signals.
+
+    Replaces `coherent_decode_from_pilot` for the FEC fast path. Solves
+    the long-codeword phase-trajectory problem documented in the second
+    reviewer's S4 critique and confirmed on real RF in today's live
+    test (decrypt_fail on every block due to back-half BPSK flips).
+
+    Pipeline:
+      1. Δθ estimate via FFT coarse search + V-V refinement (full
+         [−π, +π] range, bypasses V-V's π/2 cliff).
+      2. Derotate every peak by exp(-j·k·Δθ) to remove drift.
+      3. Pilot region (k = 0 .. len(pilot_bits)-1): coherent ML decode
+         using the known pilot bits to estimate θ₀.
+      4. Body region (k = len(pilot_bits) .. n_data_bits-1): differential
+         decode. The first body bit anchors on the last pilot peak, which
+         is known coherently — this matches the TX-side convention of
+         differentially encoding the body with seed = last header bit.
+      5. Pack hard decisions into bytes for backwards compatibility.
+
+    Sign convention (matches coherent_decode_from_pilot and sisl_fec):
+      llr > 0  ⇒  bit 0
+      llr < 0  ⇒  bit 1
+
+    Returns (frame_bytes, soft_llrs, θ₀, Δθ, rms_residual_rad)
+    or None on degenerate input.
+
+    The TX side MUST differentially encode the body with seed equal to
+    the last header bit's value (sc.encode_hail_fec does this), or the
+    body decode produces meaningless XOR-of-adjacent-bits LLRs.
+    """
+    n_pilot = len(pilot_bits)
+    if n_pilot < 1 or n_data_bits < n_pilot:
+        return None
+    total = len(peak_values)
+    if n_data_bits > total:
+        n_data_bits = total
+    if n_data_bits < n_pilot + 1:
+        return None
+
+    peaks_arr = np.array(peak_values[:n_data_bits], dtype=np.complex128)
+
+    # ── 1. Pilot-aided drift estimate (unambiguous over [−π, +π]) ──
+    delta_theta = estimate_drift_per_symbol(peaks_arr, pilot_bits=pilot_bits)
+
+    # ── 2. Derotate to remove drift ──
+    k_arr = np.arange(n_data_bits, dtype=np.float64)
+    drift_correction = np.exp(-1j * k_arr * delta_theta)
+    derotated = peaks_arr * drift_correction
+
+    # ── 3. Pilot-aided θ₀ recovery ──
+    # The known pilot signs break the 180° symmetry; angle of the sum
+    # of (derotated_pilot · known_pilot_signs) is θ₀ unambiguously.
+    pilot_signs = (1.0 - 2.0 * pilot_bits.astype(np.float64))   # 0→+1, 1→−1
+    pilot_section = derotated[:n_pilot]
+    aligned = pilot_section * pilot_signs
+    coherent_sum = complex(np.sum(aligned))
+    theta0 = float(np.angle(coherent_sum))
+
+    # rms residual is the same metric coherent_decode_from_pilot reports
+    # (Gaussian phase-jitter equivalent).
+    coherent_mag = abs(coherent_sum)
+    incoherent_mag = float(np.sum(np.abs(aligned)))
+    if incoherent_mag > 0:
+        ratio = coherent_mag / incoherent_mag
+        safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
+        rms_residual = float(np.sqrt(-2.0 * np.log(safe_ratio)))
+    else:
+        rms_residual = float("inf")
+
+    # Apply θ₀ derotation to the entire frame for consistency.
+    theta_rotator = np.exp(-1j * theta0)
+    fully_derotated = derotated * theta_rotator
+
+    # ── 4. Pilot-region LLRs (coherent) ──
+    pilot_llrs = fully_derotated[:n_pilot].real.astype(np.float32)
+
+    # ── 5. Body-region LLRs (differential) ──
+    # The first body bit's predecessor is the last pilot peak (known
+    # sign, fully derotated), which matches the TX-side seed convention.
+    body_section = fully_derotated[n_pilot:]
+    n_body = n_data_bits - n_pilot
+    if n_body > 0:
+        prev_peaks = np.empty(n_body, dtype=np.complex128)
+        prev_peaks[0] = fully_derotated[n_pilot - 1]
+        prev_peaks[1:] = body_section[:-1]
+        body_llrs = (body_section * np.conj(prev_peaks)).real.astype(np.float32)
+    else:
+        body_llrs = np.zeros(0, dtype=np.float32)
+
+    soft = np.concatenate([pilot_llrs, body_llrs]).astype(np.float32)
+    bits = (soft < 0).astype(np.uint8)
     pad = (-n_data_bits) % 8
     if pad:
         bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
