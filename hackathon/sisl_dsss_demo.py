@@ -488,14 +488,18 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
     elif quiet:
         return
     elif s == "no_hail":
-        print(f"[{block_num:4d}] interference: signal present "
-              f"(peak={result.get('peak_mag', 0):.0f}, "
-              f"median={result.get('median_mag', 0):.0f}) "
-              f"but no SISL ASM")
+        p = result.get("peak_mag", 0)
+        m = result.get("median_mag", 0)
+        r = p / m if m > 0 else float("inf")
+        print(f"[{block_num:4d}] interference: "
+              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f} "
+              f"— signal above threshold but no SISL ASM")
     elif s == "no_signal":
-        print(f"[{block_num:4d}] no signal "
-              f"(peak={result.get('peak_mag', 0):.0f}, "
-              f"median={result.get('median_mag', 0):.0f})")
+        p = result.get("peak_mag", 0)
+        m = result.get("median_mag", 0)
+        r = p / m if m > 0 else float("inf")
+        print(f"[{block_num:4d}] no signal: "
+              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}")
     elif s == "short_block":
         print(f"[{block_num:4d}] short block (processing gap)")
 
@@ -505,6 +509,9 @@ def live_rx_decode(
     block_seconds: float = 1.5,
     responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
     save_path: Optional[str] = None,
+    lna_db: int = HACKRF_RX_LNA_DB,
+    vga_db: int = HACKRF_RX_VGA_DB,
+    amp_on: bool = False,
 ) -> dict:
     """Stream samples from HackRF, decode SISL hails in real time.
 
@@ -514,8 +521,15 @@ def live_rx_decode(
     that spans a block boundary is missed this block but caught on the
     next TX repetition.
 
+    HackRF RF gain stages:
+        AMP (14 dB switchable amplifier)  — off by default
+        LNA (0..40 dB, 8 dB steps)         — default 16
+        VGA (0..62 dB, 2 dB steps)         — default 20
+    For bench tests under heavy attenuation, bump LNA/VGA closer to max.
+    Too much gain saturates the ADC and destroys dynamic range.
+
     Returns a stats dict: blocks_processed, hails_detected, hails_decrypted,
-    elapsed_s, ok, error.
+    interference, overflows, elapsed_s, ok, error.
     """
     try:
         import SoapySDR
@@ -533,16 +547,18 @@ def live_rx_decode(
     print(f"opening HackRF at {CENTER_FREQ_HZ/1e6:.1f} MHz, "
           f"{SAMP_RATE_HZ/1e6:.1f} Msps, block={block_seconds}s "
           f"(processing {int(block_seconds*SAMP_RATE_HZ*8/1e6)} MB/block)")
+    print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
+          f"LNA={lna_db} dB VGA={vga_db} dB")
 
     device = SoapySDR.Device("driver=hackrf")
     device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
     device.setFrequency(SOAPY_SDR_RX, 0, CENTER_FREQ_HZ)
     try:
-        device.setGain(SOAPY_SDR_RX, 0, "AMP", False)
+        device.setGain(SOAPY_SDR_RX, 0, "AMP", amp_on)
     except Exception:
-        pass   # some SoapyHackRF builds expose AMP as float
-    device.setGain(SOAPY_SDR_RX, 0, "LNA", HACKRF_RX_LNA_DB)
-    device.setGain(SOAPY_SDR_RX, 0, "VGA", HACKRF_RX_VGA_DB)
+        pass   # some SoapyHackRF builds expose AMP as float or not at all
+    device.setGain(SOAPY_SDR_RX, 0, "LNA", lna_db)
+    device.setGain(SOAPY_SDR_RX, 0, "VGA", vga_db)
 
     stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0])
     device.activateStream(stream)
@@ -731,6 +747,14 @@ def main() -> int:
                         help="rx: also write raw samples to --capture path")
     parser.add_argument("--block-seconds", type=float, default=1.5,
                         help="rx: processing block duration (default 1.5 s)")
+    parser.add_argument("--rx-lna", type=int, default=HACKRF_RX_LNA_DB,
+                        help=f"rx: HackRF LNA gain 0..40 dB "
+                             f"(default {HACKRF_RX_LNA_DB})")
+    parser.add_argument("--rx-vga", type=int, default=HACKRF_RX_VGA_DB,
+                        help=f"rx: HackRF VGA gain 0..62 dB "
+                             f"(default {HACKRF_RX_VGA_DB})")
+    parser.add_argument("--rx-amp", action="store_true",
+                        help="rx: enable HackRF 14 dB AMP (off by default)")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
@@ -826,6 +850,9 @@ def main() -> int:
             block_seconds=args.block_seconds,
             responder_static=responder,
             save_path=save,
+            lna_db=args.rx_lna,
+            vga_db=args.rx_vga,
+            amp_on=args.rx_amp,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
