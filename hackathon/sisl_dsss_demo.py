@@ -8,8 +8,8 @@ Per Hackathon.md §1 and §Signal Parameters:
 
     Center frequency: 2437 MHz  (WiFi channel 6 — "hide in WiFi noise")
     Chip rate:        1 Mcps
-    Sample rate:      2.4 Msps (Nyquist + margin)
-    Samples/chip:     2.4  → zero-order-hold upsample
+    Sample rate:      8 Msps   (HackRF minimum 1 Msps, rates are integer)
+    Samples/chip:     8        → clean zero-order-hold upsample
     TX power:         minimum HackRF setting
     Spreading code:   SISL public hail code (sisl_dsss.hail_code_seed())
 
@@ -63,8 +63,8 @@ import sisl_framer as sf
 
 CENTER_FREQ_HZ = 2_437_000_000          # WiFi ch 6
 CHIP_RATE_HZ = 1_000_000                # 1 Mcps
-SAMP_RATE_HZ = 2_400_000                # 2.4 Msps
-SAMPS_PER_CHIP = SAMP_RATE_HZ / CHIP_RATE_HZ     # 2.4 — fractional
+SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF supported integer rate)
+SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
 HACKRF_TX_GAIN_DB = 0                   # minimum
 HACKRF_RX_VGA_DB = 20                   # conservative
 HACKRF_RX_LNA_DB = 16                   # conservative
