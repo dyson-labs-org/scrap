@@ -437,20 +437,19 @@ def decode_hail_fec_from_llrs(
         return None
     llrs = np.asarray(llrs[:HAIL_FEC_TOTAL_BITS], dtype=np.float32)
 
-    header_bits = (llrs[:HAIL_FEC_HEADER_BITS] < 0.0).astype(np.uint8)
-    header_bytes = np.packbits(header_bits).tobytes()
-    if header_bytes[:4] != ASM:
-        return None
-    if header_bytes[4] != SISL_VERSION:
-        return None
-    if header_bytes[5] != MSG_HAIL:
-        return None
+    # The uncoded header (48 bits = ASM + version + msg_type) has no FEC
+    # protection. At marginal SNR a few header bits may be wrong even
+    # when the FEC body (which IS protected) would decode cleanly. Skip
+    # the hard-decision cheap-reject on the header and let the FEC body
+    # + Poly1305 tag be the definitive integrity check. The header bytes
+    # used below are the KNOWN canonical values, not the received bits.
 
     coded_body_llrs = llrs[HAIL_FEC_HEADER_BITS:]
     body_bits = sisl_fec.decode(coded_body_llrs, HAIL_FEC_BODY_PAYLOAD_BITS)
     body_bytes = np.packbits(body_bits).tobytes()
     assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN
 
+    header_bytes = ASM + bytes([SISL_VERSION, MSG_HAIL])
     frame = header_bytes + body_bytes
     return decode_hail(frame, my_static_priv)
 

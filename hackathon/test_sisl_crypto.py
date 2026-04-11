@@ -289,9 +289,11 @@ def test_hail_fec_truncated_input_rejected():
     assert sc.decode_hail_fec_from_llrs(truncated, responder_static) is None
 
 
-def test_hail_fec_corrupted_header_cheap_rejected():
-    """A corrupted ASM in the uncoded header must be rejected before any
-    Viterbi work happens. This is the structural cheap-reject path."""
+def test_hail_fec_corrupted_header_still_decrypts_via_fec():
+    """With the header cheap-reject removed (the FEC body + Poly1305
+    provides the real integrity check), corrupted header LLRs do NOT
+    prevent decryption — the receiver uses the known canonical header
+    bytes (ASM + ver + type) instead of the received header bits."""
     import numpy as np
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
@@ -302,7 +304,8 @@ def test_hail_fec_corrupted_header_cheap_rejected():
     llrs = sc.bits_to_hard_llrs(post_dbpsk_bits)
     # Flip the first 32 LLRs (the ASM bits) to opposite polarity.
     llrs[:32] = -llrs[:32]
-    assert sc.decode_hail_fec_from_llrs(llrs, responder_static) is None
+    # FEC body is clean → Poly1305 passes → decode succeeds
+    assert sc.decode_hail_fec_from_llrs(llrs, responder_static) is not None
 
 
 # ── 5. ACK round-trip ──────────────────────────────────────────────────────

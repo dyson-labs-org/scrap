@@ -1425,7 +1425,26 @@ def _decode_one_hail_in_block(
         }
 
     # ── 5. Tracking decode (reuses precomputed freq offset) ───────────
-    target_bytes = 2 * sc.HAIL_FRAME_LEN
+    # In FEC mode we need enough peak_values to cover BOTH a full FEC
+    # frame (HAIL_FEC_TOTAL_BITS = 2096) AND a search window of at
+    # least one frame's worth, since the soft-correlator's strongest
+    # ASM hit may land near the end of the first frame in the stream.
+    # Without the search margin we'd find an ASM at offset ~1500 with
+    # only ~600 peaks left after it — far less than the FEC frame
+    # length — and the FEC fast path would discard the candidate.
+    #
+    # Target the largest symbol count that fits in the input block.
+    # samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip. We
+    # subtract a small safety margin to leave room for the per-symbol
+    # tracker's per-step bracket search.
+    if fec:
+        # The soft correlator needs to find the ASM anywhere within the
+        # first 2096 tracked peaks AND still have 2096 peaks remaining
+        # after the offset. That requires 2 × HAIL_FEC_TOTAL_BITS =
+        # 4192 bits = 524 bytes of tracked symbols minimum.
+        target_bytes = (2 * sc.HAIL_FEC_TOTAL_BITS + 7) // 8   # 524
+    else:
+        target_bytes = 2 * sc.HAIL_FRAME_LEN
     track_result = sf.decode_with_freq_tracking(
         samples,
         samps_per_chip=samps_per_chip,
@@ -1433,10 +1452,18 @@ def _decode_one_hail_in_block(
         freq_offset_rad_per_sample=rad_per_sample,
     )
     if track_result is None:
+        # Fall back to a smaller window. In FEC mode try the minimum
+        # FEC frame length; in non-FEC mode try the legacy 1-frame
+        # length.
+        fallback_bytes = (
+            (sc.HAIL_FEC_TOTAL_BITS + 7) // 8
+            if fec
+            else sc.HAIL_FRAME_LEN
+        )
         track_result = sf.decode_with_freq_tracking(
             samples,
             samps_per_chip=samps_per_chip,
-            n_bytes=sc.HAIL_FRAME_LEN,
+            n_bytes=fallback_bytes,
             freq_offset_rad_per_sample=rad_per_sample,
         )
         if track_result is None:
@@ -2564,9 +2591,16 @@ def main() -> int:
         save = args.capture if args.save else None
         if save is not None:
             print(f"  also saving raw samples → {save}")
+        block_sec = args.block_seconds
+        if args.fec and block_sec < 5.0:
+            print(f"  WARNING: --fec requires --block-seconds >= 5.0 "
+                  f"(FEC frame is 2096 symbols at ~1 ksym/s = 2.1s; "
+                  f"tracker needs 2× for search = 4.2s + margin). "
+                  f"Overriding {block_sec}s → 6.0s.")
+            block_sec = 6.0
         stats = live_rx_decode(
             duration_s=args.duration,
-            block_seconds=args.block_seconds,
+            block_seconds=block_sec,
             responder_static=responder,
             save_path=save,
             lna_db=args.rx_lna,

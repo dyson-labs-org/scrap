@@ -546,6 +546,15 @@ def decode_with_freq_tracking(
         return float(refined), complex(c_refined)
 
     BOOTSTRAP = 8
+    # Maximum CONSECUTIVE peaks below lock_floor before aborting. The
+    # original logic aborted on the first dip, which is too brittle for
+    # long codewords (FEC mode walks 4× HAIL_FEC_TOTAL_BITS ≈ 8000+
+    # symbols and even at high SNR there are isolated dips below the
+    # 2×median floor). Allow up to ~3% of the walk in consecutive
+    # misses; abort if a sustained run of misses suggests the tracker
+    # really has fallen off the signal.
+    max_consecutive_misses = max(8, n_bits // 32)
+    consecutive_misses = 0
     for bit_idx in range(n_bits):
         lo = max(0, int(round(pos)) - search_half_samples)
         hi = min(len(mag), int(round(pos)) + search_half_samples + 1)
@@ -556,7 +565,18 @@ def decode_with_freq_tracking(
             return None
         local_peak = abs(refined_c)
         if local_peak < lock_floor:
-            return None
+            consecutive_misses += 1
+            if consecutive_misses > max_consecutive_misses:
+                return None
+            # Use the refined peak anyway — downstream consumers (FEC
+            # decoder, soft correlator) will handle the noisy sample
+            # statistically. Step the position forward by the nominal
+            # symbol period rather than the noise-driven refined_pos.
+            peak_values.append(refined_c)
+            positions.append(int(round(refined_pos)))
+            pos = pos + samples_per_symbol
+            continue
+        consecutive_misses = 0
 
         peak_values.append(refined_c)
         positions.append(int(round(refined_pos)))
