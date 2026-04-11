@@ -209,53 +209,111 @@ def _decimate_to_chips(samples: np.ndarray,
     return i[:n_full].reshape(-1, samps_per_chip).mean(axis=1)
 
 
-def offline_despread(cfile_path: str, n_bytes: int,
+def offline_despread(cfile_path: str,
                      samps_per_chip: int = SAMPS_PER_CHIP,
-                     max_search_chips: Optional[int] = None
+                     max_search_chips: Optional[int] = None,
+                     max_bytes: Optional[int] = None
                      ) -> tuple[bytes, Optional[int]]:
-    """Read a complex64 capture, find frame start, despread.
+    """Read a complex64 capture, find frame start, despread all bytes.
 
-    Returns `(recovered_bytes, frame_offset_chips)`. `frame_offset_chips`
-    is the chip-index where acquisition locked, or None if the matched
-    filter never exceeded threshold (in which case decoding is attempted
-    from chip 0 as a fallback, which will return garbage).
+    Returns `(recovered_bytes, frame_offset_chips)`:
+        recovered_bytes   — every byte the despreader could recover from
+                            the located acquisition point to end of stream
+                            (or `max_bytes` if specified)
+        frame_offset_chips — chip offset where the matched filter locked,
+                            or None if no peak was above threshold (in
+                            which case decoding falls back to chip 0 and
+                            will likely return noise)
 
-    `max_search_chips` bounds the acquisition search window. None searches
-    the full capture (safe for short files, slow for multi-gigabyte ones).
-    A sensible default for bench use is ~100k chips (covers ~100 ms at
-    1 Mcps, enough for RX startup + acquisition).
+    The length is determined by the capture, not by any expected message.
+    Callers inspect the returned bytes to find their payload: Phase 1 raw
+    text can be located via substring search, Phase 2 SISL frames via ASM
+    (0x1ACFFC1D) + version + msg_type parsing.
+
+    `max_search_chips`: bound the acquisition search window. None scans
+    the full capture.
+    `max_bytes`: optional upper bound on how many bytes to decode (useful
+    for very large captures where you only care about the first frame).
     """
     raw = np.fromfile(cfile_path, dtype=np.complex64)
     chip_stream = _decimate_to_chips(raw, samps_per_chip=samps_per_chip)
 
-    needed_chips = n_bytes * 8 * sf.CHIPS_PER_SYMBOL
-    if len(chip_stream) < needed_chips:
+    if len(chip_stream) < sf.CHIPS_PER_SYMBOL:
         have_samples = len(raw)
-        have_seconds = have_samples / SAMP_RATE_HZ
-        need_seconds = needed_chips * samps_per_chip / SAMP_RATE_HZ
+        have_ms = have_samples / SAMP_RATE_HZ * 1000
         raise ValueError(
-            f"capture too short to decode {n_bytes} bytes:\n"
-            f"  file:       {cfile_path}\n"
-            f"  have:       {have_samples} samples "
-            f"({len(chip_stream)} chips, {have_seconds*1000:.1f} ms)\n"
-            f"  need:       {needed_chips} chips, "
-            f"{need_seconds*1000:.1f} ms of signal\n"
-            f"  shortfall:  {(needed_chips - len(chip_stream))} chips "
-            f"({(need_seconds - have_seconds)*1000:.1f} ms)\n"
-            f"Re-capture with a longer --duration (rx), shorten --message,\n"
-            f"or verify the RX was actually capturing signal (not just idle)."
+            f"capture has no decodable content:\n"
+            f"  file:     {cfile_path}\n"
+            f"  have:     {have_samples} samples "
+            f"({len(chip_stream)} chips, {have_ms:.1f} ms)\n"
+            f"  minimum:  {sf.CHIPS_PER_SYMBOL} chips (one bit)\n"
+            f"Re-capture with a longer --duration or verify RX was "
+            f"actually receiving signal."
         )
 
     offset = sf.find_frame_start(chip_stream, max_search=max_search_chips)
     start = offset if offset is not None else 0
+    avail_chips = len(chip_stream) - start
+    n_bytes = avail_chips // (8 * sf.CHIPS_PER_SYMBOL)
+    if max_bytes is not None:
+        n_bytes = min(n_bytes, max_bytes)
+    if n_bytes == 0:
+        return b"", offset
+
     needed = n_bytes * 8 * sf.CHIPS_PER_SYMBOL
-    if start + needed > len(chip_stream):
-        raise ValueError(
-            f"acquisition at chip {start} leaves only "
-            f"{len(chip_stream) - start} chips, need {needed}"
-        )
     recovered = sf.rx_chips_to_bytes(chip_stream[start:start + needed], n_bytes)
     return recovered, offset
+
+
+# ── SISL frame auto-detection ──────────────────────────────────────────────
+
+_ASM_BYTES = b"\x1A\xCF\xFC\x1D"
+
+def identify_sisl_frame(data: bytes) -> Optional[dict]:
+    """Scan `data` for a SISL v3 frame header and report what was found.
+
+    Returns a dict describing the frame, or None if no ASM+version+type
+    combination matches. Does NOT attempt decryption — that's the caller's
+    job (via sisl_crypto.decode_hail / decode_ack).
+    """
+    idx = data.find(_ASM_BYTES)
+    if idx < 0 or idx + 6 > len(data):
+        return None
+    version = data[idx + 4]
+    msg_type = data[idx + 5]
+    if version != 0x03:
+        return {
+            "asm_offset": idx,
+            "version": version,
+            "msg_type": msg_type,
+            "frame_type": "unknown-version",
+            "frame_bytes": None,
+        }
+    if msg_type == 0x01:                          # hail
+        end = idx + 100                           # HAIL_FRAME_LEN
+        return {
+            "asm_offset": idx,
+            "version": version,
+            "msg_type": msg_type,
+            "frame_type": "hail",
+            "frame_bytes": data[idx:end] if end <= len(data) else None,
+        }
+    if msg_type == 0x02:                          # ack
+        end = idx + 95                            # ACK_FRAME_LEN
+        return {
+            "asm_offset": idx,
+            "version": version,
+            "msg_type": msg_type,
+            "frame_type": "ack",
+            "frame_bytes": data[idx:end] if end <= len(data) else None,
+        }
+    return {
+        "asm_offset": idx,
+        "version": version,
+        "msg_type": msg_type,
+        "frame_type": f"unknown-msg-type-0x{msg_type:02x}",
+        "frame_bytes": None,
+    }
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -265,7 +323,9 @@ def main() -> int:
     parser.add_argument("--mode",
                         choices=("tx", "rx", "tx-to-file", "offline"),
                         required=True)
-    parser.add_argument("--message", default="SISL HELLO WORLD")
+    parser.add_argument("--message", default=None,
+                        help="tx/tx-to-file: payload bytes; "
+                             "offline: optional expected substring to verify")
     parser.add_argument("--capture", default="/tmp/sisl_rx.cfile",
                         help="capture file (input for offline, output for tx-to-file)")
     parser.add_argument("--duration", type=float, default=10.0,
@@ -276,10 +336,12 @@ def main() -> int:
                         help="tx-to-file: message repetitions")
     parser.add_argument("--max-search-chips", type=int, default=None,
                         help="offline: bound the acquisition search window")
+    parser.add_argument("--max-bytes", type=int, default=None,
+                        help="offline: stop decoding after N bytes")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
-        msg = args.message.encode()
+        msg = (args.message or "SISL HELLO WORLD").encode()
         n = tx_to_file(msg, args.capture,
                        prefix_ms=args.prefix_ms, repeats=args.repeats)
         print(f"wrote {n} complex64 samples ({n * 8} bytes) to {args.capture}")
@@ -288,16 +350,41 @@ def main() -> int:
         return 0
 
     if args.mode == "offline":
-        msg = args.message.encode()
         data, offset = offline_despread(
-            args.capture, n_bytes=len(msg),
+            args.capture,
             max_search_chips=args.max_search_chips,
+            max_bytes=args.max_bytes,
         )
-        print(f"acquisition offset: {offset} chips "
-              f"({'locked' if offset is not None else 'NO LOCK — fallback to chip 0'})")
-        print(f"recovered: {data!r}")
-        print(f"match:     {data == msg}")
-        return 0 if data == msg else 1
+        lock_state = "locked" if offset is not None else "NO LOCK — fallback to chip 0"
+        print(f"acquisition: {lock_state}")
+        if offset is not None:
+            print(f"  offset:  {offset} chips "
+                  f"({offset / CHIP_RATE_HZ * 1000:.1f} ms into capture)")
+        print(f"  decoded: {len(data)} bytes")
+        print()
+
+        frame = identify_sisl_frame(data)
+        if frame is not None:
+            print(f"SISL v3 frame detected:")
+            print(f"  asm at byte: {frame['asm_offset']}")
+            print(f"  version:     0x{frame['version']:02x}")
+            print(f"  msg type:    0x{frame['msg_type']:02x} ({frame['frame_type']})")
+            if frame["frame_bytes"] is not None:
+                print(f"  frame hex:   {frame['frame_bytes'].hex()}")
+        else:
+            print(f"No SISL frame ASM found in decoded bytes.")
+            print(f"  first 64: {data[:64]!r}")
+
+        if args.message:
+            expected = args.message.encode()
+            if expected in data:
+                idx = data.index(expected)
+                print(f"\nexpected substring {expected!r}: found at byte {idx}")
+                return 0
+            else:
+                print(f"\nexpected substring {expected!r}: NOT FOUND")
+                return 1
+        return 0
 
     if not _HAVE_GR:
         print("gnuradio not installed — run after:")

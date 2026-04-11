@@ -38,9 +38,9 @@ def test_tx_to_file_no_prefix_roundtrip():
         expected = len(_SHORT_MSG) * 8 * sf.CHIPS_PER_SYMBOL * dd.SAMPS_PER_CHIP
         assert n_samples == expected, (n_samples, expected)
 
-        recovered, offset = dd.offline_despread(path, n_bytes=len(_SHORT_MSG))
-        assert recovered == _SHORT_MSG
-        assert offset is not None
+        recovered, offset = dd.offline_despread(path)
+        assert recovered.startswith(_SHORT_MSG)
+        assert len(recovered) == len(_SHORT_MSG)
         assert offset == 0
     finally:
         os.unlink(path)
@@ -52,8 +52,8 @@ def test_tx_to_file_1ms_prefix_acquires():
         path = f.name
     try:
         dd.tx_to_file(_SHORT_MSG, path, prefix_ms=1.0)
-        recovered, offset = dd.offline_despread(path, n_bytes=len(_SHORT_MSG))
-        assert recovered == _SHORT_MSG
+        recovered, offset = dd.offline_despread(path)
+        assert recovered.startswith(_SHORT_MSG)
         assert offset is not None
         # 1 ms * 1 Mcps = 1000 chips prefix
         assert abs(offset - 1000) <= 1, offset
@@ -67,8 +67,8 @@ def test_tx_to_file_10ms_prefix_acquires():
         path = f.name
     try:
         dd.tx_to_file(_SHORT_MSG, path, prefix_ms=10.0)
-        recovered, offset = dd.offline_despread(path, n_bytes=len(_SHORT_MSG))
-        assert recovered == _SHORT_MSG
+        recovered, offset = dd.offline_despread(path)
+        assert recovered.startswith(_SHORT_MSG)
         assert offset is not None
         assert abs(offset - 10_000) <= 1, offset
     finally:
@@ -81,10 +81,8 @@ def test_tx_to_file_bounded_search_finds_lock():
         path = f.name
     try:
         dd.tx_to_file(_SHORT_MSG, path, prefix_ms=1.0)
-        recovered, offset = dd.offline_despread(
-            path, n_bytes=len(_SHORT_MSG), max_search_chips=2000
-        )
-        assert recovered == _SHORT_MSG
+        recovered, offset = dd.offline_despread(path, max_search_chips=2000)
+        assert recovered.startswith(_SHORT_MSG)
         assert offset is not None
     finally:
         os.unlink(path)
@@ -109,15 +107,54 @@ def test_tx_to_file_hail_frame_end_to_end():
         path = f.name
     try:
         dd.tx_to_file(frame, path, prefix_ms=2.0)
-        recovered, offset = dd.offline_despread(path, n_bytes=len(frame))
-        assert recovered == frame
+        recovered, offset = dd.offline_despread(path)
+        # Decoder returns all available bytes from the located offset;
+        # for a pristine TX file, the decoded bytes are exactly the frame.
+        assert recovered.startswith(frame)
         assert offset is not None
-        # Trial-decrypt the recovered bytes — validates the full stack
-        decoded = sc.decode_hail(recovered, responder_static)
+
+        # Auto-detect the SISL frame in the decoded bytes
+        info = dd.identify_sisl_frame(recovered)
+        assert info is not None
+        assert info["frame_type"] == "hail"
+        assert info["version"] == 0x03
+        assert info["msg_type"] == 0x01
+        assert info["frame_bytes"] == frame
+
+        # Trial-decrypt the detected frame — validates the full stack
+        decoded = sc.decode_hail(info["frame_bytes"], responder_static)
         assert decoded is not None
         assert decoded.body.body_nonce == body.body_nonce
     finally:
         os.unlink(path)
+
+
+def test_identify_sisl_frame_finds_embedded_frame():
+    """identify_sisl_frame scans for ASM within a larger byte stream."""
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    body = sc.HailBody(
+        center_freq_offset=50, bandwidth_code=0x03, mode=0x01,
+        chip_rate_code=0x32,
+        body_nonce=b"\x11\x22\x33\x44\x55\x66\x77\x88",
+        flags=0x03,
+    )
+    frame = sc.encode_hail(caller_eph, responder_static.public_key(), body)
+
+    prefix = b"\x00" * 17 + b"garbage"
+    suffix = b"more garbage"
+    blob = prefix + frame + suffix
+
+    info = dd.identify_sisl_frame(blob)
+    assert info is not None
+    assert info["asm_offset"] == len(prefix)
+    assert info["frame_type"] == "hail"
+    assert info["frame_bytes"] == frame
+
+
+def test_identify_sisl_frame_none_on_noise():
+    info = dd.identify_sisl_frame(b"\xAA" * 200)
+    assert info is None
 
 
 def test_decimate_to_chips_shape():
