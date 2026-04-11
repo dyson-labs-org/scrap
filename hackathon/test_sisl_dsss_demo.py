@@ -264,6 +264,63 @@ def test_decode_one_hail_in_block_correct_key():
     assert result["body"].mode == 0x01
 
 
+def test_decode_one_hail_in_block_populates_llrs_on_clean_decrypt():
+    """A5: clean decrypts must surface llrs / c_frame / phase_rms / asm_errs
+    so the LLR accumulator can chase-combine across blocks regardless of
+    whether each individual block decrypted on its own."""
+    block, _ = _make_block_with_hail()
+    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    assert result["status"] == "decrypt_ok", result
+    for key in ("llrs", "c_frame",
+                "phase_rms_residual_rad", "asm_errs_in_coherent"):
+        assert key in result, (key, sorted(result.keys()))
+        assert result[key] is not None, key
+    assert result["llrs"].shape == (sc.HAIL_FRAME_LEN * 8,)
+    assert result["llrs"].dtype == np.float32
+    assert len(result["c_frame"]) == sc.HAIL_FRAME_LEN
+
+
+def test_decode_one_hail_in_block_populates_fec_llrs():
+    """When the chip stream is long enough to provide ≥HAIL_FEC_TOTAL_BITS
+    peaks (e.g., two consecutive hails on the air), the production
+    decoder must surface a 2096-bit fec_llrs vector on clean decrypt so
+    the FEC accumulator can chase-combine."""
+    # Build a block with two back-to-back hails so the tracker can
+    # extract enough peaks for the longer FEC channel layout.
+    frame = dd.build_demo_hail()
+    chips_one = dd.build_tx_chips(frame)
+    chips_two = np.concatenate([chips_one, chips_one])
+    signal = dd.upsample_chips_to_samples(chips_two)
+    prefix = np.zeros(50_000, dtype=np.complex64)
+    suffix = np.zeros(50_000, dtype=np.complex64)
+    block = np.concatenate([prefix, signal, suffix])
+
+    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    assert result["status"] == "decrypt_ok", result
+    assert "fec_llrs" in result, sorted(result.keys())
+    assert result["fec_llrs"] is not None, (
+        "fec_llrs should be populated when peak_values has enough entries; "
+        "if this fails the producer-side wiring is broken")
+    assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
+    assert result["fec_llrs"].dtype == np.float32
+    # First 1064 LLRs of fec_llrs must equal the legacy llrs (one decode
+    # call, two slices).
+    assert np.array_equal(result["fec_llrs"][: sc.HAIL_FRAME_LEN * 8],
+                          result["llrs"])
+
+
+def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
+    """A5: decrypt_fail must also surface llrs so the accumulator can
+    keep combining marginal blocks across the wrong-key boundary case."""
+    block, _ = _make_block_with_hail()
+    result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
+    assert result["status"] == "decrypt_fail", result
+    for key in ("llrs", "c_frame",
+                "phase_rms_residual_rad", "asm_errs_in_coherent"):
+        assert key in result, (key, sorted(result.keys()))
+        assert result[key] is not None, key
+
+
 def test_decode_one_hail_in_block_wrong_key():
     block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
@@ -515,6 +572,151 @@ def test_llr_accumulator_two_noisy_copies_sum_cleanly():
     ber1 = float(np.mean(frame1_bits != bits))
     ber2 = float(np.mean(frame2_bits != bits))
     assert ber < min(ber1, ber2) + 1e-9
+
+
+def _build_fec_result(responder_static, magnitude: float = 10.0,
+                      noise_std: float = 0.0, seed: int = 0) -> dict:
+    """Synthesize a result dict containing FEC channel LLRs for one
+    demo hail. Returns a dict with the keys LlrAccumulator(fec=True)
+    expects: llrs (length HAIL_FEC_TOTAL_BITS), c_frame, phase_rms,
+    asm_errs."""
+    body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(
+            sc.generate_keypair().public_key()),
+        center_freq_offset=100,
+        bandwidth_code=0x03,
+        mode=0x01,
+        chip_rate_code=0x32,
+        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
+        flags=0x03,
+    )
+    eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
+    llrs = sc.bits_to_hard_llrs(bits, magnitude=magnitude)
+    if noise_std > 0:
+        rng = np.random.default_rng(seed=seed)
+        llrs = llrs + rng.normal(0, noise_std, len(llrs)).astype(np.float32)
+    return {
+        "fec_llrs": llrs,
+        "llrs": None,                              # unused in fec mode
+        "c_frame": b"\x00" * sc.HAIL_FRAME_LEN,   # unused in fec mode
+        "phase_rms_residual_rad": 0.05,
+        "asm_errs_in_coherent": 0,
+    }
+
+
+def test_llr_accumulator_fec_constructor_validates_n_bits():
+    # FEC mode requires n_bits == HAIL_FEC_TOTAL_BITS
+    try:
+        dd.LlrAccumulator(n_bits=1064, fec=True)
+        raise AssertionError("expected AssertionError on wrong n_bits")
+    except AssertionError as e:
+        if "FEC mode" not in str(e):
+            raise
+    # Correct construction works and allocates body-sized accumulator
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.fec is True
+    assert acc.accumulated.shape == (sc.HAIL_FEC_BODY_CODED_BITS,)
+    assert acc._header_bits == sc.HAIL_FEC_HEADER_BITS
+
+
+def test_llr_accumulator_fec_single_copy_decrypt():
+    """One clean FEC copy should admit and decrypt via the Viterbi path."""
+    responder_static = dd.demo_responder_key()
+    result = _build_fec_result(responder_static, magnitude=10.0)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.try_add(result) is True
+    assert acc.n_copies == 1
+    decrypt = acc.try_decrypt(responder_static)
+    assert decrypt is not None
+    decoded, label, flips = decrypt
+    assert label == "fec-acc"
+    assert flips == 0
+    assert decoded.body.center_freq_offset == 100
+    assert decoded.body.mode == 0x01
+
+
+def test_llr_accumulator_fec_wrong_responder_returns_none():
+    target = dd.demo_responder_key()
+    other = dd.demo_other_key()
+    result = _build_fec_result(target, magnitude=10.0)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.try_add(result) is True
+    assert acc.try_decrypt(other) is None
+
+
+def test_llr_accumulator_fec_combines_two_noisy_copies():
+    """Two FEC copies at an SNR where the body BER is too high for
+    single-copy Viterbi to recover but the LLR sum is well above the
+    waterfall."""
+    responder_static = dd.demo_responder_key()
+    # Pick magnitude/noise so single-copy decrypts (Es/N0 well above
+    # the FEC waterfall). Use the same body across both copies to test
+    # accumulator combining specifically.
+    body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(
+            sc.generate_keypair().public_key()),
+        center_freq_offset=200,
+        bandwidth_code=0x05,
+        mode=0x01,
+        chip_rate_code=0x32,
+        body_nonce=b"\xaa\xbb\xcc\xdd\xee\xff\x00\x11",
+        flags=0x07,
+    )
+    eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
+    clean = sc.bits_to_hard_llrs(bits, magnitude=4.0)
+    rng = np.random.default_rng(seed=7)
+    noisy1 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
+    noisy2 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
+    base = {"phase_rms_residual_rad": 0.05, "asm_errs_in_coherent": 0,
+            "c_frame": b"\x00" * sc.HAIL_FRAME_LEN, "llrs": None}
+
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.try_add({**base, "fec_llrs": noisy1}) is True
+    assert acc.try_add({**base, "fec_llrs": noisy2}) is True
+    assert acc.n_copies == 2
+
+    # Body LLR magnitude after 2 copies should be ~2× single-copy
+    body_l1_2 = float(np.mean(np.abs(acc.accumulated)))
+    acc_single = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc_single.try_add({**base, "fec_llrs": noisy1}) is True
+    body_l1_1 = float(np.mean(np.abs(acc_single.accumulated)))
+    assert body_l1_2 > 1.5 * body_l1_1, (body_l1_1, body_l1_2)
+
+    decrypt = acc.try_decrypt(responder_static)
+    assert decrypt is not None
+    decoded, label, _ = decrypt
+    assert label == "fec-acc"
+    assert decoded.body.center_freq_offset == 200
+    assert decoded.body.body_nonce == b"\xaa\xbb\xcc\xdd\xee\xff\x00\x11"
+
+
+def test_llr_accumulator_fec_polarity_inversion_normalized():
+    """A copy with inverted polarity (entire LLR vector negated) must be
+    sign-flipped via the ASM polarity vote and combine constructively
+    with a normal-polarity copy."""
+    responder_static = dd.demo_responder_key()
+    result = _build_fec_result(responder_static, magnitude=10.0)
+    inverted = dict(result)
+    inverted["fec_llrs"] = -result["fec_llrs"].copy()
+
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.try_add(result) is True
+    assert acc.try_add(inverted) is True
+    assert acc.n_copies == 2
+
+    decrypt = acc.try_decrypt(responder_static)
+    assert decrypt is not None
+
+
+def test_llr_accumulator_fec_short_input_rejected():
+    responder_static = dd.demo_responder_key()
+    result = _build_fec_result(responder_static, magnitude=10.0)
+    result["fec_llrs"] = result["fec_llrs"][: sc.HAIL_FEC_TOTAL_BITS // 2]
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    assert acc.try_add(result) is False
+    assert acc.n_copies == 0
 
 
 def test_decimate_to_chips_shape():

@@ -28,10 +28,14 @@ import struct
 from dataclasses import dataclass
 from typing import Optional
 
+import numpy as np
+
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+import sisl_fec
 
 
 # ── Protocol constants ──────────────────────────────────────────────────────
@@ -63,6 +67,26 @@ ACK_BODY_LEN = 9
 ELLIGATOR_LEN = 64
 COMPRESSED_PUBKEY_LEN = 33
 TAG_LEN = 16
+
+# ── FEC frame layout ───────────────────────────────────────────────────────
+#
+# The FEC variant of the hail leaves the first 6 bytes (ASM + version + type)
+# UNCODED so the receiver's coherent decoder can use them as a known pilot
+# for phase tracking, and rate-1/2 K=9 convolutionally encodes the rest of
+# the frame (eph_enc + ciphertext + tag = 127 bytes = 1016 bits).
+#
+# Channel layout:
+#   [0   ..   48)   uncoded header bits (ASM + ver + type) — pilot
+#   [48  .. 2096)   coded body bits (FEC over 1016 payload bits)
+#
+# Total channel bits: 48 + 2*(1016 + 8) = 48 + 2048 = 2096 (262 bytes).
+HAIL_HEADER_LEN = 6                                          # ASM+ver+type
+HAIL_BODY_PAYLOAD_LEN = HAIL_FRAME_LEN - HAIL_HEADER_LEN     # 127
+HAIL_FEC_HEADER_BITS = HAIL_HEADER_LEN * 8                   # 48
+HAIL_FEC_BODY_PAYLOAD_BITS = HAIL_BODY_PAYLOAD_LEN * 8       # 1016
+HAIL_FEC_BODY_CODED_BITS = sisl_fec.coded_length(
+    HAIL_FEC_BODY_PAYLOAD_BITS)                              # 2048
+HAIL_FEC_TOTAL_BITS = HAIL_FEC_HEADER_BITS + HAIL_FEC_BODY_CODED_BITS  # 2096
 
 
 # ── Key utilities ───────────────────────────────────────────────────────────
@@ -327,6 +351,97 @@ def decode_hail(
         caller_eph_pub_canonical=pubkey_to_compressed(caller_eph_pub),
         caller_static_pub=caller_static_pub,
     )
+
+
+# ── FEC-wrapped hail encode / decode ───────────────────────────────────────
+#
+# Production-path encode/decode that puts a rate-1/2 K=9 convolutional code
+# over the body of the hail (eph_enc + ciphertext + tag) while leaving the
+# 6-byte header (ASM + ver + msg_type) uncoded as a coherent-decoder pilot.
+#
+# At the operating point this buys ~6-8 dB of coding gain, pushing the chip-
+# SNR floor from ~-22 dB (uncoded) to ~-28 dB (KSP-WCC §5).
+#
+# The crypto layer is unchanged: encode_hail_fec calls encode_hail to build
+# the standard 133-byte frame and only changes the channel representation.
+# decode_hail_fec_from_llrs runs the soft Viterbi over the body LLRs, packs
+# the recovered bits into bytes, prepends the known header, and hands the
+# reconstructed 133-byte frame to the unmodified decode_hail.
+
+def encode_hail_fec(
+    caller_eph: Ephemeral,
+    responder_static_pub: ec.EllipticCurvePublicKey,
+    body: HailBody,
+) -> np.ndarray:
+    """Produce a FEC-coded channel bit stream for one hail.
+
+    Returns a uint8 ndarray of HAIL_FEC_TOTAL_BITS = 2096 bits, formed as
+    [header_bits (48) || coded_body_bits (2048)]. Pass directly to
+    sisl_framer.tx_bits_to_chips for transmission.
+
+    Consumes `caller_eph` exactly once via the underlying encode_hail call.
+    """
+    frame = encode_hail(caller_eph, responder_static_pub, body)
+    header_bytes = frame[:HAIL_HEADER_LEN]
+    body_bytes = frame[HAIL_HEADER_LEN:]
+    assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN
+
+    header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
+    body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
+    coded_body_bits = sisl_fec.encode(body_bits)
+    assert len(coded_body_bits) == HAIL_FEC_BODY_CODED_BITS
+
+    out = np.empty(HAIL_FEC_TOTAL_BITS, dtype=np.uint8)
+    out[:HAIL_FEC_HEADER_BITS] = header_bits
+    out[HAIL_FEC_HEADER_BITS:] = coded_body_bits
+    return out
+
+
+def decode_hail_fec_from_llrs(
+    llrs: np.ndarray,
+    my_static_priv: ec.EllipticCurvePrivateKey,
+) -> Optional[DecodedHail]:
+    """Trial-decrypt a FEC-coded hail from per-bit LLRs.
+
+    `llrs` must be a length-HAIL_FEC_TOTAL_BITS float array using the
+    sisl_framer convention (positive → bit 0, negative → bit 1). The first
+    HAIL_FEC_HEADER_BITS LLRs are hard-decided into the uncoded header
+    (ASM + version + msg_type) and used as a structural cheap-reject; the
+    remaining HAIL_FEC_BODY_CODED_BITS LLRs are soft-Viterbi-decoded into
+    HAIL_FEC_BODY_PAYLOAD_BITS payload bits and reassembled into the
+    standard 133-byte hail frame for the existing decode_hail pipeline.
+    """
+    if len(llrs) < HAIL_FEC_TOTAL_BITS:
+        return None
+    llrs = np.asarray(llrs[:HAIL_FEC_TOTAL_BITS], dtype=np.float32)
+
+    header_bits = (llrs[:HAIL_FEC_HEADER_BITS] < 0.0).astype(np.uint8)
+    header_bytes = np.packbits(header_bits).tobytes()
+    if header_bytes[:4] != ASM:
+        return None
+    if header_bytes[4] != SISL_VERSION:
+        return None
+    if header_bytes[5] != MSG_HAIL:
+        return None
+
+    coded_body_llrs = llrs[HAIL_FEC_HEADER_BITS:]
+    body_bits = sisl_fec.decode(coded_body_llrs, HAIL_FEC_BODY_PAYLOAD_BITS)
+    body_bytes = np.packbits(body_bits).tobytes()
+    assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN
+
+    frame = header_bytes + body_bytes
+    return decode_hail(frame, my_static_priv)
+
+
+def bits_to_hard_llrs(bits: np.ndarray, magnitude: float = 10.0) -> np.ndarray:
+    """Convert a uint8 0/1 bit array to a float32 LLR array under the
+    sisl_framer convention: bit 0 → +magnitude, bit 1 → -magnitude.
+
+    Used by tests and noiseless round-trip benches that need to feed
+    hard-decision encoder output through a soft-decision decoder.
+    """
+    bits = np.asarray(bits, dtype=np.uint8)
+    return np.where(bits == 0, magnitude, -magnitude).astype(np.float32)
 
 
 # ── ACK encode / decode (§5.3) ──────────────────────────────────────────────

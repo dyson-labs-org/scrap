@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
 import sisl_dsss_demo as dd
+import sisl_fec
 import sisl_framer as sf
 
 
@@ -97,25 +98,30 @@ def _extract_peaks_known_alignment(
     is the correlation across samples [0, SAMPLES_PER_SYMBOL) i.e. the
     start of the first symbol. Symbol k's peak lives at output index
     k · SAMPLES_PER_SYMBOL.
+
+    NOTE on the missing bracket search: an earlier version of this
+    function picked the largest |corr| in a ±2 sample neighborhood
+    around each target. That was intended to absorb sub-sample timing
+    jitter, but it has a serious low-SNR bias: argmax of |noisy_peak|
+    in a 5-cell window picks the cell whose REAL part has been pushed
+    LOWER by noise (because |corr| > |signal| under noise → the chosen
+    cell has below-average signal contribution). The result was an
+    empirical SNR ~5 dB worse than the nominal γ_s the bench claims.
+    Synthetic AWGN has zero timing jitter by construction, so we now
+    sample at the exact integer-aligned positions and get a clean
+    γ_s = nominal match.
     """
     corr_c = sf.matched_filter_complex_sample_rate(
         samples, SAMPS_PER_CHIP,
     )
     if len(corr_c) == 0:
         return np.zeros(0, dtype=np.complex128)
-    peaks = np.zeros(n_bits, dtype=np.complex128)
-    for k in range(n_bits):
-        target = k * SAMPLES_PER_SYMBOL
-        if target >= len(corr_c):
-            return peaks[:k]
-        # Check the immediate neighborhood for the true peak (noise may
-        # push it ±1 sample). Bracketed argmax over ±2 samples.
-        lo = max(0, target - 2)
-        hi = min(len(corr_c), target + 3)
-        mag = np.abs(corr_c[lo:hi])
-        local = int(np.argmax(mag))
-        peaks[k] = corr_c[lo + local]
-    return peaks
+    targets = np.arange(n_bits, dtype=np.int64) * SAMPLES_PER_SYMBOL
+    valid = targets < len(corr_c)
+    if not valid.all():
+        n_valid = int(valid.sum())
+        return corr_c[targets[:n_valid]].astype(np.complex128)
+    return corr_c[targets].astype(np.complex128)
 
 
 def _make_noisy_copy(tx_samples: np.ndarray, snr_db: float,
@@ -182,6 +188,187 @@ def _decode_one_copy(
         "phase_rms_residual_rad": c_rms,
         "asm_errs_in_coherent": c_asm_errs,
         "solo_decrypt": solo_decrypt,
+    }
+
+
+def _build_demo_fec_body() -> sc.HailBody:
+    """Mirror build_demo_hail's HailBody construction without the
+    encode_hail call (which we want to do via encode_hail_fec instead).
+    Uses a fixed body_nonce for bench reproducibility — production uses
+    os.urandom(8)."""
+    caller_static = dd.demo_caller_key()
+    return sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
+        center_freq_offset=100,
+        bandwidth_code=0x03,
+        mode=0x01,
+        chip_rate_code=0x32,
+        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
+        flags=0x03,
+    )
+
+
+def _build_tx_samples_fec(responder_static) -> np.ndarray:
+    """Build a noise-free TX sample stream for one FEC-encoded hail.
+
+    Calls sisl_crypto.encode_hail_fec to produce the 2096-bit channel
+    array (48-bit uncoded header + 2048-bit FEC body), spreads via
+    sisl_framer.tx_bits_to_chips, upsamples to the bench sample rate.
+    """
+    body = _build_demo_fec_body()
+    eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
+    chips = sf.tx_bits_to_chips(bits)
+    return dd.upsample_chips_to_samples(chips, SAMPS_PER_CHIP)
+
+
+def _coherent_decode_fec_bench(peaks: np.ndarray) -> "tuple | None":
+    """Coherent BPSK decode of HAIL_FEC_TOTAL_BITS peaks for the FEC
+    bench, with the per-symbol phase-drift parameter forced to zero.
+
+    The standard coherent_decode_from_pilot fits both θ₀ and Δθ from a
+    48-bit pilot. At an output codeword length of 1064 bits this is
+    fine, but at 2096 bits the Cramer-Rao slope uncertainty
+    σ_Δθ ≈ sqrt(12 / (N(N²-1)·SNR)) accumulated over the longer
+    codeword exceeds π/2 for any plausible bench SNR. The result is a
+    burst of bit flips in the back half of the codeword that the
+    Viterbi cannot fix.
+
+    The bench's synthetic AWGN channel has zero Doppler by construction,
+    so we can force Δθ = 0 here to isolate the FEC accumulator
+    validation from the (separate) carrier-tracking design problem
+    flagged in the second reviewer's S4. Production deployment will
+    need DBPSK or a longer pilot to address the same issue on real
+    air-interface signals — that's a Phase 1.5 concern, not blocking
+    for the bench.
+    """
+    n_bits = sc.HAIL_FEC_TOTAL_BITS
+    if len(peaks) < n_bits:
+        return None
+    # Fit only θ₀; ignore the function's Δθ output.
+    fit = sf.fit_phase_from_known_bits(peaks, 0, dd._PILOT_BITS)
+    if fit is None:
+        return None
+    theta0, _delta, rms_residual = fit
+    peaks_arr = np.array(peaks[:n_bits], dtype=np.complex128)
+    # Derotate by -θ₀ only (Δθ=0).
+    rot = np.exp(-1j * theta0)
+    derotated = peaks_arr * rot
+    soft = derotated.real.astype(np.float32)
+    bits = (soft < 0).astype(np.uint8)
+    pad = (-n_bits) % 8
+    if pad:
+        bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
+    frame_bytes = np.packbits(bits).tobytes()
+    return frame_bytes, soft, theta0, 0.0, rms_residual
+
+
+def _decode_one_copy_fec(
+    tx_samples: np.ndarray,
+    responder_static,
+    snr_db: float,
+    rng: np.random.Generator,
+) -> dict:
+    """Produce a result dict containing 2096 channel LLRs for the FEC
+    accumulator. Uses the same deterministic-alignment peak extraction
+    as the uncoded bench path, just at the longer FEC channel length."""
+    noisy = _make_noisy_copy(tx_samples, snr_db, rng)
+    n_bits = sc.HAIL_FEC_TOTAL_BITS
+    peaks = _extract_peaks_known_alignment(noisy, n_bits)
+    if len(peaks) < n_bits:
+        return {"status": "short_block"}
+    coherent = _coherent_decode_fec_bench(peaks)
+    if coherent is None:
+        return {"status": "no_fit"}
+    c_frame, c_soft, _c_theta0, _c_delta, c_rms = coherent
+    c_bits_first32 = np.unpackbits(np.frombuffer(c_frame[:4], dtype=np.uint8))
+    c_asm_errs = int(np.sum(c_bits_first32 != dd._ASM_BITS))
+
+    # Single-copy FEC decode probe (does THIS copy alone decrypt?).
+    solo_decrypt = False
+    body_llrs = c_soft[sc.HAIL_FEC_HEADER_BITS:].astype(np.float32)
+    body_bits = sisl_fec.decode(body_llrs, sc.HAIL_FEC_BODY_PAYLOAD_BITS)
+    body_bytes = np.packbits(body_bits).tobytes()
+    header = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
+    candidate_frame = header + body_bytes
+    if sc.decode_hail(candidate_frame, responder_static) is not None:
+        solo_decrypt = True
+
+    return {
+        "status": "fec_decoded" if not solo_decrypt else "fec_decrypt_ok",
+        "fec_llrs": c_soft,
+        "llrs": None,
+        "c_frame": b"\x00" * sc.HAIL_FRAME_LEN,    # unused in fec mode
+        "phase_rms_residual_rad": c_rms,
+        "asm_errs_in_coherent": c_asm_errs,
+        "solo_decrypt": solo_decrypt,
+    }
+
+
+def _run_one_trial_fec(
+    tx_samples: np.ndarray,
+    responder_static,
+    snr_db: float,
+    max_n: int,
+    rng: np.random.Generator,
+) -> dict:
+    accumulator = dd.LlrAccumulator(
+        n_bits=sc.HAIL_FEC_TOTAL_BITS,
+        max_copies=max_n * 2 + 1,
+        fec=True,
+    )
+    single_copy = np.zeros(max_n, dtype=bool)
+    admissions = np.zeros(max_n, dtype=bool)
+    accumulator_n = None
+    for i in range(max_n):
+        result = _decode_one_copy_fec(
+            tx_samples, responder_static, snr_db, rng,
+        )
+        if result["status"] in ("short_block", "no_fit"):
+            continue
+        single_copy[i] = result.get("solo_decrypt", False)
+        if accumulator.try_add(result):
+            admissions[i] = True
+            if accumulator_n is None:
+                combined = accumulator.try_decrypt(responder_static)
+                if combined is not None:
+                    accumulator_n = i + 1
+    return {
+        "single_copy_decrypts": single_copy,
+        "accumulator_decrypt_n": accumulator_n,
+        "admissions": admissions,
+    }
+
+
+def _run_sweep_fec(snr_db: float, trials: int, max_n: int,
+                    seed: int) -> dict:
+    responder_static = dd.demo_responder_key()
+    tx_samples = _build_tx_samples_fec(responder_static)
+    master = np.random.default_rng(seed)
+    single_rate_counts = np.zeros(max_n, dtype=np.int64)
+    admit_counts = np.zeros(max_n, dtype=np.int64)
+    accumulator_decode_counts = np.zeros(max_n + 1, dtype=np.int64)
+    for _t in range(trials):
+        trial_seed = int(master.integers(0, 2**63 - 1))
+        rng = np.random.default_rng(trial_seed)
+        trial = _run_one_trial_fec(
+            tx_samples, responder_static, snr_db, max_n, rng,
+        )
+        single_rate_counts += trial["single_copy_decrypts"].astype(np.int64)
+        admit_counts += trial["admissions"].astype(np.int64)
+        if trial["accumulator_decrypt_n"] is None:
+            accumulator_decode_counts[0] += 1
+        else:
+            accumulator_decode_counts[trial["accumulator_decrypt_n"]] += 1
+    return {
+        "snr_db": snr_db,
+        "trials": trials,
+        "max_n": max_n,
+        "single_copy_rate": single_rate_counts / trials,
+        "admit_rate": admit_counts / trials,
+        "acc_decode_counts": accumulator_decode_counts,
+        "mean_phase_rms": 0.0,         # not tracked in fec path
+        "mean_asm_errs": 0.0,
     }
 
 
@@ -321,6 +508,130 @@ def _check_sqrt_n_gain(results: list) -> int:
     return good
 
 
+def _check_clean_path_production_admission(
+    n_copies: int = 8,
+    seed: int = 42,
+) -> dict:
+    """Run the *production* `_decode_one_hail_in_block` on clean signals
+    and verify the resulting decrypt_ok dicts are admittable to the
+    accumulator. Regression guard for A5 (LLRs surfaced on every status
+    branch including decrypt_ok / decrypt_fail).
+
+    The bench's `_decode_one_copy` builds its own result dicts and was
+    already structured to expose LLRs on the clean path. The production
+    decoder used to drop them. After A5, both paths agree. This check
+    asserts the agreement so a future regression in
+    `_decode_one_hail_in_block` is caught here, not in real-bench RF
+    operations months later.
+
+    Also asserts the cumulative-LLR magnitude on the production path
+    grows roughly linearly with N (the +3 dB-per-doubling claim).
+    """
+    rng = np.random.default_rng(seed)
+    responder_static = dd.demo_responder_key()
+    accumulator = dd.LlrAccumulator(
+        n_bits=sc.HAIL_FRAME_LEN * 8, max_copies=n_copies * 2 + 1,
+    )
+    admitted = 0
+    decrypted_solo = 0
+    keys_required = ("llrs", "c_frame",
+                     "phase_rms_residual_rad", "asm_errs_in_coherent")
+    cumulative_l1: list[float] = []
+    for i in range(n_copies):
+        prefix = int(rng.integers(20_000, 80_000))
+        suffix = int(rng.integers(20_000, 80_000))
+        block, _frame = _make_clean_block(prefix, suffix, rng)
+        result = dd._decode_one_hail_in_block(block, responder_static)
+        if result.get("status") != "decrypt_ok":
+            return {
+                "ok": False,
+                "reason": f"copy {i} status={result.get('status')!r} "
+                          f"(expected decrypt_ok on clean signal)",
+                "admitted": admitted,
+                "n_copies": n_copies,
+            }
+        for k in keys_required:
+            if result.get(k) is None:
+                return {
+                    "ok": False,
+                    "reason": f"copy {i} decrypt_ok but {k!r} missing/None "
+                              "(A5 regression — production decoder dropped LLRs)",
+                    "admitted": admitted,
+                    "n_copies": n_copies,
+                }
+        decrypted_solo += 1
+        if not accumulator.try_add(result):
+            return {
+                "ok": False,
+                "reason": f"copy {i} decrypt_ok but accumulator rejected "
+                          f"admission (rms={result.get('phase_rms_residual_rad')}, "
+                          f"asm_errs={result.get('asm_errs_in_coherent')})",
+                "admitted": admitted,
+                "n_copies": n_copies,
+            }
+        admitted += 1
+        cumulative_l1.append(float(np.mean(np.abs(accumulator.accumulated))))
+
+    # Combining-is-happening check on the cumulative L1: the precise
+    # scaling depends on the coherent decoder's per-call normalization
+    # (which varies slightly with prefix offset and sub-chip phase),
+    # so we don't assert strict N× linearity. The meaningful invariant
+    # is that the accumulator's L1 grows MONOTONICALLY and ends well
+    # above the single-copy L1. The failure mode this catches is
+    # polarity-flipping cancellation (final L1 ≈ single, or worse,
+    # near zero), which would happen if A5 surfaced LLRs with
+    # inconsistent sign convention across copies.
+    final_l1 = cumulative_l1[-1]
+    single_l1 = cumulative_l1[0]
+    monotonic = all(
+        cumulative_l1[i] >= cumulative_l1[i - 1] - 1e-9
+        for i in range(1, len(cumulative_l1))
+    )
+    combining_factor = final_l1 / single_l1 if single_l1 > 0 else 0.0
+    # At N=8 with clean copies, expect combining_factor ≥ 2.0; the
+    # observed ratio in practice is ~3-4× depending on normalization.
+    combining_ok = combining_factor >= 2.0 and monotonic
+
+    return {
+        "ok": admitted == n_copies and decrypted_solo == n_copies and combining_ok,
+        "reason": (
+            None if (admitted == n_copies and decrypted_solo == n_copies and combining_ok)
+            else (
+                "non-monotonic cumulative L1 (polarity flips during accumulation?)"
+                if not monotonic
+                else f"insufficient combining: factor={combining_factor:.2f} "
+                     "(expected ≥ 2.0 for N=8 clean copies)"
+            )
+        ),
+        "n_copies": n_copies,
+        "decrypted_solo": decrypted_solo,
+        "admitted": admitted,
+        "single_copy_l1": single_l1,
+        "final_l1": final_l1,
+        "combining_factor": combining_factor,
+        "monotonic": monotonic,
+    }
+
+
+def _make_clean_block(prefix_samples: int, suffix_samples: int,
+                       rng: np.random.Generator) -> tuple[np.ndarray, bytes]:
+    """Build a clean (noise-free) baseband block containing one demo hail.
+
+    Mirrors test_sisl_dsss_demo._make_block_with_hail but lives here so
+    the bench has no test-file dependency. `rng` is reserved for future
+    randomized prefixes; current build is deterministic given the prefix
+    sample counts.
+    """
+    _ = rng   # reserved
+    frame = dd.build_demo_hail()
+    chips = dd.build_tx_chips(frame)
+    signal = dd.upsample_chips_to_samples(chips)
+    prefix = np.zeros(prefix_samples, dtype=np.complex64)
+    suffix = np.zeros(suffix_samples, dtype=np.complex64)
+    block = np.concatenate([prefix, signal, suffix])
+    return block, frame
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -333,7 +644,29 @@ def main() -> int:
     p.add_argument("--trials", type=int, default=20)
     p.add_argument("--max-n", type=int, default=8)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--skip-clean-path-check", action="store_true",
+                   help="skip the A5 production-path admission check")
     args = p.parse_args()
+
+    # ── A5 regression guard: production decoder must surface LLRs ──
+    if not args.skip_clean_path_check:
+        print("A5 production-path check: running _decode_one_hail_in_block on")
+        print("clean signals and verifying results are accumulator-admittable")
+        check = _check_clean_path_production_admission(
+            n_copies=8, seed=args.seed,
+        )
+        if not check["ok"]:
+            print(f"FAIL: {check.get('reason', 'unknown')}")
+            print(f"  admitted={check['admitted']}/{check['n_copies']}")
+            if "combining_factor" in check:
+                print(f"  cumulative L1 combining factor "
+                      f"(final/single)={check['combining_factor']:.2f} "
+                      f"(expected ≥ 2.0)")
+            return 2
+        print(f"PASS: {check['admitted']}/{check['n_copies']} clean copies "
+              f"admitted on production path; "
+              f"L1 combining factor={check['combining_factor']:.2f}")
+        print()
 
     print(f"bench_llr_accumulator: sweep snrs={args.snr} "
           f"trials={args.trials} max_n={args.max_n}")

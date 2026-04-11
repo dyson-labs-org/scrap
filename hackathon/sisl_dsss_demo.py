@@ -54,6 +54,7 @@ import numpy as np
 from cryptography.hazmat.primitives.asymmetric import ec
 
 import sisl_crypto as sc
+import sisl_fec
 
 try:
     from gnuradio import analog, blocks, gr
@@ -657,12 +658,41 @@ class LlrAccumulator:
     """
 
     def __init__(self, n_bits: int, pass_rms: float = 0.6,
-                 max_copies: int = 64, max_asm_errs: int = 2):
+                 max_copies: int = 64, max_asm_errs: int = 2,
+                 fec: bool = False):
+        """If `fec` is True the accumulator runs in FEC mode:
+
+        - `n_bits` is interpreted as the number of CHANNEL bits expected
+          per copy (HAIL_FEC_TOTAL_BITS = 2096), not payload bits.
+        - The internal accumulator vector stores only the body LLRs
+          (HAIL_FEC_BODY_CODED_BITS = 2048); the 48-bit uncoded header
+          at the front of each copy is used for polarity vote and ASM
+          cheap-reject but is not summed into the accumulator.
+        - try_decrypt runs sisl_fec.decode on the accumulated body LLRs
+          and reconstructs the standard 133-byte hail frame for the
+          existing decode_hail pipeline. Chase-II is bypassed in FEC
+          mode — the convolutional code does the soft-decision work.
+
+        If `fec` is False (default) the accumulator behaves exactly as
+        before: stores `n_bits` payload LLRs, hard-decides into bytes
+        for the 6-XOR + Chase-II decrypt pipeline.
+        """
         self.n_bits = n_bits
         self.pass_rms = pass_rms
         self.max_copies = max_copies
         self.max_asm_errs = max_asm_errs
-        self.accumulated = np.zeros(n_bits, dtype=np.float64)
+        self.fec = fec
+        if fec:
+            assert n_bits == sc.HAIL_FEC_TOTAL_BITS, (
+                f"FEC mode requires n_bits == HAIL_FEC_TOTAL_BITS "
+                f"({sc.HAIL_FEC_TOTAL_BITS}); got {n_bits}"
+            )
+            self._header_bits = sc.HAIL_FEC_HEADER_BITS
+            self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
+        else:
+            self._header_bits = 0
+            self._accum_size = n_bits
+        self.accumulated = np.zeros(self._accum_size, dtype=np.float64)
         self.n_copies = 0
         self._asm_signs = np.where(_ASM_BITS == 0, 1.0, -1.0).astype(np.float64)
 
@@ -675,30 +705,52 @@ class LlrAccumulator:
 
         Returns True if the result was accepted and added, False otherwise.
         Accept conditions:
-        - result contains 'llrs' (per-bit coherent soft values)
+        - result contains 'llrs' (or 'fec_llrs' in FEC mode)
         - phase_rms_residual_rad ≤ pass_rms
         - asm_errs_in_coherent ≤ max_asm_errs (≤2 by default)
         """
-        llrs = result.get("llrs")
+        # In FEC mode the producer publishes 2096 channel LLRs in 'fec_llrs';
+        # in normal mode 1064 frame LLRs in 'llrs'. They are different
+        # representations of the same coherent decode call.
+        llrs_key = "fec_llrs" if self.fec else "llrs"
+        llrs = result.get(llrs_key)
         rms = result.get("phase_rms_residual_rad")
         asm_errs = result.get("asm_errs_in_coherent")
         if llrs is None:
             return False
-        if rms is None or rms > self.pass_rms:
-            return False
-        if asm_errs is None or asm_errs > self.max_asm_errs:
-            return False
         if len(llrs) < self.n_bits:
             return False
+        # Quality gates are different by mode:
+        # - Non-FEC: hard-decision combining is fragile, so reject copies
+        #   with bad pilot fit (phase_rms) or wrong ASM bits (asm_errs).
+        # - FEC: the soft-Viterbi + Poly1305 gate at try_decrypt is the
+        #   real quality oracle. The hard-decision asm_errs at low chip
+        #   SNR can exceed max_asm_errs even when the Viterbi will
+        #   correct the body, and the pilot fit's rms is also noisy at
+        #   the operating point. Skip both gates in FEC mode and let
+        #   the FEC + crypto layer reject bad copies after combining.
+        if not self.fec:
+            if rms is None or rms > self.pass_rms:
+                return False
+            if asm_errs is None or asm_errs > self.max_asm_errs:
+                return False
 
         # Polarity vote: correlate this copy's first-32 LLRs against the
         # signed ASM pattern. Positive → matches normal; negative →
         # matches inverted. 32-dimensional coherent vote is effectively
-        # noise-free at any SNR the decoder can reach.
+        # noise-free at any SNR the decoder can reach. In FEC mode the
+        # first 32 channel LLRs are still the uncoded ASM, so the same
+        # polarity logic applies regardless of mode.
         llrs_f64 = llrs[:self.n_bits].astype(np.float64)
         polarity_vote = float(np.dot(llrs_f64[:32], self._asm_signs))
         sign = 1.0 if polarity_vote >= 0 else -1.0
-        self.accumulated += sign * llrs_f64
+        # In FEC mode, drop the uncoded header and accumulate only the
+        # coded body LLRs. In normal mode, accumulate the entire frame.
+        if self.fec:
+            body_llrs = llrs_f64[self._header_bits:]
+            self.accumulated += sign * body_llrs
+        else:
+            self.accumulated += sign * llrs_f64
         self.n_copies += 1
         if self.n_copies >= self.max_copies:
             # Exponential forgetting: halve the accumulator when full.
@@ -719,11 +771,37 @@ class LlrAccumulator:
         self,
         responder_static,
     ) -> Optional[tuple[object, str, int]]:
-        """Attempt to decrypt the accumulated frame via the same 6-XOR +
-        Chase-II pipeline used for single copies.
+        """Attempt to decrypt the accumulated frame.
+
+        In FEC mode: soft-Viterbi-decode the accumulated body LLRs into
+        payload bits, reconstruct the standard 133-byte hail frame using
+        the known uncoded header, and run the existing decode_hail
+        pipeline. The convolutional code does the soft-decision work, so
+        Chase-II is not needed.
+
+        In normal mode: hard-decide the accumulated LLRs, then run the
+        existing 6-XOR + Chase-II decrypt pipeline used for single
+        copies.
 
         Returns (decoded_hail, polarity_label, chase_flips) or None.
         """
+        if self.n_copies == 0:
+            return None
+
+        if self.fec:
+            body_llrs_f32 = self.accumulated.astype(np.float32)
+            body_bits = sisl_fec.decode(
+                body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,
+            )
+            body_bytes = np.packbits(body_bits).tobytes()
+            assert len(body_bytes) == sc.HAIL_BODY_PAYLOAD_LEN
+            header = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
+            frame = header + body_bytes
+            decoded = sc.decode_hail(frame, responder_static)
+            if decoded is not None:
+                return decoded, "fec-acc", 0
+            return None
+
         frame = self.current_frame()
         if frame is None:
             return None
@@ -1010,6 +1088,57 @@ def find_sisl_frame_bitwise(
 _SIGNAL_FLOOR_RATIO = 4.0
 
 
+def _extract_llrs_at_position(
+    peak_values: list,
+    peak_offset: int,
+) -> dict:
+    """Run the coherent decode at one ASM offset and return LLR diagnostics.
+
+    Used to populate llrs / c_frame / phase_rms_residual_rad / asm_errs_in_coherent
+    on every status branch where peak_values are available, so the LLR
+    accumulator can chase-combine across blocks regardless of whether
+    the current block decrypted on its own. No decryption attempted here.
+
+    Returns a dict with keys (llrs, c_frame, phase_rms_residual_rad,
+    asm_errs_in_coherent), all None if the offset is out of range or the
+    coherent decode fails.
+    """
+    out: dict = {
+        "llrs": None,
+        "fec_llrs": None,
+        "c_frame": None,
+        "phase_rms_residual_rad": None,
+        "asm_errs_in_coherent": None,
+    }
+    aligned_peaks = peak_values[peak_offset:]
+    n_frame_bits = sc.HAIL_FRAME_LEN * 8           # 1064
+    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS             # 2096
+    if len(aligned_peaks) < n_frame_bits:
+        return out
+
+    # When peak_values is long enough, decode at the FEC channel length
+    # so we can populate both the legacy 1064-bit `llrs` and the longer
+    # `fec_llrs` from a single coherent_decode_from_pilot call. The
+    # first 1064 LLRs are pilot-fit-identical regardless of how many we
+    # ask the decoder to produce.
+    decode_len = n_fec_bits if len(aligned_peaks) >= n_fec_bits else n_frame_bits
+    coherent = sf.coherent_decode_from_pilot(
+        aligned_peaks, 0, _PILOT_BITS, decode_len,
+    )
+    if coherent is None:
+        return out
+    c_frame_full, c_soft_full, _c_theta0, _c_delta, c_rms = coherent
+    out["c_frame"] = c_frame_full[: sc.HAIL_FRAME_LEN]
+    out["llrs"] = c_soft_full[: n_frame_bits]
+    if decode_len >= n_fec_bits:
+        out["fec_llrs"] = c_soft_full[: n_fec_bits]
+    out["phase_rms_residual_rad"] = c_rms
+    c_bits_first32 = np.unpackbits(
+        np.frombuffer(c_frame_full[:4], dtype=np.uint8))
+    out["asm_errs_in_coherent"] = int(np.sum(c_bits_first32 != _ASM_BITS))
+    return out
+
+
 def _try_coherent_decrypt_at_position(
     peak_values: list,
     soft_offset: int,
@@ -1023,6 +1152,7 @@ def _try_coherent_decrypt_at_position(
     """
     aligned_peaks = peak_values[soft_offset:]
     n_frame_bits = sc.HAIL_FRAME_LEN * 8
+    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
     n_pilot_bits = len(_PILOT_BITS)     # 48: ASM + ver + type
     out = {
         "decoded_hail": None,
@@ -1033,6 +1163,7 @@ def _try_coherent_decrypt_at_position(
         "asm_errs_in_coherent": None,
         "c_frame": None,
         "c_soft": None,
+        "fec_llrs": None,
         "chase_flips": None,
     }
     if len(aligned_peaks) < n_pilot_bits:
@@ -1054,14 +1185,22 @@ def _try_coherent_decrypt_at_position(
         # or spurious).
         return out
 
+    # Decode at the FEC channel length when peaks allow, so we can
+    # populate both the legacy 'c_soft' (1064 frame LLRs) and the
+    # longer 'fec_llrs' (2096 channel LLRs) from one call.
+    decode_len = n_fec_bits if len(aligned_peaks) >= n_fec_bits else n_frame_bits
     coherent = sf.coherent_decode_from_pilot(
-        aligned_peaks, 0, _PILOT_BITS, n_frame_bits,
+        aligned_peaks, 0, _PILOT_BITS, decode_len,
     )
     if coherent is None:
         return out
-    c_frame, c_soft, c_theta0, c_delta, c_rms = coherent
+    c_frame_full, c_soft_full, c_theta0, c_delta, c_rms = coherent
+    c_frame = c_frame_full[: sc.HAIL_FRAME_LEN]
+    c_soft = c_soft_full[: n_frame_bits]
     out["c_frame"] = c_frame
     out["c_soft"] = c_soft
+    if decode_len >= n_fec_bits:
+        out["fec_llrs"] = c_soft_full[: n_fec_bits]
     out["theta0_rad"] = c_theta0
     out["delta_theta_per_sym"] = c_delta
     out["phase_rms_residual_rad"] = c_rms
@@ -1257,9 +1396,11 @@ def _decode_one_hail_in_block(
         info = identify_sisl_frame(variant)
         frame_bytes = None
         asm_location = None
+        peak_offset: Optional[int] = None
         if info is not None and info["frame_type"] == "hail" and info["frame_bytes"] is not None:
             frame_bytes = info["frame_bytes"]
             asm_location = f"byte{info['asm_offset']}"
+            peak_offset = int(info["asm_offset"]) * 8
 
         # ── Fallback 1: bit-level exact sliding ASM search ─────────
         if frame_bytes is None:
@@ -1267,6 +1408,7 @@ def _decode_one_hail_in_block(
             if bitwise is not None:
                 bit_offset, frame_bytes = bitwise
                 asm_location = f"bit{bit_offset}"
+                peak_offset = int(bit_offset)
 
         # ── Fallback 2: fuzzy bit-level ASM search ─────────────────
         if frame_bytes is None:
@@ -1282,6 +1424,16 @@ def _decode_one_hail_in_block(
         if frame_bytes is None:
             continue
 
+        # Always extract LLRs at the discovered ASM offset so the
+        # accumulator can chase-combine across blocks regardless of the
+        # current block's decrypt outcome (A5).
+        llr_diag = (
+            _extract_llrs_at_position(peak_values, peak_offset)
+            if peak_offset is not None and peak_values
+            else {"llrs": None, "fec_llrs": None, "c_frame": None,
+                  "phase_rms_residual_rad": None, "asm_errs_in_coherent": None}
+        )
+
         decoded_hail = sc.decode_hail(frame_bytes, responder_static)
         if decoded_hail is None:
             return {
@@ -1293,6 +1445,11 @@ def _decode_one_hail_in_block(
                 "polarity": variant_label,
                 "rad_per_sample": rad_per_sample,
                 "freq_offset_hz": freq_hz,
+                "llrs": llr_diag["llrs"],
+                "fec_llrs": llr_diag["fec_llrs"],
+                "c_frame": llr_diag["c_frame"],
+                "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
+                "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
             }
         return {
             "status": "decrypt_ok",
@@ -1305,6 +1462,11 @@ def _decode_one_hail_in_block(
             "freq_offset_hz": freq_hz,
             "body": decoded_hail.body,
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+            "llrs": llr_diag["llrs"],
+            "fec_llrs": llr_diag["fec_llrs"],
+            "c_frame": llr_diag["c_frame"],
+            "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
+            "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
         }
 
     # ── Fallback 3: top-K soft-decision ASM search ───────────────
@@ -1344,6 +1506,8 @@ def _decode_one_hail_in_block(
                 # First try the differential soft frame directly.
                 decoded_hail = sc.decode_hail(cand_frame, responder_static)
                 if decoded_hail is not None:
+                    # Extract LLRs at this offset for chase combining (A5).
+                    llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
                     return {
                         "status": "decrypt_ok",
                         "start_sample": positions[0] if positions else 0,
@@ -1357,6 +1521,11 @@ def _decode_one_hail_in_block(
                         "pts_ratio": cand_pts,
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                        "llrs": llr_diag["llrs"],
+                        "fec_llrs": llr_diag["fec_llrs"],
+                        "c_frame": llr_diag["c_frame"],
+                        "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
+                        "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
                     }
                 # Then try the coherent + chase pipeline.
                 attempt = _try_coherent_decrypt_at_position(
@@ -1382,6 +1551,12 @@ def _decode_one_hail_in_block(
                         "chase_flips": attempt["chase_flips"],
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                        # A5: surface LLRs from the coherent attempt so the
+                        # accumulator can chase-combine across blocks even
+                        # when the current block decrypted successfully.
+                        "llrs": attempt["c_soft"],
+                        "fec_llrs": attempt["fec_llrs"],
+                        "c_frame": attempt["c_frame"],
                     }
                 # Remember the best (highest |score|) failed attempt for
                 # the frame_soft / noise_lock diagnostic below. The first

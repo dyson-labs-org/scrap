@@ -81,6 +81,73 @@ def test_tx_rx_loopback_full_hail_frame():
     assert decoded.body.body_nonce == body.body_nonce
 
 
+# ── Bit-level framer (for FEC-coded payloads) ───────────────────────────────
+
+def test_tx_bits_to_chips_clean_loopback():
+    rng = np.random.default_rng(seed=137)
+    bits = rng.integers(0, 2, size=137, dtype=np.uint8)
+    chips = sf.tx_bits_to_chips(bits)
+    assert chips.dtype == np.int8
+    assert len(chips) == 137 * sf.CHIPS_PER_SYMBOL
+    recovered = sf.rx_chips_to_bits(chips, 137)
+    assert recovered.shape == (137,)
+    assert recovered.dtype == np.uint8
+    assert np.array_equal(recovered, bits)
+
+
+def test_tx_bits_to_chips_loopback_at_minus_10dB():
+    rng = np.random.default_rng(seed=42)
+    n = 1000
+    bits = rng.integers(0, 2, size=n, dtype=np.uint8)
+    chips = sf.tx_bits_to_chips(bits).astype(np.float32)
+    chip_snr_db = -10.0
+    noise_std = 10 ** (-chip_snr_db / 20.0)
+    noise = rng.normal(0.0, noise_std, chips.shape).astype(np.float32)
+    recovered = sf.rx_chips_to_bits(chips + noise, n)
+    errors = int(np.sum(recovered != bits))
+    assert errors <= n // 100, f"{errors} bit errors exceeds 1% of {n}"
+
+
+def test_tx_bits_to_chips_byte_aligned_matches_bytes_path():
+    rng = np.random.default_rng(seed=7)
+    payload = bytes(rng.integers(0, 256, size=16, dtype=np.uint8))
+    chips_bytes = sf.tx_bytes_to_chips(payload)
+    chips_bits = sf.tx_bits_to_chips(sf.bytes_to_bits(payload))
+    assert np.array_equal(chips_bytes, chips_bits)
+
+
+def test_tx_bits_to_chips_empty():
+    out = sf.tx_bits_to_chips(np.empty(0, dtype=np.uint8))
+    assert out.dtype == np.int8
+    assert out.size == 0
+
+
+def test_tx_bits_to_chips_wrong_dtype_or_value():
+    bad = np.array([0, 1, 2, 1], dtype=np.uint8)
+    try:
+        sf.tx_bits_to_chips(bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for non-0/1 input")
+
+    # float64 array of clean 0.0/1.0 is accepted via astype(uint8)
+    float_bits = np.array([0.0, 1.0, 1.0, 0.0, 1.0], dtype=np.float64)
+    chips = sf.tx_bits_to_chips(float_bits)
+    assert chips.dtype == np.int8
+    assert len(chips) == 5 * sf.CHIPS_PER_SYMBOL
+
+
+def test_rx_chips_to_bits_partial_recovery():
+    rng = np.random.default_rng(seed=100)
+    bits = rng.integers(0, 2, size=100, dtype=np.uint8)
+    chips = sf.tx_bits_to_chips(bits)
+    out = sf.rx_chips_to_bits(chips, 100)
+    assert out.shape == (100,)
+    assert out.dtype == np.uint8
+    assert np.array_equal(out, bits)
+
+
 # ── Noise robustness ────────────────────────────────────────────────────────
 
 def _run_noisy_loopback(data: bytes, chip_snr_db: float,

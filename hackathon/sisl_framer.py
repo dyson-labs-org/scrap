@@ -54,21 +54,18 @@ CHIPS_PER_SYMBOL = 1023
 
 # ── Spreading code helpers ──────────────────────────────────────────────────
 
-_public_code_cache: Optional[np.ndarray] = None
+
+def code_from_seed(seed: bytes, length: int = CHIPS_PER_SYMBOL) -> np.ndarray:
+    return np.array(sd.generate_dsss_code(seed, length=length), dtype=np.int8)
+
+
+DEFAULT_PUBLIC_CODE: np.ndarray = code_from_seed(sd.hail_code_seed())
+DEFAULT_PUBLIC_CODE.flags.writeable = False
 
 
 def public_hail_code() -> np.ndarray:
     """Return the public SISL hailing spreading code as int8 ±1 array."""
-    global _public_code_cache
-    if _public_code_cache is None:
-        seed = sd.hail_code_seed()
-        code_list = sd.generate_dsss_code(seed, length=CHIPS_PER_SYMBOL)
-        _public_code_cache = np.array(code_list, dtype=np.int8)
-    return _public_code_cache
-
-
-def code_from_seed(seed: bytes, length: int = CHIPS_PER_SYMBOL) -> np.ndarray:
-    return np.array(sd.generate_dsss_code(seed, length=length), dtype=np.int8)
+    return DEFAULT_PUBLIC_CODE
 
 
 # ── Byte/bit packing ────────────────────────────────────────────────────────
@@ -95,13 +92,40 @@ def tx_bytes_to_chips(data: bytes,
     full spreading code, so one byte produces 8 * CHIPS_PER_SYMBOL chips.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     if len(code) != CHIPS_PER_SYMBOL:
         raise ValueError(f"code length {len(code)} != {CHIPS_PER_SYMBOL}")
 
     bits = bytes_to_bits(data)
     symbols = (1 - 2 * bits.astype(np.int8))          # 0→+1, 1→-1
     # Broadcast multiply: (n_symbols, 1) * (1, chips) → (n_symbols, chips)
+    chips = (symbols[:, None] * code[None, :]).reshape(-1)
+    return chips.astype(np.int8)
+
+
+def tx_bits_to_chips(bits: np.ndarray,
+                     code: Optional[np.ndarray] = None) -> np.ndarray:
+    """Spread an arbitrary-length bit array into an int8 bipolar chip stream.
+
+    Bits must be a uint8 array of 0/1 values; length need NOT be a multiple
+    of 8. Required for FEC-coded payloads whose codeword length isn't
+    byte-aligned. BPSK mapping (matches tx_bytes_to_chips): bit 0 → +1,
+    bit 1 → -1. Each bit produces CHIPS_PER_SYMBOL chips.
+    """
+    if code is None:
+        code = DEFAULT_PUBLIC_CODE
+    if len(code) != CHIPS_PER_SYMBOL:
+        raise ValueError(f"code length {len(code)} != {CHIPS_PER_SYMBOL}")
+
+    bits = np.asarray(bits)
+    if bits.size == 0:
+        return np.empty(0, dtype=np.int8)
+    if bits.dtype != np.uint8:
+        bits = bits.astype(np.uint8)
+    if not np.all((bits == 0) | (bits == 1)):
+        raise ValueError("bits array must contain only 0/1 values")
+
+    symbols = (1 - 2 * bits.astype(np.int8))
     chips = (symbols[:, None] * code[None, :]).reshape(-1)
     return chips.astype(np.int8)
 
@@ -116,7 +140,7 @@ def rx_chips_to_bytes(chips: np.ndarray, n_bytes: int,
     starting at chip 0 of the first symbol. Accepts float or int input.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
 
     n_bits = n_bytes * 8
     needed = n_bits * CHIPS_PER_SYMBOL
@@ -134,6 +158,32 @@ def rx_chips_to_bytes(chips: np.ndarray, n_bytes: int,
     return bits_to_bytes(bits)
 
 
+def rx_chips_to_bits(chips: np.ndarray, n_bits: int,
+                     code: Optional[np.ndarray] = None) -> np.ndarray:
+    """Despread a chip-aligned stream into an arbitrary-length bit array.
+
+    `chips` must contain at least `n_bits * CHIPS_PER_SYMBOL` samples
+    starting at chip 0 of the first symbol. Returns uint8 array of 0/1
+    values, length n_bits. Required for FEC-coded payloads whose decoded
+    length isn't byte-aligned.
+    """
+    if code is None:
+        code = DEFAULT_PUBLIC_CODE
+
+    if n_bits == 0:
+        return np.empty(0, dtype=np.uint8)
+
+    needed = n_bits * CHIPS_PER_SYMBOL
+    if len(chips) < needed:
+        raise ValueError(f"need {needed} chips, got {len(chips)}")
+
+    mat = np.asarray(chips[:needed], dtype=np.float32).reshape(
+        n_bits, CHIPS_PER_SYMBOL
+    )
+    corr = mat @ code.astype(np.float32)
+    return (corr < 0).astype(np.uint8)
+
+
 def rx_chip_snr_db(chips: np.ndarray, n_bytes: int,
                    code: Optional[np.ndarray] = None) -> float:
     """Estimate post-despread SNR in dB from correlator output magnitude.
@@ -141,7 +191,7 @@ def rx_chip_snr_db(chips: np.ndarray, n_bytes: int,
     Useful for sanity-checking the loopback with and without noise.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     n_bits = n_bytes * 8
     needed = n_bits * CHIPS_PER_SYMBOL
     mat = np.asarray(chips[:needed], dtype=np.float32).reshape(
@@ -169,7 +219,7 @@ def matched_filter_magnitude(chips: np.ndarray,
     Output length = len(chips) - len(code) + 1.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     chips_f = np.asarray(chips, dtype=np.float32)
     code_f = code.astype(np.float32)
     if len(chips_f) < len(code_f):
@@ -276,7 +326,7 @@ def matched_filter_complex_sample_rate(
     loses up to half the signal energy when the phase is near π/2.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     code_upsampled = np.repeat(
         code.astype(np.float32), samps_per_chip
     ).astype(np.float32)
@@ -321,7 +371,7 @@ def decode_with_freq_tracking(
         - Tracker lost lock before decoding n_bytes*8 bits
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
 
     n_bits = n_bytes * 8
     samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip
@@ -720,7 +770,7 @@ def matched_filter_signed_sample_rate(
     directly from correlator output without a second decimation pass.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     if samps_per_chip < 1:
         raise ValueError("samps_per_chip must be >= 1")
     code_upsampled = np.repeat(
@@ -766,7 +816,7 @@ def decode_with_tracking(
     a 180° carrier phase offset flips every bit.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
 
     n_bits = n_bytes * 8
     samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip
@@ -844,7 +894,7 @@ def matched_filter_magnitude_sample_rate(
     Output length = len(samples) - len(code)*samps_per_chip + 1.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     if samps_per_chip < 1:
         raise ValueError("samps_per_chip must be >= 1")
     code_upsampled = np.repeat(
@@ -876,7 +926,7 @@ def find_frame_start(chips: np.ndarray, code: Optional[np.ndarray] = None,
     edge in the stream.
     """
     if code is None:
-        code = public_hail_code()
+        code = DEFAULT_PUBLIC_CODE
     mag = matched_filter_magnitude(chips, code)
     if len(mag) == 0:
         return None
@@ -925,7 +975,7 @@ if _HAVE_GR:
                 in_sig=[np.uint8],
                 out_sig=[np.int8],
             )
-            self._code = code if code is not None else public_hail_code()
+            self._code = code if code is not None else DEFAULT_PUBLIC_CODE
 
         def general_work(self, input_items, output_items):
             in0 = input_items[0]
@@ -958,7 +1008,7 @@ if _HAVE_GR:
                 in_sig=[np.float32],
                 out_sig=[np.uint8],
             )
-            self._code = code if code is not None else public_hail_code()
+            self._code = code if code is not None else DEFAULT_PUBLIC_CODE
 
         def general_work(self, input_items, output_items):
             in0 = input_items[0]

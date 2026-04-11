@@ -174,6 +174,132 @@ def test_hail_wrong_asm_rejected():
     assert sc.decode_hail(bad, responder_static) is None
 
 
+# ── 4b. FEC-wrapped hail round-trip ────────────────────────────────────────
+
+def test_hail_fec_layout_constants():
+    """The FEC layout constants must agree with sisl_fec.coded_length."""
+    import sisl_fec
+    assert sc.HAIL_FEC_HEADER_BITS == 48
+    assert sc.HAIL_FEC_BODY_PAYLOAD_BITS == 1016
+    assert sc.HAIL_FEC_BODY_CODED_BITS == sisl_fec.coded_length(1016)
+    assert sc.HAIL_FEC_BODY_CODED_BITS == 2048
+    assert sc.HAIL_FEC_TOTAL_BITS == 48 + 2048
+    assert sc.HAIL_FEC_TOTAL_BITS == 2096
+
+
+def test_hail_fec_encode_returns_correct_shape_and_dtype():
+    import numpy as np
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(
+        caller_eph, responder_static.public_key(), _test_body()
+    )
+    assert isinstance(bits, np.ndarray)
+    assert bits.dtype == np.uint8
+    assert bits.shape == (sc.HAIL_FEC_TOTAL_BITS,)
+    # All values must be 0 or 1
+    assert int(bits.min()) >= 0 and int(bits.max()) <= 1
+    # The first 48 bits are the uncoded ASM + version + msg_type
+    header_bytes = np.packbits(bits[: sc.HAIL_FEC_HEADER_BITS]).tobytes()
+    assert header_bytes[:4] == sc.ASM
+    assert header_bytes[4] == sc.SISL_VERSION
+    assert header_bytes[5] == sc.MSG_HAIL
+
+
+def test_hail_fec_round_trip_noiseless():
+    """Encode → bits → ±10 LLRs → decode_from_llrs → DecodedHail."""
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    body = _test_body()
+    bits = sc.encode_hail_fec(
+        caller_eph, responder_static.public_key(), body
+    )
+    llrs = sc.bits_to_hard_llrs(bits, magnitude=10.0)
+    decoded = sc.decode_hail_fec_from_llrs(llrs, responder_static)
+    assert decoded is not None
+    assert decoded.body.center_freq_offset == body.center_freq_offset
+    assert decoded.body.body_nonce == body.body_nonce
+    assert decoded.body.flags == body.flags
+    assert decoded.body.mode == body.mode
+
+
+def test_hail_fec_round_trip_with_awgn():
+    """At an Es/N0 well above the FEC waterfall, the FEC-aided path
+    must reliably decode noisy hails.
+
+    Note on operating point: this test uses magnitude=4.0, σ=1.0 →
+    Es/N0 ≈ 12 dB. The reason it's not run at the genuine FEC waterfall
+    (~0 dB) is the asymmetric protection of the FEC frame: the body is
+    rate-1/2 K=9 coded and decodes cleanly down to ~0 dB Es/N0, but the
+    48-bit uncoded header has zero coding gain and a single bit flip
+    fails the cheap-reject ASM check in decode_hail_fec_from_llrs. At
+    6 dB Es/N0 the per-bit Q(√(2·Es/N0)) gives ~2.3% bit-error rate,
+    which over 32 ASM bits gives ~50% frame rejection BEFORE the
+    Viterbi even runs. In production the header is consumed by the
+    coherent pilot fit and never hard-decided from LLRs, so this
+    asymmetry doesn't matter on the live path. Here we just test that
+    the FEC body-decode integration works end-to-end given a clean
+    enough header. The Viterbi-only behavior is exercised in detail by
+    bench_fec.py."""
+    import numpy as np
+    responder_static = sc.generate_keypair()
+    body = _test_body()
+    successes = 0
+    n_trials = 5
+    for seed in range(n_trials):
+        rng = np.random.default_rng(seed=seed)
+        caller_eph = sc.Ephemeral()
+        bits = sc.encode_hail_fec(
+            caller_eph, responder_static.public_key(), body
+        )
+        clean_llrs = sc.bits_to_hard_llrs(bits, magnitude=4.0)
+        noise = rng.normal(0.0, 1.0, len(clean_llrs)).astype(np.float32)
+        noisy_llrs = clean_llrs + noise
+        decoded = sc.decode_hail_fec_from_llrs(noisy_llrs, responder_static)
+        if decoded is not None:
+            successes += 1
+            assert decoded.body.center_freq_offset == body.center_freq_offset
+    assert successes == n_trials, f"only {successes}/{n_trials} succeeded"
+
+
+def test_hail_fec_wrong_receiver_rejected():
+    target_static = sc.generate_keypair()
+    other_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(
+        caller_eph, target_static.public_key(), _test_body()
+    )
+    llrs = sc.bits_to_hard_llrs(bits)
+    assert sc.decode_hail_fec_from_llrs(llrs, target_static) is not None
+    assert sc.decode_hail_fec_from_llrs(llrs, other_static) is None
+
+
+def test_hail_fec_truncated_input_rejected():
+    import numpy as np
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(
+        caller_eph, responder_static.public_key(), _test_body()
+    )
+    truncated = sc.bits_to_hard_llrs(bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
+    assert sc.decode_hail_fec_from_llrs(truncated, responder_static) is None
+
+
+def test_hail_fec_corrupted_header_cheap_rejected():
+    """A corrupted ASM in the uncoded header must be rejected before any
+    Viterbi work happens. This is the structural cheap-reject path."""
+    import numpy as np
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    bits = sc.encode_hail_fec(
+        caller_eph, responder_static.public_key(), _test_body()
+    )
+    llrs = sc.bits_to_hard_llrs(bits)
+    # Flip the first 32 LLRs (the ASM bits) to opposite polarity.
+    llrs[:32] = -llrs[:32]
+    assert sc.decode_hail_fec_from_llrs(llrs, responder_static) is None
+
+
 # ── 5. ACK round-trip ──────────────────────────────────────────────────────
 
 def test_ack_roundtrip():
