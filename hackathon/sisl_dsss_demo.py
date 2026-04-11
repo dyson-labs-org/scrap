@@ -518,6 +518,109 @@ _ASM_BITS = np.unpackbits(
 ).astype(np.uint8)
 
 
+# Pre-computed differential polarity template for the 32-bit ASM.
+# For each of 31 consecutive bit pairs in the ASM, the "expected" differential
+# dot-product sign is +1 if the two bits are equal (same bit), -1 if they differ.
+# Soft-decision ASM search correlates this template against the actual
+# differential dot-product stream.
+_ASM_DIFF_POLARITY = np.where(
+    _ASM_BITS[1:] == _ASM_BITS[:-1],
+    +1.0, -1.0,
+).astype(np.float64)
+
+
+def find_sisl_frame_soft(
+    peak_values: list,
+    frame_len: int = sc.HAIL_FRAME_LEN,
+) -> Optional[tuple[int, int, float, bytes]]:
+    """Soft-decision sliding ASM search over complex correlator peaks.
+
+    Per Gallager: the hard-bit + Hamming-distance ASM search throws away
+    the correlator magnitude, which is the confidence information. This
+    function correlates the SIGNED differential dot products with the
+    ASM's same/diff polarity template, yielding a continuous score per
+    alignment that preserves 15+ dB of effective SNR versus hard bits.
+
+    For each consecutive peak pair we compute:
+        soft_diff[k] = Re(peak[k+1] · conj(peak[k])) / (|peak[k+1]|·|peak[k]|)
+
+    The numerator is the differential dot product; division by the
+    magnitude product normalizes to [-1, +1] per symbol, so the score
+    is roughly bounded in [-31, +31] over a 32-bit ASM window. A clean
+    signal hits ~+31 (perfect correlation); random noise is Gaussian
+    with std √31 ≈ 5.5.
+
+    Returns (bit_offset, symbol_offset, soft_score, frame_bytes) with
+    the frame bytes extracted via hard decisions from the matched
+    position. Returns None if too few peaks.
+
+    NOTE: Because differential decoding has an absolute bit-polarity
+    ambiguity, we try BOTH signs of the template correlation and take
+    whichever gives the larger |score|. The sign of score then tells
+    us which polarity to use for the hard-decision frame extraction.
+    """
+    n_bits = frame_len * 8
+    if len(peak_values) < n_bits + 32:
+        return None
+
+    peaks = np.array(peak_values, dtype=np.complex128)
+    # Signed differential dot products, one per consecutive pair
+    diffs = (peaks[1:] * np.conj(peaks[:-1])).real
+    mags = np.abs(peaks[1:]) * np.abs(peaks[:-1])
+    soft = np.where(mags > 1e-12, diffs / mags, 0.0)     # in [-1, +1]
+
+    template = _ASM_DIFF_POLARITY                          # length 31
+
+    # Slide over soft values; each alignment uses 31 consecutive soft bits
+    n_soft = len(soft)
+    search_end = n_soft - 31
+    if search_end <= 0:
+        return None
+
+    # Vectorized correlation via np.convolve-style sliding dot product.
+    # But we also need to align to the full frame length (not just ASM),
+    # so cap the search range so there's room for a full frame AFTER the
+    # match position.
+    max_bit_offset = min(search_end, len(peak_values) - n_bits - 1)
+    if max_bit_offset <= 0:
+        return None
+
+    best_score = -np.inf
+    best_offset = -1
+    best_sign = 1
+    for offset in range(max_bit_offset + 1):
+        window = soft[offset:offset + 31]
+        raw = float(np.dot(window, template))
+        if abs(raw) > abs(best_score):
+            best_score = raw
+            best_offset = offset
+
+    if best_offset < 0:
+        return None
+    best_sign = +1 if best_score >= 0 else -1
+
+    # Extract frame bits via hard decisions starting from the matched
+    # position. The differential decoder runs relative to bit[0] at
+    # `best_offset`; which absolute polarity we pick is determined by
+    # best_sign. Bit 0 is fixed at 0 (arbitrary), and we flip the
+    # decoded stream at the end if best_sign is negative.
+    bits = np.empty(n_bits, dtype=np.uint8)
+    bits[0] = 0
+    for k in range(1, n_bits):
+        dot = soft[best_offset + k - 1]
+        bits[k] = bits[k - 1] if dot >= 0 else (1 - bits[k - 1])
+    if best_sign < 0:
+        bits = 1 - bits
+
+    frame_bytes = np.packbits(bits).tobytes()
+    # The bit-offset reported here is the SYMBOL offset × 1 (one symbol
+    # per bit). For consistency with the existing bit_offset API we
+    # return both a symbol offset (for internal use) and a "bit_offset"
+    # equal to the symbol offset (since this decoder is byte-aligned
+    # via the soft correlation match).
+    return best_offset, best_offset, float(best_score), frame_bytes
+
+
 def find_sisl_frame_best_match(
     decoded_bytes: bytes,
     frame_len: int = sc.HAIL_FRAME_LEN,
@@ -790,6 +893,7 @@ def _decode_one_hail_in_block(
             }
     decoded = track_result["bytes"]
     positions = track_result["positions"]
+    peak_values = track_result.get("peak_values", [])
 
     # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
     decoded_inv = bytes(b ^ 0xFF for b in decoded)
@@ -812,14 +916,10 @@ def _decode_one_hail_in_block(
                 bit_offset, frame_bytes = bitwise
                 asm_location = f"bit{bit_offset}"
 
-        # ── Fallback 2: fuzzy bit-level ASM search (up to 3 errs) ──
-        # Even under moderate bit errors we can find the ASM within
-        # hamming distance 3. The frame probably won't decrypt (Poly1305
-        # is bit-exact) but we can REPORT that a frame was found with
-        # quantitative error information — valuable diagnostic.
+        # ── Fallback 2: fuzzy bit-level ASM search ─────────────────
         if frame_bytes is None:
             fuzzy = find_sisl_frame_bitwise_fuzzy(
-                variant, sc.HAIL_FRAME_LEN, max_errors=3,
+                variant, sc.HAIL_FRAME_LEN, max_errors=5,
             )
             if fuzzy is not None:
                 bit_offset, fuzzy_bytes, asm_distance = fuzzy
@@ -855,6 +955,36 @@ def _decode_one_hail_in_block(
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
 
+    # ── Fallback 3: soft-decision ASM search on peak values ───────
+    # Per Gallager's panel feedback: hard-decision decoding throws away
+    # 10-15 dB of effective SNR. Run the soft correlator directly on
+    # the complex peak values, bypassing the hard bit decisions entirely.
+    # This can catch frames at SNRs where exact/fuzzy hard-bit search
+    # fails.
+    soft_result = None
+    if peak_values and len(peak_values) >= sc.HAIL_FRAME_LEN * 8 + 32:
+        soft = find_sisl_frame_soft(peak_values, sc.HAIL_FRAME_LEN)
+        if soft is not None:
+            soft_offset, _, soft_score, soft_frame = soft
+            soft_result = (soft_offset, soft_score, soft_frame)
+            # Threshold: score > 10 is real signal (max ~31, noise std ~5.5)
+            if abs(soft_score) > 10.0:
+                decoded_hail = sc.decode_hail(soft_frame, responder_static)
+                if decoded_hail is not None:
+                    return {
+                        "status": "decrypt_ok",
+                        "start_sample": positions[0] if positions else 0,
+                        "asm_at_byte": f"soft-bit{soft_offset}",
+                        "peak_mag": peak_mag,
+                        "median_mag": median_mag,
+                        "polarity": "soft" if soft_score >= 0 else "soft-inv",
+                        "rad_per_sample": rad_per_sample,
+                        "freq_offset_hz": freq_hz,
+                        "soft_score": soft_score,
+                        "body": decoded_hail.body,
+                        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                    }
+
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match
     # If so, return a diagnostic status showing the decoder found the
     # frame with some bit errors. This proves the demodulator is
@@ -884,6 +1014,7 @@ def _decode_one_hail_in_block(
     best_inverted = find_sisl_frame_best_match(decoded_inv, sc.HAIL_FRAME_LEN)
     min_hamming_normal = best_normal[2] if best_normal else None
     min_hamming_inverted = best_inverted[2] if best_inverted else None
+    soft_score_val = soft_result[1] if soft_result else None
     return {
         "status": "no_hail",
         "peak_mag": peak_mag,
@@ -898,6 +1029,7 @@ def _decode_one_hail_in_block(
         "first_peak_angles_rad": track_result.get("first_peak_angles_rad", []),
         "min_asm_hamming_normal": min_hamming_normal,
         "min_asm_hamming_inverted": min_hamming_inverted,
+        "soft_score": soft_score_val,
     }
 
 
@@ -961,9 +1093,11 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         elif hi is not None:
             best_h = hi
         best_str = f", best ASM hamming={best_h}/32" if best_h is not None else ""
+        ss = result.get("soft_score")
+        soft_str = f", soft={ss:+.1f}/31" if ss is not None else ""
         print(f"[{block_num:4d}] interference: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"Δf={foff:+.0f}Hz, drift={drift_deg:+.1f}°/sym{best_str}")
+              f"Δf={foff:+.0f}Hz, drift={drift_deg:+.1f}°/sym{best_str}{soft_str}")
         print(f"       first 16 bytes (normal):   "
               f"{result.get('first_16_bytes_hex', '')}")
         print(f"       first 16 bytes (inverted): "

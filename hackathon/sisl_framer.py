@@ -471,6 +471,9 @@ def decode_with_freq_tracking(
         "peak_magnitude": global_peak,
         "ref_angle_rad": ref_angle,
         "drift_per_symbol_rad": drift_per_symbol,
+        # Full list of complex peak values — needed for soft-decision
+        # ASM search downstream.
+        "peak_values": peak_values,
         # Diagnostic: first few peak magnitudes/angles so callers can
         # inspect what the decoder is seeing
         "first_peak_magnitudes": [abs(c) for c in peak_values[:16]],
