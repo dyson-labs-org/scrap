@@ -438,6 +438,113 @@ def test_fit_phase_from_known_bits_too_short():
     ) is None
 
 
+# ── Tracker lock-floor regression (I3 fix) ─────────────────────────────────
+
+def _synth_tracker_samples(n_bits: int, samps_per_chip: int,
+                            attenuate_symbol: int = -1,
+                            attenuate_factor: float = 1.0,
+                            seed: int = 0) -> np.ndarray:
+    """Build a clean BPSK DSSS sample stream with optional single-symbol
+    magnitude attenuation. Used to reproduce the I3 failure mode.
+
+    The byte-level loopback path only exposes byte-granular bits, but
+    the tracker doesn't care what the bit values are — it just needs a
+    frame-length worth of peaks. We construct an all-zero payload of
+    the right byte count so the exact bit values don't matter for the
+    lock-floor test, and attenuate one symbol's chip burst to simulate
+    a transient dip.
+    """
+    n_bytes = (n_bits + 7) // 8
+    # Random bytes chosen deterministically so the test is reproducible.
+    rng = np.random.default_rng(seed)
+    payload = rng.integers(0, 256, size=n_bytes, dtype=np.uint8).tobytes()
+    chips = sf.tx_bytes_to_chips(payload).astype(np.float32)
+    samples = np.repeat(chips, samps_per_chip).astype(np.complex64)
+
+    # Optionally attenuate one symbol's worth of samples to simulate a
+    # per-symbol noise dip. This is what the old lock_floor rejects.
+    if attenuate_symbol >= 0 and attenuate_factor != 1.0:
+        sps = sf.CHIPS_PER_SYMBOL * samps_per_chip
+        start = attenuate_symbol * sps
+        end = start + sps
+        if end <= len(samples):
+            samples[start:end] *= attenuate_factor
+
+    return samples
+
+
+def test_decode_with_freq_tracking_long_frame_early_dip():
+    """I3 regression: a 2096-bit frame with a pre-bootstrap dip at
+    0.08 × nominal that the OLD lock-floor logic (0.1 * argmax peak)
+    would reject but the NEW long-frame-relaxed floor (0.05 * argmax
+    before the bootstrap re-anchor fires) accepts.
+
+    This test exercises the EXACT code path difference introduced by
+    the I3 fix. For a clean synthetic chip stream, argmax mag ≈ 2046
+    (matched filter peak for 1023 chips). Pre-fix floor = 205. We
+    attenuate symbol 3 (well before BOOTSTRAP=8) to 0.08 × 2046 = 164,
+    which is < 205 (pre-fix abort) but > 102 (post-fix long-frame
+    relaxed floor). Without the fix the tracker returns None and the
+    FEC accumulator gets no data.
+    """
+    samps_per_chip = 2
+    n_bytes = 262   # 2096 bits ≥ 1500 trips the long-frame relaxation
+    samples = _synth_tracker_samples(
+        n_bytes * 8, samps_per_chip,
+        attenuate_symbol=3, attenuate_factor=0.08,
+        seed=271,
+    )
+    result = sf.decode_with_freq_tracking(
+        samples, samps_per_chip=samps_per_chip,
+        n_bytes=n_bytes,
+    )
+    assert result is not None, (
+        "tracker aborted on long frame with pre-bootstrap dip at "
+        "0.08 × nominal; I3 lock-floor fix regressed"
+    )
+    assert len(result["peak_values"]) == n_bytes * 8
+
+
+def test_decode_with_freq_tracking_post_bootstrap_dip():
+    """I3 complementary case: a post-bootstrap dip at 0.15 × nominal.
+
+    After BOOTSTRAP=8 peaks the lock_floor is re-anchored on the
+    median, which for a clean signal is effectively unchanged from
+    the argmax. 0.15 × > 0.1 × so this survives both the old and new
+    floors — used as a sanity check that post-bootstrap dips at
+    modest depth still track through cleanly."""
+    samps_per_chip = 2
+    n_bytes = 262
+    samples = _synth_tracker_samples(
+        n_bytes * 8, samps_per_chip,
+        attenuate_symbol=20, attenuate_factor=0.15,
+        seed=271,
+    )
+    result = sf.decode_with_freq_tracking(
+        samples, samps_per_chip=samps_per_chip,
+        n_bytes=n_bytes,
+    )
+    assert result is not None
+    assert len(result["peak_values"]) == n_bytes * 8
+
+
+def test_decode_with_freq_tracking_short_frame_unchanged():
+    """Legacy 1064-bit path must still work identically (sanity that
+    the I3 fix didn't break the short-codeword baseline)."""
+    samps_per_chip = 2
+    samples = _synth_tracker_samples(
+        1064, samps_per_chip,
+        attenuate_symbol=-1, attenuate_factor=1.0,
+        seed=42,
+    )
+    result = sf.decode_with_freq_tracking(
+        samples, samps_per_chip=samps_per_chip,
+        n_bytes=133,   # 1064 bits
+    )
+    assert result is not None
+    assert len(result["peak_values"]) == 1064
+
+
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 def _run_all():

@@ -409,8 +409,20 @@ def decode_with_freq_tracking(
     hi = min(len(mag), first_candidate + search_half_samples + 1)
     local_idx = int(np.argmax(mag[lo:hi]))
     pos = lo + local_idx
+    # Bootstrap a conservative initial lock floor from the single
+    # argmax peak. This is biased HIGH (argmax always wins the tail
+    # of the peak distribution), so for long codewords we soften it
+    # further; after BOOTSTRAP successful peaks we re-anchor on the
+    # running median of the first block of peaks, which is outlier-
+    # resistant and reflects the actual per-symbol energy.
     initial_peak = float(mag[pos])
     lock_floor = lock_threshold_frac * initial_peak
+    # Long-codeword relaxation: at 2096-symbol FEC frames, a single
+    # transient noise dip could otherwise abort the tracker before
+    # the bootstrap re-anchor takes effect. Halve the initial floor
+    # when we know the caller needs a long track.
+    if n_bits >= 1500:
+        lock_floor *= 0.5
 
     ref_angle = float(np.angle(corr_c[pos]))
 
@@ -460,6 +472,7 @@ def decode_with_freq_tracking(
         c_refined = (1 - t) * corr_c[i0] + t * corr_c[i1]
         return float(refined), complex(c_refined)
 
+    BOOTSTRAP = 8
     for bit_idx in range(n_bits):
         lo = max(0, int(round(pos)) - search_half_samples)
         hi = min(len(mag), int(round(pos)) + search_half_samples + 1)
@@ -475,6 +488,21 @@ def decode_with_freq_tracking(
         peak_values.append(refined_c)
         positions.append(int(round(refined_pos)))
         pos = refined_pos + samples_per_symbol
+
+        # After BOOTSTRAP successful peaks, re-anchor the lock floor on
+        # the median of the first BOOTSTRAP peak magnitudes. The median
+        # is outlier-resistant and gives a much better estimate of the
+        # typical per-symbol energy than the argmax-biased initial_peak.
+        # This is the key fix for the long-codeword low-SNR tracker
+        # failure: otherwise a single transient dip past bit_idx = 7
+        # aborts the decode before FEC / accumulator can use the LLRs.
+        if bit_idx == BOOTSTRAP - 1:
+            bootstrap_mags = np.abs(
+                np.asarray(peak_values, dtype=np.complex128)
+            )
+            lock_floor = (
+                lock_threshold_frac * float(np.median(bootstrap_mags))
+            )
 
     # ── 5. Carrier phase drift estimation + differential decoding ─────
     # With 2 samples/chip and bench-grade SDRs, residual frequency offset
