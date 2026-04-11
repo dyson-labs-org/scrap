@@ -515,13 +515,15 @@ _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 # ── Live RX: stream samples and decode hails in real time ─────────────────
 
 # Detection threshold for "is there a signal here at all?" — matched-filter
-# peak magnitude must exceed SIGNAL_FLOOR_RATIO × median. For a clean TX
-# under attenuators, the signal peak is ~CHIPS_PER_SYMBOL (≈1023); noise
-# floor is ~30. A ratio of 20 rejects Gaussian noise (5σ peak / 0.67σ
-# median ≈ 7.5) and also handles structured RF interference like WiFi
-# bursts at 2437 MHz, which can correlate with random codes above the
-# pure-Gaussian extreme.
-_SIGNAL_FLOOR_RATIO = 20.0
+# peak magnitude must exceed SIGNAL_FLOOR_RATIO × median. For a clean,
+# coherent signal the ratio can be 50–200; for a weak but legitimate
+# bench capture it's typically 10–30. Pure Gaussian noise gives peak
+# /median ≈ 7–8 at block lengths of millions of samples.
+#
+# Default is 10: permissive enough to process borderline bench
+# captures, strict enough to avoid wasting decode attempts on pure
+# noise. Override with the --signal-threshold CLI flag.
+_SIGNAL_FLOOR_RATIO = 10.0
 
 
 def _decode_one_hail_in_block(
@@ -529,6 +531,7 @@ def _decode_one_hail_in_block(
     responder_static: ec.EllipticCurvePrivateKey,
     samps_per_chip: int = SAMPS_PER_CHIP,
     samp_hz: float = SAMP_RATE_HZ,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
@@ -581,7 +584,7 @@ def _decode_one_hail_in_block(
     median_mag = float(np.median(mag))
 
     # ── 4. Signal presence test (post-correction) ─────────────────────
-    if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
+    if median_mag == 0.0 or peak_mag < signal_threshold * median_mag:
         return {
             "status": "no_signal",
             "peak_mag": peak_mag,
@@ -730,6 +733,7 @@ def live_rx_decode(
     amp_on: bool = False,
     center_hz: float = CENTER_FREQ_HZ,
     device_name: str = "hackrf",
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -866,6 +870,7 @@ def live_rx_decode(
                 buf[:filled], responder_static,
                 samps_per_chip=samps_per_chip,
                 samp_hz=samp_hz,
+                signal_threshold=signal_threshold,
             )
             _print_live_event(stats["blocks_processed"], result)
 
@@ -1036,6 +1041,14 @@ def main() -> int:
                              f"(default {CENTER_FREQ_HZ/1e6:.0f}). "
                              f"See list at bottom of --help for quieter "
                              f"alternatives.")
+    parser.add_argument("--signal-threshold", type=float,
+                        default=_SIGNAL_FLOOR_RATIO,
+                        help=f"rx: peak/median ratio that counts as signal "
+                             f"present (default {_SIGNAL_FLOOR_RATIO}). "
+                             f"Lower to ~6-8 to force decode attempts on "
+                             f"weak signals; raise to ~20 to avoid wasted "
+                             f"attempts on interference. Pure Gaussian "
+                             f"noise sits around 7-8.")
     parser.add_argument("--device", choices=list(DEVICES.keys()),
                         default="hackrf",
                         help="rx: which SDR to use. 'hackrf' (default) "
@@ -1145,6 +1158,7 @@ def main() -> int:
             amp_on=args.rx_amp,
             center_hz=args.freq * 1e6,
             device_name=args.device,
+            signal_threshold=args.signal_threshold,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
