@@ -103,8 +103,17 @@ def test_elligator_stub_rejects_wrong_length():
 
 # ── 4. Hail round-trip ─────────────────────────────────────────────────────
 
-def _test_body() -> sc.HailBody:
+# A valid fixed secp256k1 pubkey for tests that don't care about identity
+_FIXED_TEST_CALLER_STATIC = sc.generate_keypair()
+_FIXED_TEST_CALLER_STATIC_PUB = sc.pubkey_to_compressed(
+    _FIXED_TEST_CALLER_STATIC.public_key()
+)
+
+
+def _test_body(caller_static_pub: bytes = _FIXED_TEST_CALLER_STATIC_PUB
+               ) -> sc.HailBody:
     return sc.HailBody(
+        caller_static_pub=caller_static_pub,
         center_freq_offset=100,
         bandwidth_code=0x03,
         mode=0x01,
@@ -169,33 +178,36 @@ def test_hail_wrong_asm_rejected():
 
 def test_ack_roundtrip():
     responder_static = sc.generate_keypair()
+    caller_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
-
-    # Caller keeps a reference to its ephemeral priv before encode consumes it
     caller_eph_priv_ref = caller_eph._priv   # peek for test purposes
 
-    body = _test_body()
+    body = _test_body(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
+    )
     hail_frame = sc.encode_hail(
         caller_eph, responder_static.public_key(), body
     )
     decoded_hail = sc.decode_hail(hail_frame, responder_static)
     assert decoded_hail is not None
+    # Responder recovered the caller's static pubkey from the body
+    assert (sc.pubkey_to_compressed(decoded_hail.caller_static_pub)
+            == sc.pubkey_to_compressed(caller_static.public_key()))
 
-    # Responder builds an ACK
+    # Responder builds an ACK using full X3DH
     responder_eph = sc.Ephemeral()
     ack_frame = sc.encode_ack(
-        responder_static_priv=responder_static,
         responder_eph=responder_eph,
-        caller_eph_pub=decoded_hail.caller_eph_pub,
         decoded_hail=decoded_hail,
         status=1,
     )
     assert len(ack_frame) == sc.ACK_FRAME_LEN
 
-    # Caller side: need DH1 at hail-time
+    # Caller side: full X3DH needs caller_static_priv + caller_eph_priv + dh1
     dh1_caller = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
     decoded_ack = sc.decode_ack(
         frame=ack_frame,
+        caller_static_priv=caller_static,
         caller_eph_priv=caller_eph_priv_ref,
         dh1=dh1_caller,
         expected_nonce_echo=body.body_nonce,
@@ -205,11 +217,17 @@ def test_ack_roundtrip():
     assert decoded_ack.body.nonce_echo == body.body_nonce
 
 
-def test_ack_wrong_nonce_echo_rejected():
+def test_ack_wrong_caller_static_priv_rejected():
+    """Mutual auth: wrong caller_static_priv cannot decrypt the ACK."""
     responder_static = sc.generate_keypair()
+    caller_static = sc.generate_keypair()
+    wrong_caller_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     caller_eph_priv_ref = caller_eph._priv
-    body = _test_body()
+
+    body = _test_body(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
+    )
     hail_frame = sc.encode_hail(
         caller_eph, responder_static.public_key(), body
     )
@@ -217,17 +235,46 @@ def test_ack_wrong_nonce_echo_rejected():
 
     responder_eph = sc.Ephemeral()
     ack_frame = sc.encode_ack(
-        responder_static_priv=responder_static,
         responder_eph=responder_eph,
-        caller_eph_pub=decoded_hail.caller_eph_pub,
         decoded_hail=decoded_hail,
         status=1,
     )
 
     dh1 = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
-    # wrong expected nonce echo → reject
     result = sc.decode_ack(
         frame=ack_frame,
+        caller_static_priv=wrong_caller_static,
+        caller_eph_priv=caller_eph_priv_ref,
+        dh1=dh1,
+        expected_nonce_echo=body.body_nonce,
+    )
+    assert result is None
+
+
+def test_ack_wrong_nonce_echo_rejected():
+    responder_static = sc.generate_keypair()
+    caller_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    caller_eph_priv_ref = caller_eph._priv
+    body = _test_body(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
+    )
+    hail_frame = sc.encode_hail(
+        caller_eph, responder_static.public_key(), body
+    )
+    decoded_hail = sc.decode_hail(hail_frame, responder_static)
+
+    responder_eph = sc.Ephemeral()
+    ack_frame = sc.encode_ack(
+        responder_eph=responder_eph,
+        decoded_hail=decoded_hail,
+        status=1,
+    )
+
+    dh1 = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
+    result = sc.decode_ack(
+        frame=ack_frame,
+        caller_static_priv=caller_static,
         caller_eph_priv=caller_eph_priv_ref,
         dh1=dh1,
         expected_nonce_echo=b"\xff" * 8,

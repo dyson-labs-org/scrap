@@ -34,12 +34,18 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# scipy is a HARD requirement — the matched-filter correlator must be
+# FFT-based for real-time DSP. A numpy np.convolve fallback on multi-
+# million-sample streams takes seconds per block and silently causes
+# HackRF overflow in the live-RX path. Fail loudly at import.
 try:
     from scipy.signal import fftconvolve as _fftconvolve
-    _HAVE_SCIPY = True
-except ImportError:
-    _fftconvolve = None
-    _HAVE_SCIPY = False
+except ImportError as e:
+    raise ImportError(
+        "sisl_framer requires scipy for FFT-based DSP. "
+        "Install with: pip install scipy  "
+        "(or on Arch: sudo pacman -S python-scipy)"
+    ) from e
 
 import sisl_dsss as sd
 
@@ -155,9 +161,12 @@ def matched_filter_magnitude(chips: np.ndarray,
                               code: Optional[np.ndarray] = None) -> np.ndarray:
     """Return |correlation| of `chips` against one period of the spreading code.
 
-    Output length = len(chips) - len(code) + 1. Uses scipy FFT convolution
-    when available, falls back to numpy. This is the core primitive for
-    acquisition.
+    Chip-rate matched filter. `chips` is expected to already be decimated
+    to one sample per chip, chip-aligned at the start. For sample-rate
+    input (unknown sub-chip phase), use `matched_filter_magnitude_sample_rate`
+    instead — it is phase-agnostic and runs in a single pass.
+
+    Output length = len(chips) - len(code) + 1.
     """
     if code is None:
         code = public_hail_code()
@@ -165,12 +174,42 @@ def matched_filter_magnitude(chips: np.ndarray,
     code_f = code.astype(np.float32)
     if len(chips_f) < len(code_f):
         return np.zeros(0, dtype=np.float32)
-    # Correlation = convolution with time-reversed kernel.
     kernel = code_f[::-1]
-    if _HAVE_SCIPY:
-        corr = _fftconvolve(chips_f, kernel, mode="valid")
-    else:
-        corr = np.convolve(chips_f, kernel, mode="valid")
+    corr = _fftconvolve(chips_f, kernel, mode="valid")
+    return np.abs(corr.astype(np.float32))
+
+
+def matched_filter_magnitude_sample_rate(
+    samples: np.ndarray,
+    samps_per_chip: int,
+    code: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Sample-rate matched filter. Phase-agnostic acquisition in one pass.
+
+    Correlates `samples` (complex64 baseband) against the spreading code
+    upsampled by `samps_per_chip` via zero-order hold. A peak at output
+    index k means the first chip of a symbol starts at sample k. No
+    sub-chip phase search is required — the kernel's ZOH upsampling
+    absorbs any integer-sample phase offset of the TX chip grid relative
+    to the RX sample grid.
+
+    Only the real (I) component of `samples` is used — the demo TX is
+    BPSK with zero Q. A full-complex version is a trivial extension.
+
+    Output length = len(samples) - len(code)*samps_per_chip + 1.
+    """
+    if code is None:
+        code = public_hail_code()
+    if samps_per_chip < 1:
+        raise ValueError("samps_per_chip must be >= 1")
+    code_upsampled = np.repeat(
+        code.astype(np.float32), samps_per_chip
+    ).astype(np.float32)
+    i = np.asarray(samples, dtype=np.complex64).real.astype(np.float32)
+    if len(i) < len(code_upsampled):
+        return np.zeros(0, dtype=np.float32)
+    kernel = code_upsampled[::-1]
+    corr = _fftconvolve(i, kernel, mode="valid")
     return np.abs(corr.astype(np.float32))
 
 

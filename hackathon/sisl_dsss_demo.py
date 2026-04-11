@@ -90,12 +90,19 @@ HACKRF_RX_LNA_DB = 16                   # conservative
 
 _DEMO_SEED_PREFIX = b"SISL-PHASE1-DEMO-KEY-v1:"
 
+# secp256k1 group order — SEC 2 / BIP-340. Scalars for a valid private key
+# must lie in [1, n-1].
+_SECP256K1_N = (
+    0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE_BAAEDCE6_AF48A03B_BFD25E8C_D0364141
+)
+
 
 def _demo_key_from_label(label: str) -> ec.EllipticCurvePrivateKey:
     seed = hashlib.sha256(_DEMO_SEED_PREFIX + label.encode()).digest()
-    scalar = int.from_bytes(seed, "big")
-    if scalar == 0:
-        scalar = 1
+    # Reduce into [1, n-1]. The bias from modular reduction on a uniformly
+    # random 256-bit integer is ~2^-128 and cryptographically negligible;
+    # we add 1 to exclude the zero scalar.
+    scalar = (int.from_bytes(seed, "big") % (_SECP256K1_N - 1)) + 1
     return ec.derive_private_key(scalar, ec.SECP256K1())
 
 
@@ -123,13 +130,17 @@ def demo_other_key() -> ec.EllipticCurvePrivateKey:
 def build_demo_hail() -> bytes:
     """Produce a real SISL v3 hail frame targeting the demo responder.
 
-    Returns the 100-byte on-wire frame. Body fields are a fixed demo set
-    except `body_nonce` which is fresh per call (replay protection). The
-    caller's ephemeral key is generated inside and consumed by encode_hail.
+    Returns the 133-byte on-wire frame. The encrypted body carries
+    caller_static_pub (the demo caller's compressed pubkey) so the
+    responder can compute DH2 for full X3DH at ACK time. body_nonce is
+    fresh per call (replay protection); caller ephemeral is fresh per
+    call and consumed by encode_hail.
     """
+    caller_static = demo_caller_key()
     responder_static = demo_responder_key()
     caller_eph = sc.Ephemeral()
     body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
         center_freq_offset=100,   # +100 MHz reference offset
         bandwidth_code=0x03,      # 5 MHz
         mode=0x01,                # DSSS
@@ -362,108 +373,110 @@ def _decode_one_hail_in_block(
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
-    Performs a cheap no-signal check on phase 0 first; if that fails,
-    returns immediately (noise blocks are the common case when no TX is
-    running, and we don't want to spend the full 8-phase search on them).
-    On a positive detection, iterates sub-chip phases 0..samps_per_chip-1
-    and returns the first phase that yields a parseable SISL hail frame.
+    Uses a SAMPLE-RATE matched filter (one FFT convolution over the whole
+    block against the spreading code upsampled to samps_per_chip samples
+    per chip). This is phase-agnostic: the sub-chip offset between the TX
+    chip grid and the RX sample grid is absorbed by the kernel's ZOH
+    upsampling. No 8-phase search needed.
+
+    Algorithm:
+      1. Sample-rate matched filter → magnitude at each sample index
+      2. Peak/median ratio test — bail if below _SIGNAL_FLOOR_RATIO
+      3. Locate first peak within 10% of the global max
+      4. Extract one symbol's chips from that sample offset forward
+         (mean-of-window decimation, now chip-grid-aligned by construction)
+      5. rx_chips_to_bytes → search for SISL ASM → decode_hail
 
     Returns a status dict. Statuses:
-      short_block     — fewer than one code period of samples
-      no_signal       — phase-0 matched filter peak / median below threshold
-      no_hail         — signal present but no SISL ASM in any decoded phase
-      decrypt_fail    — hail found but Poly1305 tag mismatch (wrong key)
-      decrypt_ok      — hail decoded and decrypted under responder_static
+      short_block   — fewer than one code-period of samples
+      no_signal     — matched filter peak/median below threshold
+      no_hail       — signal present but no SISL ASM in decoded bytes
+      decrypt_fail  — hail frame found but Poly1305 tag mismatch
+      decrypt_ok    — hail decoded and decrypted under responder_static
     """
-    chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
-
-    def _decimate_at_phase(phase: int) -> Optional[np.ndarray]:
-        trimmed = samples[phase:]
-        n_full = (len(trimmed) // samps_per_chip) * samps_per_chip
-        if n_full < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
-            return None
-        i = trimmed[:n_full].real.astype(np.float32)
-        return i.reshape(-1, samps_per_chip).mean(axis=1)
-
-    # ── Fast-path no-signal check on phase 0 only ─────────────────────────
-    chips0 = _decimate_at_phase(0)
-    if chips0 is None:
+    if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
         return {"status": "short_block"}
-    mag0 = sf.matched_filter_magnitude(chips0)
-    if len(mag0) == 0:
+
+    # ── 1. Sample-rate matched filter (single pass) ───────────────────────
+    mag = sf.matched_filter_magnitude_sample_rate(samples, samps_per_chip)
+    if len(mag) == 0:
         return {"status": "short_block"}
-    peak0 = float(mag0.max())
-    median0 = float(np.median(mag0))
-    if median0 == 0.0 or peak0 < _SIGNAL_FLOOR_RATIO * median0:
+
+    peak_mag = float(mag.max())
+    median_mag = float(np.median(mag))
+
+    # ── 2. No-signal test ────────────────────────────────────────────────
+    if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
         return {
             "status": "no_signal",
-            "peak_mag": peak0,
-            "median_mag": median0,
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
         }
 
-    # ── Signal present — full 8-phase search for a SISL frame ─────────────
-    for phase in range(samps_per_chip):
-        if phase == 0:
-            chips = chips0
-            peak_mag = peak0
-            median_mag = median0
-        else:
-            chips = _decimate_at_phase(phase)
-            if chips is None:
-                continue
-            mag = sf.matched_filter_magnitude(chips)
-            if len(mag) == 0:
-                continue
-            peak_mag = float(mag.max())
-            median_mag = float(np.median(mag))
-            if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
-                continue
+    # ── 3. Locate first symbol-boundary sample ───────────────────────────
+    # Use the same "first within 10% of max" approach as find_frame_start
+    # to handle float32 ULP rounding across adjacent symbol peaks.
+    near_peak = mag >= 0.9 * peak_mag
+    start_sample = int(np.argmax(near_peak))
 
-        offset = sf.find_frame_start(chips)
-        if offset is None:
-            continue
-
-        target_bytes = 2 * sc.HAIL_FRAME_LEN
-        avail_chips = len(chips) - offset
-        n_bytes = min(target_bytes, avail_chips // chips_per_byte)
-        if n_bytes < sc.HAIL_FRAME_LEN:
-            continue
-        needed = n_bytes * chips_per_byte
-        decoded = sf.rx_chips_to_bytes(
-            chips[offset:offset + needed], n_bytes
-        )
-
-        info = identify_sisl_frame(decoded)
-        if info is None or info["frame_type"] != "hail":
-            continue
-        if info["frame_bytes"] is None:
-            continue
-
-        decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
-        if decoded_hail is None:
-            return {
-                "status": "decrypt_fail",
-                "phase": phase,
-                "offset": offset,
-                "asm_at_byte": info["asm_offset"],
-                "peak_mag": peak_mag,
-            }
+    # ── 4. Chip-aligned decimation from start_sample ──────────────────────
+    tail = samples[start_sample:]
+    n_full = (len(tail) // samps_per_chip) * samps_per_chip
+    if n_full < sc.HAIL_FRAME_LEN * 8 * sf.CHIPS_PER_SYMBOL:
         return {
-            "status": "decrypt_ok",
-            "phase": phase,
-            "offset": offset,
+            "status": "no_hail",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "note": "too few chips after lock for a full hail",
+        }
+    i = tail[:n_full].real.astype(np.float32)
+    chips = i.reshape(-1, samps_per_chip).mean(axis=1)
+
+    # ── 5. Decode bytes, find ASM, trial-decrypt ─────────────────────────
+    chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
+    target_bytes = 2 * sc.HAIL_FRAME_LEN
+    n_bytes = min(target_bytes, len(chips) // chips_per_byte)
+    if n_bytes < sc.HAIL_FRAME_LEN:
+        return {
+            "status": "no_hail",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+        }
+    needed = n_bytes * chips_per_byte
+    decoded = sf.rx_chips_to_bytes(chips[:needed], n_bytes)
+
+    info = identify_sisl_frame(decoded)
+    if info is None or info["frame_type"] != "hail":
+        return {
+            "status": "no_hail",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "start_sample": start_sample,
+        }
+    if info["frame_bytes"] is None:
+        return {
+            "status": "no_hail",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "start_sample": start_sample,
+            "note": "ASM near end of decoded block, frame truncated",
+        }
+
+    decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
+    if decoded_hail is None:
+        return {
+            "status": "decrypt_fail",
+            "start_sample": start_sample,
             "asm_at_byte": info["asm_offset"],
             "peak_mag": peak_mag,
-            "body": decoded_hail.body,
-            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
-
-    # Signal was present but no phase yielded a SISL hail frame — this is
-    # almost certainly non-SISL RF interference (WiFi burst, etc.).
     return {
-        "status": "no_hail",
-        "peak_mag": peak0,
-        "median_mag": median0,
+        "status": "decrypt_ok",
+        "start_sample": start_sample,
+        "asm_at_byte": info["asm_offset"],
+        "peak_mag": peak_mag,
+        "body": decoded_hail.body,
+        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
     }
 
 
@@ -476,13 +489,15 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
     s = result["status"]
     if s == "decrypt_ok":
         b = result["body"]
-        print(f"[{block_num:4d}] DECRYPTED  phase={result['phase']}  "
-              f"offset={result['offset']}  asm@byte{result['asm_at_byte']}  "
-              f"peak={result['peak_mag']:.0f}  "
+        print(f"[{block_num:4d}] DECRYPTED  "
+              f"sample={result['start_sample']}  "
+              f"asm@byte{result['asm_at_byte']}  "
+              f"peak={result['peak_mag']:.3g}  "
               f"nonce={b.body_nonce.hex()}  "
               f"freq=+{b.center_freq_offset}MHz  mode=0x{b.mode:02x}")
     elif s == "decrypt_fail":
-        print(f"[{block_num:4d}] FRAME FOUND  phase={result['phase']}  "
+        print(f"[{block_num:4d}] FRAME FOUND  "
+              f"sample={result.get('start_sample', 0)}  "
               f"asm@byte{result['asm_at_byte']}  — DECRYPT FAILED "
               f"(not addressed to this key)")
     elif quiet:
@@ -553,10 +568,10 @@ def live_rx_decode(
     device = SoapySDR.Device("driver=hackrf")
     device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
     device.setFrequency(SOAPY_SDR_RX, 0, CENTER_FREQ_HZ)
-    try:
-        device.setGain(SOAPY_SDR_RX, 0, "AMP", amp_on)
-    except Exception:
-        pass   # some SoapyHackRF builds expose AMP as float or not at all
+    # SoapyHackRF exposes AMP as a two-state float gain: 0.0 dB (off) or
+    # 14.0 dB (on). Passing a bool silently coerces True→1.0 which is not
+    # the same as 14.0 dB. Always use explicit dB values.
+    device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
     device.setGain(SOAPY_SDR_RX, 0, "LNA", lna_db)
     device.setGain(SOAPY_SDR_RX, 0, "VGA", vga_db)
 
@@ -695,7 +710,7 @@ def identify_sisl_frame(data: bytes) -> Optional[dict]:
             "frame_bytes": None,
         }
     if msg_type == 0x01:                          # hail
-        end = idx + 100                           # HAIL_FRAME_LEN
+        end = idx + sc.HAIL_FRAME_LEN
         return {
             "asm_offset": idx,
             "version": version,
@@ -704,7 +719,7 @@ def identify_sisl_frame(data: bytes) -> Optional[dict]:
             "frame_bytes": data[idx:end] if end <= len(data) else None,
         }
     if msg_type == 0x02:                          # ack
-        end = idx + 95                            # ACK_FRAME_LEN
+        end = idx + sc.ACK_FRAME_LEN
         return {
             "asm_offset": idx,
             "version": version,

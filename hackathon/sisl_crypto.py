@@ -52,11 +52,16 @@ SALT_ACK_IV = hashlib.sha256(b"SISL-v3-ack-iv").digest()
 SALT_X3DH = hashlib.sha256(b"SISL-v3-X3DH").digest()
 
 # Frame layouts (bytes)
-HAIL_FRAME_LEN = 100            # 4+1+1+64+14+16
-ACK_FRAME_LEN = 95              # 4+1+1+64+9+16
-HAIL_BODY_LEN = 14
+#
+# Hail carries caller_static_pub (33 B compressed) inside the encrypted body
+# so the responder can compute DH2 = ECDH(responder_eph, caller_static) on
+# hail decrypt. This restores full X3DH mutual authentication at ACK time.
+HAIL_FRAME_LEN = 133            # 4+1+1+64+47+16
+ACK_FRAME_LEN = 95              # 4+1+1+64+9+16 (unchanged)
+HAIL_BODY_LEN = 47              # 33 (caller_static_pub) + 14 (channel params)
 ACK_BODY_LEN = 9
 ELLIGATOR_LEN = 64
+COMPRESSED_PUBKEY_LEN = 33
 TAG_LEN = 16
 
 
@@ -139,35 +144,53 @@ def derive_hail_iv(dh1: bytes) -> bytes:
 
 @dataclass
 class HailBody:
-    center_freq_offset: int       # 2 B big-endian
-    bandwidth_code: int           # 1 B
-    mode: int                     # 1 B  (1=DSSS, 2=FHSS, 3=Hybrid)
-    chip_rate_code: int           # 1 B  (0.1 Mcps units)
-    body_nonce: bytes             # 8 B  (replay window)
-    flags: int                    # 1 B
+    """Plaintext of the encrypted hail body.
+
+    Byte layout (47 bytes total):
+        0..33   caller_static_pub   33 B  (compressed secp256k1 pubkey)
+        33..35  center_freq_offset   2 B  big-endian
+        35      bandwidth_code       1 B
+        36      mode                 1 B  (1=DSSS, 2=FHSS, 3=Hybrid)
+        37      chip_rate_code       1 B  (0.1 Mcps units)
+        38..46  body_nonce           8 B  (replay window)
+        46      flags                1 B
+    """
+    caller_static_pub: bytes      # 33 B compressed
+    center_freq_offset: int
+    bandwidth_code: int
+    mode: int
+    chip_rate_code: int
+    body_nonce: bytes             # 8 B
+    flags: int
 
     def pack(self) -> bytes:
+        if len(self.caller_static_pub) != COMPRESSED_PUBKEY_LEN:
+            raise ValueError(
+                f"caller_static_pub must be {COMPRESSED_PUBKEY_LEN} bytes")
         if len(self.body_nonce) != 8:
             raise ValueError("body_nonce must be 8 bytes")
-        return (
-            struct.pack(">H", self.center_freq_offset)
+        packed = (
+            self.caller_static_pub
+            + struct.pack(">H", self.center_freq_offset)
             + bytes([self.bandwidth_code, self.mode, self.chip_rate_code])
             + self.body_nonce
             + bytes([self.flags])
         )
+        assert len(packed) == HAIL_BODY_LEN, (len(packed), HAIL_BODY_LEN)
+        return packed
 
     @classmethod
     def unpack(cls, data: bytes) -> "HailBody":
         if len(data) != HAIL_BODY_LEN:
             raise ValueError(f"hail body must be {HAIL_BODY_LEN} bytes")
-        center = struct.unpack(">H", data[0:2])[0]
         return cls(
-            center_freq_offset=center,
-            bandwidth_code=data[2],
-            mode=data[3],
-            chip_rate_code=data[4],
-            body_nonce=data[5:13],
-            flags=data[13],
+            caller_static_pub=data[0:33],
+            center_freq_offset=struct.unpack(">H", data[33:35])[0],
+            bandwidth_code=data[35],
+            mode=data[36],
+            chip_rate_code=data[37],
+            body_nonce=data[38:46],
+            flags=data[46],
         )
 
 
@@ -240,6 +263,7 @@ class DecodedHail:
     caller_eph_pub: ec.EllipticCurvePublicKey
     dh1: bytes                                     # for session key derivation
     caller_eph_pub_canonical: bytes                # 33 B transcript input
+    caller_static_pub: ec.EllipticCurvePublicKey   # decoded from body
 
 
 def decode_hail(
@@ -263,8 +287,9 @@ def decode_hail(
         return None
 
     eph_enc = frame[6:70]
-    ciphertext = frame[70:84]
-    tag = frame[84:100]
+    ciphertext_end = 70 + HAIL_BODY_LEN            # 70 + 47 = 117
+    ciphertext = frame[70:ciphertext_end]
+    tag = frame[ciphertext_end:ciphertext_end + TAG_LEN]
 
     # 2. Elligator decode (constant-time in real impl; stub is trivial)
     try:
@@ -288,11 +313,19 @@ def decode_hail(
     except Exception:
         return None                                # not for us
 
+    # Parse body; extract caller's static pubkey for full X3DH at ACK time
+    body = HailBody.unpack(plaintext)
+    try:
+        caller_static_pub = compressed_to_pubkey(body.caller_static_pub)
+    except Exception:
+        return None                                # malformed static pubkey
+
     return DecodedHail(
-        body=HailBody.unpack(plaintext),
+        body=body,
         caller_eph_pub=caller_eph_pub,
         dh1=dh1,
         caller_eph_pub_canonical=pubkey_to_compressed(caller_eph_pub),
+        caller_static_pub=caller_static_pub,
     )
 
 
@@ -326,46 +359,33 @@ def derive_ack_iv(dh1: bytes, dh2: bytes, dh3: bytes, transcript: bytes) -> byte
 
 
 def encode_ack(
-    responder_static_priv: ec.EllipticCurvePrivateKey,
     responder_eph: Ephemeral,
-    caller_eph_pub: ec.EllipticCurvePublicKey,
     decoded_hail: DecodedHail,
     status: int = 1,
 ) -> bytes:
     """Produce a 95-byte SISL v3 ACK frame bound to the given hail.
 
-    Uses the responder's own fresh ephemeral. Consumes it (same one-shot
-    rule). Echoes the hail's body_nonce for freshness.
+    Uses the responder's own fresh ephemeral (consumed, one-shot rule).
+    Echoes the hail's body_nonce for freshness. Encrypted under the full
+    X3DH session key (DH1||DH2||DH3), providing mutual authentication:
+
+        DH1 = ECDH(responder_static,  caller_ephemeral)   -- from hail decode
+        DH2 = ECDH(responder_ephemeral, caller_static)    -- needs caller_static
+        DH3 = ECDH(responder_ephemeral, caller_ephemeral)
+
+    `decoded_hail` must include caller_static_pub (decoded from the hail
+    body) and dh1 (already computed during hail decryption). The responder's
+    static private key is no longer needed at ACK time — dh1 was computed
+    from it at hail decode.
     """
     resp_eph_enc = encode_ephemeral_pub(responder_eph.pub)
     responder_eph_pub = responder_eph.pub
     resp_eph_priv = responder_eph.consume()
 
-    # SPEC NOTE (v3 departure from plan §5.3 full-X3DH claim):
-    #
-    # The plan §5.3 draft asserts the ACK is encrypted under a key derived
-    # from "full X3DH shared secret (DH1||DH2||DH3)". But DH2 is defined as
-    # ECDH(caller_static, responder_eph) and the responder computes it as
-    # ECDH(responder_eph_priv, caller_static_pub). In v3 the responder does
-    # NOT learn caller_static_pub from the hail — there is no plaintext
-    # caller ID and no caller static field in the encrypted body.
-    #
-    # Options the spec must choose between:
-    #   (A) Carry caller_static_pub (33 B) inside the encrypted hail body.
-    #       Responder learns it on successful trial decrypt, computes full
-    #       X3DH, encrypts ACK with full session key. Plan text then correct.
-    #   (B) Accept that v3 ACK uses DH1||DH3 only. Responder authenticates
-    #       to caller (DH1 needs target_static_priv, DH3 needs responder_eph).
-    #       Caller authenticates to responder post-handshake via Merkle proof
-    #       in first P2P frame. ACK alone provides responder-only auth.
-    #
-    # For this implementation we choose (B): keeps the hail frame at 108 B,
-    # defers caller auth to the P2P layer (which already has a plan to carry
-    # the Merkle proof). Follow-up issue filed to resolve in the spec draft.
+    # Full X3DH
     dh1 = decoded_hail.dh1
-    dh3 = ecdh(resp_eph_priv, caller_eph_pub)
-    dh2 = b""                                       # see note above
-    _ = responder_static_priv                       # not needed under option (B)
+    dh2 = ecdh(resp_eph_priv, decoded_hail.caller_static_pub)
+    dh3 = ecdh(resp_eph_priv, decoded_hail.caller_eph_pub)
 
     transcript = (
         decoded_hail.caller_eph_pub_canonical
@@ -397,14 +417,25 @@ class DecodedAck:
 
 def decode_ack(
     frame: bytes,
+    caller_static_priv: ec.EllipticCurvePrivateKey,
     caller_eph_priv: ec.EllipticCurvePrivateKey,
     dh1: bytes,
     expected_nonce_echo: bytes,
 ) -> Optional[DecodedAck]:
-    """Verify and decrypt an ACK frame. Caller-side.
+    """Verify and decrypt an ACK frame. Caller-side, full X3DH.
 
-    Requires the caller's hail-time DH1 (= ECDH(caller_eph, target_static))
-    and the expected nonce echo from the hail body.
+    Requires:
+        caller_static_priv — to compute DH2 = ECDH(static, responder_eph)
+        caller_eph_priv    — to compute DH3 = ECDH(caller_eph, responder_eph)
+        dh1                — precomputed at hail-transmit time
+                             (ECDH(caller_eph, target_static))
+        expected_nonce_echo — from the hail body
+
+    Successful decryption is the mutual-auth proof: the ack_key derives
+    from dh1||dh2||dh3, so verifying the Poly1305 tag proves the responder
+    possessed both `responder_static_priv` (needed to compute the matching
+    dh1) AND `responder_ephemeral_priv` (needed to compute matching
+    dh2 and dh3).
     """
     if len(frame) != ACK_FRAME_LEN:
         return None
@@ -424,10 +455,10 @@ def decode_ack(
     except Exception:
         return None
 
+    # Full X3DH — caller side
+    dh2 = ecdh(caller_static_priv, responder_eph_pub)
     dh3 = ecdh(caller_eph_priv, responder_eph_pub)
-    dh2 = b""
 
-    # Transcript: caller ephemeral (we have our pub) || responder ephemeral
     caller_eph_pub_canonical = pubkey_to_compressed(
         caller_eph_priv.public_key()
     )
@@ -454,18 +485,17 @@ def decode_ack(
 # ── Session key derivation (§4.3 v3) ────────────────────────────────────────
 
 def derive_session_keys(
-    dh1: bytes, dh3: bytes,
+    dh1: bytes, dh2: bytes, dh3: bytes,
     caller_eph_pub_canonical: bytes,
     responder_eph_pub_canonical: bytes,
 ) -> dict:
-    """Derive v3 session keys from available DH terms.
+    """Derive v3 session keys from full X3DH shared secret.
 
-    In v3, DH2 = ECDH(caller_static, responder_eph) is not available at ACK
-    time (caller identity unknown). The session-key schedule uses dh1||dh3
-    only; mutual authentication of caller completes at first P2P frame via
-    Merkle proof (§15.3 future).
+    All three DH terms are combined: dh1||dh2||dh3 = 96 bytes. Both sides
+    compute identical values independently. The transcript binds to
+    canonical-compressed decoded ephemeral pubkeys (not Elligator bytes).
     """
-    shared = dh1 + dh3                              # 64 bytes
+    shared = dh1 + dh2 + dh3                        # 96 bytes
     transcript = caller_eph_pub_canonical + responder_eph_pub_canonical
     km = hkdf_sha256(shared, SALT_X3DH, transcript, 128)
     return {

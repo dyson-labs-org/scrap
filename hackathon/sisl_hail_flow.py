@@ -56,6 +56,7 @@ def run(snr_db: float = -10.0, seed: int = 42) -> int:
     a_eph = sc.Ephemeral()
     a_eph_priv_backup = a_eph._priv                    # needed later for ACK decode
     hail_body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(sat_a_static.public_key()),
         center_freq_offset=100,                        # +100 MHz
         bandwidth_code=0x03,                           # 5 MHz
         mode=0x01,                                     # DSSS
@@ -94,9 +95,7 @@ def run(snr_db: float = -10.0, seed: int = 42) -> int:
     # ── B: encode the ACK ──────────────────────────────────────────────
     b_eph = sc.Ephemeral()
     ack_frame = sc.encode_ack(
-        responder_static_priv=sat_b_static,
         responder_eph=b_eph,
-        caller_eph_pub=decoded_hail.caller_eph_pub,
         decoded_hail=decoded_hail,
         status=1,
     )
@@ -116,10 +115,11 @@ def run(snr_db: float = -10.0, seed: int = 42) -> int:
     print("STEP 6: A despreads")
     print(f"  received {len(a_received)} bytes, matches TX: {a_received == ack_frame}")
 
-    # Caller needs its hail-time DH1 to decrypt the ACK
+    # Caller needs its hail-time DH1 and both its priv keys for full X3DH
     dh1_a = sc.ecdh(a_eph_priv_backup, sat_b_static.public_key())
     decoded_ack = sc.decode_ack(
         frame=a_received,
+        caller_static_priv=sat_a_static,
         caller_eph_priv=a_eph_priv_backup,
         dh1=dh1_a,
         expected_nonce_echo=hail_body.body_nonce,
@@ -139,9 +139,13 @@ def run(snr_db: float = -10.0, seed: int = 42) -> int:
         decoded_ack.responder_eph_pub
     )
 
+    # Caller-side full X3DH: recompute all three DH terms
+    dh2_a = sc.ecdh(sat_a_static, decoded_ack.responder_eph_pub)
+    dh3_a = sc.ecdh(a_eph_priv_backup, decoded_ack.responder_eph_pub)
     a_session = sc.derive_session_keys(
         dh1=dh1_a,
-        dh3=decoded_ack.dh3,
+        dh2=dh2_a,
+        dh3=dh3_a,
         caller_eph_pub_canonical=caller_eph_canonical,
         responder_eph_pub_canonical=responder_eph_canonical,
     )

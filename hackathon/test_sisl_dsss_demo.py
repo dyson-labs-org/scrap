@@ -90,9 +90,11 @@ def test_tx_to_file_bounded_search_finds_lock():
 
 def test_tx_to_file_hail_frame_end_to_end():
     """TX a real SISL v3 hail frame via tx_to_file, offline decode, trial decrypt."""
+    caller_static = sc.generate_keypair()
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
         center_freq_offset=100,
         bandwidth_code=0x03,
         mode=0x01,
@@ -131,9 +133,11 @@ def test_tx_to_file_hail_frame_end_to_end():
 
 def test_identify_sisl_frame_finds_embedded_frame():
     """identify_sisl_frame scans for ASM within a larger byte stream."""
+    caller_static = sc.generate_keypair()
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
         center_freq_offset=50, bandwidth_code=0x03, mode=0x01,
         chip_rate_code=0x32,
         body_nonce=b"\x11\x22\x33\x44\x55\x66\x77\x88",

@@ -56,9 +56,11 @@ def test_tx_rx_loopback_random_100b():
 
 def test_tx_rx_loopback_full_hail_frame():
     """Pipe a real SISL v3 hail frame through the framer."""
+    caller_static = sc.generate_keypair()
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     body = sc.HailBody(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
         center_freq_offset=100,
         bandwidth_code=0x03,
         mode=0x01,
