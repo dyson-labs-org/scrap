@@ -334,6 +334,36 @@ def test_fit_phase_noise_ratio_reflects_quality():
     assert rmss[-1] > rmss[0]
 
 
+def test_refine_freq_from_pilot_recovers_hz():
+    """refine_freq_from_pilot converts Δθ to Hz correctly."""
+    rng = np.random.default_rng(seed=31)
+    bits = rng.integers(0, 2, size=48).astype(np.uint8)
+    symbol_rate = 1_000.0     # 1 ksym/s
+    # Simulate a +200 Hz residual freq offset: Δθ = 2π·200/1000 = 1.257 rad/sym
+    f_true = 200.0
+    delta = 2 * np.pi * f_true / symbol_rate
+    peaks = _synth_peaks(bits, theta0=0.0, delta=delta, noise_std=0.05, seed=32)
+    result = sf.refine_freq_from_pilot(peaks, 0, bits, symbol_rate)
+    assert result is not None
+    f_hat, theta0, rms = result
+    assert abs(f_hat - f_true) < 5.0, f"f_hat={f_hat} vs true {f_true}"
+    assert rms < 0.2
+
+
+def test_refine_freq_from_pilot_negative_freq():
+    """Negative residual freq should round-trip correctly."""
+    rng = np.random.default_rng(seed=33)
+    bits = rng.integers(0, 2, size=48).astype(np.uint8)
+    symbol_rate = 1_000.0
+    f_true = -350.0
+    delta = 2 * np.pi * f_true / symbol_rate
+    peaks = _synth_peaks(bits, theta0=0.5, delta=delta, noise_std=0.05, seed=34)
+    result = sf.refine_freq_from_pilot(peaks, 0, bits, symbol_rate)
+    assert result is not None
+    f_hat, _, _ = result
+    assert abs(f_hat - f_true) < 5.0, f"f_hat={f_hat} vs true {f_true}"
+
+
 def test_fit_phase_from_known_bits_too_short():
     assert sf.fit_phase_from_known_bits(
         np.zeros(10, dtype=np.complex128), 0,

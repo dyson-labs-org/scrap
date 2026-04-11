@@ -332,11 +332,13 @@ def test_find_sisl_frame_soft_topk_returns_candidates():
     assert len(results) > 0
     assert len(results) <= 5
     # Top result should be near position 60 (differential, so ±1 is fine)
-    top_offset, top_score, _ = results[0]
+    top_offset, top_score, _, top_pts = results[0]
     assert abs(top_offset - 59) <= 2 or abs(top_offset - 60) <= 2
     assert abs(top_score) > 20
+    # pts ratio should be clearly above the noise-driven sidelobe median
+    assert top_pts > 4, f"pts_ratio {top_pts} too low for clean signal"
     # Results must be sorted by |score| descending
-    scores = [abs(s) for _, s, _ in results]
+    scores = [abs(s) for _, s, _, _ in results]
     assert scores == sorted(scores, reverse=True)
 
 
@@ -347,9 +349,12 @@ def test_find_sisl_frame_soft_topk_separation():
     results = dd.find_sisl_frame_soft_topk(
         peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5, min_separation=4,
     )
-    offsets = sorted(off for off, _, _ in results)
+    offsets = sorted(off for off, _, _, _ in results)
     for a, b in zip(offsets, offsets[1:]):
         assert b - a > 4, f"candidates {a} and {b} too close"
+    # Pure noise pts ratios should all be ~2-3 (not > 5)
+    for _, _, _, pts in results:
+        assert pts < 5, f"noise pts_ratio {pts} implausibly high"
 
 
 def test_find_sisl_frame_soft_topk_empty_on_short():
@@ -422,6 +427,94 @@ def test_chase_decrypt_body_zero_flips_on_clean_frame():
     assert result is not None
     _, nflips = result
     assert nflips == 0
+
+
+def test_llr_accumulator_single_copy_passthrough():
+    """One noisy copy that already decrypts should be passed through."""
+    frame = dd.build_demo_hail()
+    n_bits = len(frame) * 8
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8))
+    # High-confidence soft values with correct sign
+    soft = np.where(bits == 0, 5.0, -5.0).astype(np.float32)
+    fake_result = {
+        "llrs": soft,
+        "c_frame": frame,
+        "phase_rms_residual_rad": 0.05,    # clean
+        "asm_errs_in_coherent": 0,
+    }
+    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
+    assert acc.try_add(fake_result) is True
+    result = acc.try_decrypt(dd.demo_responder_key())
+    assert result is not None
+    decoded, label, flips = result
+    assert label == "acc"
+    assert flips == 0
+
+
+def test_llr_accumulator_rejects_bad_fit():
+    """Results with phase_rms > pass_rms or nonzero asm_errs are ignored."""
+    frame = dd.build_demo_hail()
+    n_bits = len(frame) * 8
+    soft = np.ones(n_bits, dtype=np.float32)
+    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
+    # Bad phase_rms
+    assert acc.try_add({
+        "llrs": soft, "c_frame": frame,
+        "phase_rms_residual_rad": 1.0, "asm_errs_in_coherent": 0,
+    }) is False
+    # Bad asm_errs
+    assert acc.try_add({
+        "llrs": soft, "c_frame": frame,
+        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 5,
+    }) is False
+    # Missing llrs
+    assert acc.try_add({
+        "llrs": None, "c_frame": frame,
+        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
+    }) is False
+    assert acc.n_copies == 0
+
+
+def test_llr_accumulator_two_noisy_copies_sum_cleanly():
+    """Two copies of the same frame with half-strength noise should sum."""
+    frame = dd.build_demo_hail()
+    n_bits = len(frame) * 8
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8))
+    truth = np.where(bits == 0, 1.0, -1.0).astype(np.float32)
+    rng = np.random.default_rng(seed=55)
+    # Two copies each at SNR where single-copy decryption fails:
+    # correct sign on 90% of bits, random on the rest. Summed:
+    # ~99% agreement, which Poly1305 should be unable to fix without
+    # Chase — but with k=12 Chase-II it can.
+    noise_std = 0.9
+    soft1 = truth + rng.normal(0, noise_std, n_bits).astype(np.float32)
+    soft2 = truth + rng.normal(0, noise_std, n_bits).astype(np.float32)
+    # Slightly corrupt the single-copy hard decisions so neither can
+    # decrypt solo.
+    frame1_bits = (soft1 < 0).astype(np.uint8)
+    frame1 = np.packbits(frame1_bits).tobytes()
+    frame2_bits = (soft2 < 0).astype(np.uint8)
+    frame2 = np.packbits(frame2_bits).tobytes()
+
+    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
+    # These are synthetic — force them past the gate
+    ok1 = acc.try_add({
+        "llrs": soft1, "c_frame": frame1,
+        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
+    })
+    ok2 = acc.try_add({
+        "llrs": soft2, "c_frame": frame2,
+        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
+    })
+    assert ok1 and ok2
+    assert acc.n_copies == 2
+    # The accumulated LLRs point to the right bits
+    acc_bits = (acc.accumulated < 0).astype(np.uint8)
+    ber = float(np.mean(acc_bits != bits))
+    # Must be strictly better than either single copy
+    ber1 = float(np.mean(frame1_bits != bits))
+    ber2 = float(np.mean(frame2_bits != bits))
+    assert ber < min(ber1, ber2) + 1e-9
 
 
 def test_decimate_to_chips_shape():

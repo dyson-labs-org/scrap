@@ -606,6 +606,141 @@ def _chase_decrypt_body(
     return None
 
 
+class LlrAccumulator:
+    """Multi-copy LLR chase-combiner for uncoded SISL hails.
+
+    The TX loops the same hail frame repeatedly. Each clean per-block
+    detection yields a per-bit soft-value vector aligned to the frame's
+    32-bit ASM. If we add these vectors element-wise across copies, the
+    effective SNR grows by +3 dB per doubling (coherent addition of
+    independent AWGN observations of the same bit sign).
+
+    This is a direct prototype of the KSP-WCC accumulator architecture
+    using the existing uncoded pipeline — no FEC, no keystream. If the
+    expected √N gain manifests on real bench data, the whole chase-
+    combining approach is validated before any polar work.
+
+    Alignment rules:
+    - Only accept copies with phase_rms_residual_rad ≤ pass_rms
+      (clean coherent fit).
+    - Only accept copies with asm_errs_in_coherent == 0 (structural
+      match to _ASM_BITS at the start of the decoded frame).
+    - Same polarity (normal vs inverted): we normalize to the stored
+      vector's polarity by flipping signs on mismatch.
+    - Because the coherent decoder already aligns the first bit to the
+      ASM boundary, bit-index 0 of the soft vector is canonical across
+      all copies — no per-copy alignment math needed.
+
+    After each addition, the accumulated LLRs are hard-decided to bytes
+    and passed through the same 6-XOR + Chase-II decrypt pipeline used
+    for single-copy decode.
+
+    Set `max_copies` to bound memory (default 16).
+    """
+
+    def __init__(self, n_bits: int, pass_rms: float = 0.3,
+                 max_copies: int = 16):
+        self.n_bits = n_bits
+        self.pass_rms = pass_rms
+        self.max_copies = max_copies
+        self.accumulated = np.zeros(n_bits, dtype=np.float64)
+        self.n_copies = 0
+        self.first_polarity_bit0: Optional[int] = None
+
+    def reset(self) -> None:
+        self.accumulated.fill(0.0)
+        self.n_copies = 0
+        self.first_polarity_bit0 = None
+
+    def try_add(self, result: dict) -> bool:
+        """Try to add a block-decode result to the accumulator.
+
+        Returns True if the result was accepted and added, False otherwise.
+        Accept conditions:
+        - status in {frame_soft, decrypt_ok, noise_lock-with-clean-fit}
+        - result contains 'llrs' and 'c_frame' keys
+        - phase_rms_residual_rad ≤ pass_rms (clean fit)
+        - asm_errs_in_coherent == 0 (ASM structurally matches)
+        """
+        llrs = result.get("llrs")
+        c_frame = result.get("c_frame")
+        rms = result.get("phase_rms_residual_rad")
+        asm_errs = result.get("asm_errs_in_coherent")
+        if llrs is None or c_frame is None:
+            return False
+        if rms is None or rms > self.pass_rms:
+            return False
+        if asm_errs is None or asm_errs != 0:
+            return False
+        if len(llrs) < self.n_bits:
+            return False
+
+        # Polarity alignment: use the first byte as polarity anchor.
+        # If bit 0 of this copy differs from our stored anchor, flip
+        # the sign of this copy's LLRs before adding.
+        this_bit0 = int(llrs[0] < 0)    # sign of first bit decision
+        if self.first_polarity_bit0 is None:
+            self.first_polarity_bit0 = this_bit0
+            self.accumulated[:] = llrs[:self.n_bits].astype(np.float64)
+        else:
+            sign = 1.0 if this_bit0 == self.first_polarity_bit0 else -1.0
+            self.accumulated += sign * llrs[:self.n_bits].astype(np.float64)
+        self.n_copies += 1
+        if self.n_copies >= self.max_copies:
+            # Make room for next: drop the oldest by halving. This gives
+            # exponential forgetting; old evidence gets de-weighted but
+            # isn't discarded outright.
+            self.accumulated *= 0.5
+            self.n_copies //= 2
+        return True
+
+    def current_frame(self) -> Optional[bytes]:
+        """Hard-decide the accumulated LLRs into HAIL_FRAME_LEN bytes."""
+        if self.n_copies == 0:
+            return None
+        bits = (self.accumulated < 0).astype(np.uint8)
+        return np.packbits(bits).tobytes()
+
+    def try_decrypt(
+        self,
+        responder_static,
+    ) -> Optional[tuple[object, str, int]]:
+        """Attempt to decrypt the accumulated frame via the same 6-XOR +
+        Chase-II pipeline used for single copies.
+
+        Returns (decoded_hail, polarity_label, chase_flips) or None.
+        """
+        frame = self.current_frame()
+        if frame is None:
+            return None
+        def _xor_alt(b: bytes, even_mask: int, odd_mask: int) -> bytes:
+            o = bytearray(len(b))
+            for i, x in enumerate(b):
+                o[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
+            return bytes(o)
+        candidates = [
+            ("acc", frame),
+            ("acc-inv", bytes(x ^ 0xFF for x in frame)),
+            ("acc-alt", bytes(x ^ 0xAA for x in frame)),
+            ("acc-alt2", bytes(x ^ 0x55 for x in frame)),
+            ("acc-alt-inv", _xor_alt(frame, 0x55, 0xAA)),
+            ("acc-alt2-inv", _xor_alt(frame, 0xAA, 0x55)),
+        ]
+        for label, candidate in candidates:
+            decoded = sc.decode_hail(candidate, responder_static)
+            if decoded is not None:
+                return decoded, label, 0
+        # Chase-II on accumulated soft values
+        soft_sym = self.accumulated.astype(np.float32)
+        chase = _chase_decrypt_body(
+            frame, soft_sym, responder_static, k=12,
+        )
+        if chase is not None:
+            decoded, n_flips = chase
+            return decoded, f"acc-chase{n_flips}", n_flips
+        return None
+
+
 # Pre-computed differential polarity template for the 32-bit ASM.
 # For each of 31 consecutive bit pairs in the ASM, the "expected" differential
 # dot-product sign is +1 if the two bits are equal (same bit), -1 if they differ.
@@ -664,9 +799,14 @@ def find_sisl_frame_soft_topk(
     bit positions apart, so adjacent samples in the same peak neighborhood
     don't all crowd the top-K list.
 
-    Returns a list of (bit_offset, soft_score, frame_bytes) tuples, sorted
-    by |soft_score| descending, at most K entries long. Empty list if the
-    buffer is too short.
+    Returns a list of (bit_offset, soft_score, frame_bytes, pts_ratio)
+    tuples, sorted by |soft_score| descending, at most K entries long.
+    `pts_ratio` is the candidate's |score| divided by the median |score|
+    across all positions — a CFAR-style peak-to-sidelobe ratio usable
+    as an additional cheap gate before feeding candidates to the
+    expensive coherent decode + Chase pipeline. Clean signal has
+    pts_ratio > 5; pure noise has pts_ratio ≈ 2–3.
+    Empty list if the buffer is too short.
     """
     n_bits = frame_len * 8
     n_peaks = len(peak_values)
@@ -691,6 +831,10 @@ def find_sisl_frame_soft_topk(
     scores = windowed @ template     # shape (n_positions,)
     abs_scores = np.abs(scores)
 
+    # CFAR sidelobe estimate: median of all |scores|. Robust to outliers
+    # (the real ASM peak itself) since median ignores them.
+    sidelobe = float(np.median(abs_scores)) + 1e-9
+
     # Greedy top-K with minimum-separation constraint. We pick the highest
     # |score|, mask out a ±min_separation neighborhood, repeat until we
     # have K or run out of candidates.
@@ -706,10 +850,11 @@ def find_sisl_frame_soft_topk(
         if masked[idx] <= 0:
             break
         score = float(scores[idx])
+        pts_ratio = float(abs_scores[idx]) / sidelobe
         frame_bytes = _extract_soft_frame_bits(
             soft, n_soft, idx, score, n_bits, n_peaks,
         )
-        results.append((idx, score, frame_bytes))
+        results.append((idx, score, frame_bytes, pts_ratio))
         lo = max(0, idx - min_separation)
         hi = min(n_positions, idx + min_separation + 1)
         taken[lo:hi] = True
@@ -1159,21 +1304,29 @@ def _decode_one_hail_in_block(
     best_soft_score = 0.0
     best_soft_offset = -1
     best_soft_frame = None
+    best_pts_ratio = None
     if peak_values and len(peak_values) >= 33 and top_k_soft > 0:
         topk = find_sisl_frame_soft_topk(
             peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
         )
         if topk:
-            soft_offset, soft_score, soft_frame = topk[0]
+            soft_offset, soft_score, soft_frame, pts_ratio = topk[0]
             soft_result = (soft_offset, soft_score, soft_frame)
             best_soft_score = soft_score
             best_soft_offset = soft_offset
             best_soft_frame = soft_frame
+            best_pts_ratio = pts_ratio
 
             # Walk top-K candidates in order of |score|.
-            for cand_offset, cand_score, cand_frame in topk:
-                if abs(cand_score) <= 10.0:
-                    continue   # below threshold, stop here
+            for cand_offset, cand_score, cand_frame, cand_pts in topk:
+                # Two-stage gate:
+                #   (a) absolute soft-score threshold  — rejects small peaks
+                #   (b) peak-to-sidelobe ratio         — rejects
+                #       candidates whose score isn't clearly above the
+                #       noise floor of all other positions.
+                # Clean signal: pts_ratio > 5. Noise: ~2–3. Require ≥ 3.
+                if abs(cand_score) <= 10.0 or cand_pts < 3.0:
+                    continue   # below threshold, don't waste coherent decode
                 # First try the differential soft frame directly.
                 decoded_hail = sc.decode_hail(cand_frame, responder_static)
                 if decoded_hail is not None:
@@ -1187,6 +1340,7 @@ def _decode_one_hail_in_block(
                         "rad_per_sample": rad_per_sample,
                         "freq_offset_hz": freq_hz,
                         "soft_score": cand_score,
+                        "pts_ratio": cand_pts,
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                     }
@@ -1206,6 +1360,7 @@ def _decode_one_hail_in_block(
                         "rad_per_sample": rad_per_sample,
                         "freq_offset_hz": freq_hz,
                         "soft_score": cand_score,
+                        "pts_ratio": cand_pts,
                         "theta0_rad": attempt["theta0_rad"],
                         "delta_theta_per_sym": attempt["delta_theta_per_sym"],
                         "phase_rms_residual_rad": attempt["phase_rms_residual_rad"],
@@ -1223,6 +1378,7 @@ def _decode_one_hail_in_block(
                     best_soft_score = cand_score
                     best_soft_offset = cand_offset
                     best_soft_frame = cand_frame
+                    best_pts_ratio = cand_pts
 
     if best_attempt is not None:
         # None of the top-K candidates decrypted. Use the best failed
@@ -1230,6 +1386,7 @@ def _decode_one_hail_in_block(
         c_rms = best_attempt["phase_rms_residual_rad"]
         c_asm_errs = best_attempt["asm_errs_in_coherent"]
         c_frame = best_attempt["c_frame"]
+        c_soft_llrs = best_attempt["c_soft"]
         coherent_hex = (c_frame[:16].hex()
                          if c_frame is not None else None)
         # Noise rejection. Two sufficient conditions for "this is
@@ -1258,6 +1415,7 @@ def _decode_one_hail_in_block(
             "rad_per_sample": rad_per_sample,
             "freq_offset_hz": freq_hz,
             "soft_score": best_soft_score,
+            "pts_ratio": best_pts_ratio,
             "first_16_bytes_hex": (best_soft_frame[:16].hex()
                                     if best_soft_frame is not None else ""),
             "coherent_16_bytes_hex": coherent_hex,
@@ -1267,6 +1425,12 @@ def _decode_one_hail_in_block(
             "theta0_rad": best_attempt["theta0_rad"],
             "delta_theta_per_sym": best_attempt["delta_theta_per_sym"],
             "phase_rms_residual_rad": c_rms,
+            # D1: LLRs surfaced for accumulator / downstream decoders.
+            # For frame_soft and noise_lock, we still publish the soft
+            # values so callers can chase-combine across blocks. Shape is
+            # (HAIL_FRAME_LEN*8,) float32, positive → bit 0, negative → bit 1.
+            "llrs": c_soft_llrs,
+            "c_frame": best_attempt["c_frame"],
         }
 
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match
@@ -1469,6 +1633,7 @@ def live_rx_decode(
     device_name: str = "hackrf",
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
+    combine_copies: int = 0,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -1568,8 +1733,20 @@ def live_rx_decode(
         "frames_fuzzy": 0,       # ASM found with 1-3 bit errors
         "interference": 0,       # signal crossed threshold but no SISL ASM
         "overflows": 0,
+        "combined_copies": 0,    # copies fed into LLR accumulator
+        "combined_decrypts": 0,  # decrypts from the accumulator
     }
     t_start = time.time()
+
+    # D4: LLR accumulator for multi-copy chase combining. Only active
+    # when combine_copies > 0; otherwise does nothing.
+    accumulator = None
+    if combine_copies > 0:
+        accumulator = LlrAccumulator(
+            n_bits=sc.HAIL_FRAME_LEN * 8,
+            pass_rms=0.3,           # only clean coherent fits
+            max_copies=combine_copies,
+        )
 
     try:
         while time.time() - t_start < duration_s:
@@ -1626,6 +1803,25 @@ def live_rx_decode(
                 stats["noise_locks"] = stats.get("noise_locks", 0) + 1
             elif s == "no_hail":
                 stats["interference"] += 1
+
+            # D4: LLR chase-combining. Try to fold the current block into
+            # the accumulator and re-attempt decrypt on the sum. This runs
+            # only for clean-fit blocks (accumulator has strict pass_rms).
+            if accumulator is not None:
+                added = accumulator.try_add(result)
+                if added:
+                    stats["combined_copies"] += 1
+                    combined = accumulator.try_decrypt(responder_static)
+                    if combined is not None:
+                        decoded_hail, label, n_flips = combined
+                        stats["combined_decrypts"] += 1
+                        stats["hails_decrypted"] += 1
+                        print(f"       ACCUMULATOR DECRYPT  "
+                              f"n_copies={accumulator.n_copies}  "
+                              f"pol={label}  "
+                              f"mode=0x{decoded_hail.body.mode:02x}  "
+                              f"nonce={decoded_hail.body.body_nonce.hex()}")
+                        accumulator.reset()
     except KeyboardInterrupt:
         print("  interrupted")
     finally:
@@ -1815,6 +2011,15 @@ def main() -> int:
                              "per-block decode compute. Set to 1 to match "
                              "old behavior, or 10 for very low SNR / "
                              "noisy environments.")
+    parser.add_argument("--combine", type=int, default=0,
+                        help="rx: multi-copy LLR chase combining. When N>0, "
+                             "accumulate per-bit soft values from up to N "
+                             "consecutive clean-fit blocks (phase_rms ≤ 0.3) "
+                             "and re-attempt decryption on the summed LLRs. "
+                             "Gives √N effective SNR gain because TX loops "
+                             "the same hail frame. 0 disables (default); "
+                             "typical values 4-16. Requires the TX to be "
+                             "transmitting continuously in steady state.")
     parser.add_argument("--device", choices=list(DEVICES.keys()),
                         default="hackrf",
                         help="rx: which SDR to use. 'hackrf' (default) "
@@ -1926,6 +2131,7 @@ def main() -> int:
             device_name=args.device,
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
+            combine_copies=args.combine,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -1948,6 +2154,11 @@ def main() -> int:
               "(SISL frame parsed)")
         print(f"  hails decrypted: {stats['hails_decrypted']} "
               "(Poly1305 verified)")
+        if stats.get("combined_copies", 0) or stats.get("combined_decrypts", 0):
+            print(f"  combined copies: {stats.get('combined_copies', 0)} "
+                  "(clean-fit copies fed into LLR accumulator)")
+            print(f"  combined decrypt:{stats.get('combined_decrypts', 0)} "
+                  "(rescued by chase-combining)")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
     # mode == "tx"

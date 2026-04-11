@@ -618,6 +618,36 @@ def fit_phase_from_known_bits(
     return theta0_at_zero, float(delta_hat), rms_residual
 
 
+def refine_freq_from_pilot(
+    peak_values,
+    pilot_bit_offset: int,
+    pilot_bits: np.ndarray,
+    symbol_rate_hz: float,
+) -> Optional[tuple[float, float, float]]:
+    """Pilot-aided ML refinement of residual frequency offset.
+
+    Wraps fit_phase_from_known_bits and converts the per-symbol phase
+    slope Δθ to a frequency offset in Hz via
+        f_residual = (Δθ · symbol_rate_hz) / (2π)
+
+    Useful as a fine-refinement stage AFTER a coarse Doppler search
+    (e.g., a 2-D time × frequency grid) has located a candidate peak.
+    The coarse search pins the freq to ±bin_width/2; the pilot fit then
+    reduces the residual by a factor ~N (pilot length in bits) because
+    ML slope estimation has 1/N precision when the SNR is high enough.
+
+    Returns (f_residual_hz, theta0, rms_residual_rad) or None on failure.
+    """
+    fit = fit_phase_from_known_bits(
+        peak_values, pilot_bit_offset, pilot_bits,
+    )
+    if fit is None:
+        return None
+    theta0, delta_theta, rms_residual = fit
+    f_residual_hz = delta_theta * symbol_rate_hz / (2.0 * np.pi)
+    return f_residual_hz, theta0, rms_residual
+
+
 def coherent_decode_from_pilot(
     peak_values,
     pilot_bit_offset: int,
