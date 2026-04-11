@@ -646,6 +646,13 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-clean-path-check", action="store_true",
                    help="skip the A5 production-path admission check")
+    p.add_argument("--fec", action="store_true",
+                   help="use the FEC-encoded TX path and FEC-mode "
+                        "LlrAccumulator instead of the uncoded chase-only "
+                        "path. The convolutional code adds ~5-6 dB of "
+                        "coding gain on top of LLR combining; the "
+                        "accumulator floor moves from ~0 dB to ~-5 dB "
+                        "Es/N0 at N=4 copies.")
     args = p.parse_args()
 
     # ── A5 regression guard: production decoder must surface LLRs ──
@@ -668,12 +675,14 @@ def main() -> int:
               f"L1 combining factor={check['combining_factor']:.2f}")
         print()
 
-    print(f"bench_llr_accumulator: sweep snrs={args.snr} "
+    sweep_fn = _run_sweep_fec if args.fec else _run_sweep
+    label = "FEC" if args.fec else "uncoded"
+    print(f"bench_llr_accumulator [{label}]: sweep snrs={args.snr} "
           f"trials={args.trials} max_n={args.max_n}")
     t0 = time.time()
     results = []
     for snr in args.snr:
-        r = _run_sweep(snr, args.trials, args.max_n, args.seed)
+        r = sweep_fn(snr, args.trials, args.max_n, args.seed)
         results.append(r)
         elapsed = time.time() - t0
         solo = float(r['single_copy_rate'].mean())
