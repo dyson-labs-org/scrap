@@ -311,6 +311,74 @@ def test_offline_decode_hail_repeats():
         os.unlink(path)
 
 
+def test_chase_decrypt_body_recovers_single_bit_error():
+    """Chase-II must find a 1-bit body error in a demo hail frame."""
+    frame = dd.build_demo_hail()
+    # Flip a single body bit (not the ASM)
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
+    target_bit = 200  # somewhere in the body
+    bits[target_bit] ^= 1
+    corrupted = np.packbits(bits).tobytes()
+    # All soft values large except the corrupted bit (weakest)
+    soft = np.full(len(bits), 10.0, dtype=np.float32)
+    soft[target_bit] = 0.01
+    result = dd._chase_decrypt_body(
+        corrupted, soft, dd.demo_responder_key(), k=6,
+    )
+    assert result is not None
+    decoded, nflips = result
+    assert nflips == 1
+    assert decoded.body.center_freq_offset == 100
+
+
+def test_chase_decrypt_body_recovers_triple_bit_error():
+    """Chase-II finds 3 bit errors when all are in the top-k weakest."""
+    frame = dd.build_demo_hail()
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
+    target_bits = [150, 300, 500]
+    for b in target_bits:
+        bits[b] ^= 1
+    corrupted = np.packbits(bits).tobytes()
+    soft = np.full(len(bits), 10.0, dtype=np.float32)
+    for b in target_bits:
+        soft[b] = 0.01
+    result = dd._chase_decrypt_body(
+        corrupted, soft, dd.demo_responder_key(), k=6,
+    )
+    assert result is not None
+    decoded, nflips = result
+    assert nflips == 3
+
+
+def test_chase_decrypt_body_returns_none_on_unfixable():
+    """Chase-II returns None when errors exceed k or not in weakest subset."""
+    frame = dd.build_demo_hail()
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
+    # Flip 4 bits at high-confidence positions (not weakest)
+    for b in [100, 200, 300, 400]:
+        bits[b] ^= 1
+    corrupted = np.packbits(bits).tobytes()
+    # All soft values equally large (no ranking signal)
+    soft = np.full(len(bits), 10.0, dtype=np.float32)
+    result = dd._chase_decrypt_body(
+        corrupted, soft, dd.demo_responder_key(), k=6,
+    )
+    # With k=6 and 4 bit errors at random positions, unlikely to find
+    assert result is None
+
+
+def test_chase_decrypt_body_zero_flips_on_clean_frame():
+    """Unmodified frame should return flip_count=0."""
+    frame = dd.build_demo_hail()
+    soft = np.full(len(frame) * 8, 10.0, dtype=np.float32)
+    result = dd._chase_decrypt_body(
+        frame, soft, dd.demo_responder_key(), k=6,
+    )
+    assert result is not None
+    _, nflips = result
+    assert nflips == 0
+
+
 def test_decimate_to_chips_shape():
     # 16 samples at SAMPS_PER_CHIP=8 → 2 chips
     samples = np.ones(16, dtype=np.complex64) * (1 + 0j)

@@ -531,6 +531,71 @@ _ASM_BITS = np.unpackbits(
 ).astype(np.uint8)
 
 
+def _chase_decrypt_body(
+    frame_bytes: bytes,
+    soft_bits: np.ndarray,
+    responder_static,
+    k: int = 12,
+) -> Optional[tuple[object, int]]:
+    """Chase-II soft-decision decoding on the body of a coherent-decoded frame.
+
+    After the coherent decoder produces a candidate frame + per-bit soft
+    values, if Poly1305 verification fails, try flipping small subsets
+    of the least-confident body bits and re-verifying.
+
+    Rank body-bit positions (bit 32 onwards — after the ASM) by |soft|
+    in ascending order, take the k weakest, enumerate all 2^k subsets,
+    flip those bits in the candidate frame, and trial-decrypt each
+    mutation.
+
+    k=12 → 4096 trials, ~40 ms per call with Poly1305 at ~10 μs/verify.
+    Catches up to 12 body-bit errors, though in practice only the few
+    highest-likelihood combinations matter because soft ranking pushes
+    true errors to the top.
+
+    Returns (decoded_hail, flip_count) on success, None on failure.
+    """
+    # First: verify the original frame (mask=0 case).
+    decoded = sc.decode_hail(frame_bytes, responder_static)
+    if decoded is not None:
+        return decoded, 0
+
+    n_bits = len(frame_bytes) * 8
+    if len(soft_bits) < n_bits:
+        # Coherent decoder truncated: can't chase bits we don't have soft values for
+        return None
+
+    body_start_bit = 32    # after the 4-byte ASM
+    # Rank body bits by |soft| ascending — weakest first
+    body_soft = np.abs(soft_bits[body_start_bit:n_bits])
+    order = np.argsort(body_soft)
+    if len(order) < k:
+        k = len(order)
+    weakest = (order[:k] + body_start_bit).astype(np.int64)
+
+    # Unpack frame to bit array (MSB-first to match np.packbits convention)
+    frame_bits = np.unpackbits(np.frombuffer(frame_bytes, dtype=np.uint8))
+
+    # Enumerate all 2^k non-zero flip masks
+    total = 1 << k
+    for mask in range(1, total):
+        mutated = frame_bits.copy()
+        m = mask
+        j = 0
+        while m:
+            if m & 1:
+                idx = weakest[j]
+                mutated[idx] ^= 1
+            m >>= 1
+            j += 1
+        candidate = np.packbits(mutated).tobytes()
+        decoded = sc.decode_hail(candidate, responder_static)
+        if decoded is not None:
+            flip_count = bin(mask).count("1")
+            return decoded, flip_count
+    return None
+
+
 # Pre-computed differential polarity template for the 32-bit ASM.
 # For each of 31 consecutive bit pairs in the ASM, the "expected" differential
 # dot-product sign is +1 if the two bits are equal (same bit), -1 if they differ.
@@ -999,6 +1064,7 @@ def _decode_one_hail_in_block(
                 aligned_peaks = peak_values[soft_offset:]
                 n_frame_bits = sc.HAIL_FRAME_LEN * 8
                 c_frame = None
+                c_soft = None
                 c_theta0 = c_delta = c_rms = None
                 c_asm_errs = None
                 if len(aligned_peaks) >= n_frame_bits:
@@ -1006,7 +1072,7 @@ def _decode_one_hail_in_block(
                         aligned_peaks, 0, _ASM_BITS, n_frame_bits,
                     )
                     if coherent is not None:
-                        c_frame, _c_soft, c_theta0, c_delta, c_rms = coherent
+                        c_frame, c_soft, c_theta0, c_delta, c_rms = coherent
                         # How many of the first 32 decoded bits match the
                         # ASM? If >8 wrong, the linear fit likely settled
                         # on a slope off by ±π/symbol (common at residual
@@ -1059,6 +1125,36 @@ def _decode_one_hail_in_block(
                                     "delta_theta_per_sym": c_delta,
                                     "phase_rms_residual_rad": c_rms,
                                     "asm_errs_in_coherent": c_asm_errs,
+                                    "body": decoded_hail.body,
+                                    "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                                }
+
+                        # None of the 6 XOR candidates verified. If the
+                        # base coherent frame has a perfect or near-perfect
+                        # ASM match (fit is clean, errors are in the body),
+                        # run Chase-II soft decoding: flip the k weakest
+                        # body bits in all 2^k combinations and retry.
+                        if c_asm_errs is not None and c_asm_errs <= 2 and c_soft is not None:
+                            chase = _chase_decrypt_body(
+                                c_frame, c_soft, responder_static, k=12,
+                            )
+                            if chase is not None:
+                                decoded_hail, n_flips = chase
+                                return {
+                                    "status": "decrypt_ok",
+                                    "start_sample": positions[0] if positions else 0,
+                                    "asm_at_byte": f"chase{n_flips}-bit{soft_offset}",
+                                    "peak_mag": peak_mag,
+                                    "median_mag": median_mag,
+                                    "polarity": f"coherent-chase{n_flips}",
+                                    "rad_per_sample": rad_per_sample,
+                                    "freq_offset_hz": freq_hz,
+                                    "soft_score": soft_score,
+                                    "theta0_rad": c_theta0,
+                                    "delta_theta_per_sym": c_delta,
+                                    "phase_rms_residual_rad": c_rms,
+                                    "asm_errs_in_coherent": c_asm_errs,
+                                    "chase_flips": n_flips,
                                     "body": decoded_hail.body,
                                     "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                                 }
