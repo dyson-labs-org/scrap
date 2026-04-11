@@ -163,6 +163,29 @@ def test_find_frame_start_with_prefix_noise():
     assert abs(offset - 137) <= 1
 
 
+def test_find_frame_start_large_prefix_no_bound():
+    """Full-stream search locates the frame without an explicit max_search."""
+    rng = np.random.default_rng(seed=5)
+    data = b"greetings from chip 7500"
+    pad = rng.normal(0, 0.3, size=7500).astype(np.float32)
+    chips = sf.tx_bytes_to_chips(data).astype(np.float32)
+    stream = np.concatenate([pad, chips])
+    offset = sf.find_frame_start(stream)
+    assert offset is not None
+    # The matched filter peaks at every symbol boundary; the first above-
+    # threshold peak corresponds to chip 7500 (the signal start).
+    assert abs(offset - 7500) <= 1
+
+
+def test_matched_filter_magnitude_shape():
+    rng = np.random.default_rng(seed=6)
+    stream = rng.normal(0, 1, size=10_000).astype(np.float32)
+    mag = sf.matched_filter_magnitude(stream)
+    assert len(mag) == 10_000 - sf.CHIPS_PER_SYMBOL + 1
+    # Pure noise → no peak clearly above median
+    assert np.max(mag) < 6 * np.median(mag)
+
+
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 def _run_all():

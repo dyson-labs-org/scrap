@@ -34,6 +34,13 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+try:
+    from scipy.signal import fftconvolve as _fftconvolve
+    _HAVE_SCIPY = True
+except ImportError:
+    _fftconvolve = None
+    _HAVE_SCIPY = False
+
 import sisl_dsss as sd
 
 CHIPS_PER_SYMBOL = 1023
@@ -144,33 +151,69 @@ def rx_chip_snr_db(chips: np.ndarray, n_bytes: int,
 
 # ── Sliding-correlator acquisition (Phase 2/3, optional) ────────────────────
 
+def matched_filter_magnitude(chips: np.ndarray,
+                              code: Optional[np.ndarray] = None) -> np.ndarray:
+    """Return |correlation| of `chips` against one period of the spreading code.
+
+    Output length = len(chips) - len(code) + 1. Uses scipy FFT convolution
+    when available, falls back to numpy. This is the core primitive for
+    acquisition.
+    """
+    if code is None:
+        code = public_hail_code()
+    chips_f = np.asarray(chips, dtype=np.float32)
+    code_f = code.astype(np.float32)
+    if len(chips_f) < len(code_f):
+        return np.zeros(0, dtype=np.float32)
+    # Correlation = convolution with time-reversed kernel.
+    kernel = code_f[::-1]
+    if _HAVE_SCIPY:
+        corr = _fftconvolve(chips_f, kernel, mode="valid")
+    else:
+        corr = np.convolve(chips_f, kernel, mode="valid")
+    return np.abs(corr.astype(np.float32))
+
+
 def find_frame_start(chips: np.ndarray, code: Optional[np.ndarray] = None,
-                     max_search: int = CHIPS_PER_SYMBOL) -> Optional[int]:
+                     max_search: Optional[int] = None,
+                     peak_threshold: float = 4.0) -> Optional[int]:
     """Locate the chip offset of the first symbol via matched-filter peak.
 
     Returns the offset into `chips` at which the first symbol begins, or
     None if no peak is confidently above noise within `max_search` chips.
-    Uses a simple one-symbol sliding correlator.
 
-    This is NOT required for the Phase 1 demo — both sides use chip-0
-    alignment — but the function is here for Phase 2+ acquisition work.
+    `max_search=None` searches the entire input. `peak_threshold` is the
+    ratio of peak magnitude to median magnitude required to declare a lock;
+    4.0 is conservative and works well under AWGN with processing gain.
+
+    Note: the matched filter also peaks at every symbol boundary (every
+    1023 chips) because the code period matches the symbol period. We return
+    the FIRST above-threshold peak, which corresponds to the first symbol
+    edge in the stream.
     """
     if code is None:
         code = public_hail_code()
-    if len(chips) < CHIPS_PER_SYMBOL + max_search:
+    mag = matched_filter_magnitude(chips, code)
+    if len(mag) == 0:
+        return None
+    if max_search is not None:
+        mag = mag[:max_search]
+        if len(mag) == 0:
+            return None
+
+    peak_val = float(mag.max())
+    median = float(np.median(mag))
+    if median == 0.0 or peak_val < peak_threshold * median:
         return None
 
-    chips_f = np.asarray(chips, dtype=np.float32)
-    code_f = code.astype(np.float32)
-    corr = np.empty(max_search, dtype=np.float32)
-    for k in range(max_search):
-        corr[k] = np.abs(chips_f[k:k + CHIPS_PER_SYMBOL] @ code_f)
-
-    peak = int(np.argmax(corr))
-    # Heuristic: peak must be >4× median to be confident
-    if corr[peak] < 4 * np.median(corr):
-        return None
-    return peak
+    # Note: the matched filter peaks at every symbol boundary (every 1023
+    # chips) with magnitude ≈ CHIPS_PER_SYMBOL; FFT-based convolution
+    # introduces ULP-level rounding across these near-identical peaks, so
+    # a strict np.argmax may return a LATER peak than the first. Return
+    # the first index that is within 10% of the global maximum — robust
+    # to float32 rounding while still unambiguously above noise.
+    near_peak = mag >= 0.9 * peak_val
+    return int(np.argmax(near_peak))
 
 
 # ── GNU Radio wrappers (optional; only if gnuradio is importable) ───────────

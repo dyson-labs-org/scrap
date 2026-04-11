@@ -39,6 +39,7 @@ import argparse
 import os
 import sys
 import time
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -156,49 +157,135 @@ if _HAVE_GR:
                 raise ValueError(f"mode must be 'tx' or 'rx', got {mode!r}")
 
 
+# ── TX to file (pure numpy, no radio) ──────────────────────────────────────
+
+def tx_to_file(message: bytes, path: str,
+               prefix_ms: float = 0.0,
+               repeats: int = 1) -> int:
+    """Synthesize a TX capture from `message` and write it as complex64.
+
+    Bypasses GNU Radio and HackRF entirely. Useful for smoke-testing the
+    TX upsampling path and the offline despread chain without a bench
+    setup.
+
+    `prefix_ms`: silence prefix before the signal (exercises
+    find_frame_start acquisition). Rounded to a whole-chip boundary so
+    integer decimation at RX stays aligned.
+    `repeats`: how many copies of the message to concatenate.
+    """
+    chips = build_tx_chips(message)
+    samples = upsample_chips_to_samples(chips)
+    if repeats > 1:
+        samples = np.tile(samples, repeats)
+
+    prefix = np.zeros(0, dtype=np.complex64)
+    if prefix_ms > 0:
+        n_prefix = int(prefix_ms * SAMP_RATE_HZ / 1000)
+        # Snap to whole-chip boundary so decimation stays chip-phase-aligned
+        n_prefix = (n_prefix // SAMPS_PER_CHIP) * SAMPS_PER_CHIP
+        prefix = np.zeros(n_prefix, dtype=np.complex64)
+
+    out = np.concatenate([prefix, samples]).astype(np.complex64)
+    out.tofile(path)
+    return out.size
+
+
 # ── Offline despread utility ────────────────────────────────────────────────
 
-def offline_despread(cfile_path: str, n_bytes: int,
-                     samps_per_chip: float = SAMPS_PER_CHIP) -> bytes:
-    """Read a complex64 capture, decimate to chips, despread.
+def _decimate_to_chips(samples: np.ndarray,
+                       samps_per_chip: int = SAMPS_PER_CHIP) -> np.ndarray:
+    """Mean-of-window decimation: samples → chip-rate float32.
 
-    Assumes:
-      - chip-0 alignment at the start of the file (Phase 1 simplification)
-      - one symbol period = CHIPS_PER_SYMBOL * samps_per_chip samples
-      - real-valued information on the I channel only (the demo TX uses
-        zero-imaginary BPSK)
+    Averages each contiguous block of `samps_per_chip` samples. Preserves
+    amplitude information needed by matched-filter acquisition — unlike
+    the previous `np.sign` approach which discarded magnitude entirely.
+
+    Only the real (I) component is used; the demo TX is BPSK with zero Q.
+    """
+    i = np.asarray(samples, dtype=np.complex64).real.astype(np.float32)
+    n_full = (len(i) // samps_per_chip) * samps_per_chip
+    if n_full == 0:
+        return np.zeros(0, dtype=np.float32)
+    return i[:n_full].reshape(-1, samps_per_chip).mean(axis=1)
+
+
+def offline_despread(cfile_path: str, n_bytes: int,
+                     samps_per_chip: int = SAMPS_PER_CHIP,
+                     max_search_chips: Optional[int] = None
+                     ) -> tuple[bytes, Optional[int]]:
+    """Read a complex64 capture, find frame start, despread.
+
+    Returns `(recovered_bytes, frame_offset_chips)`. `frame_offset_chips`
+    is the chip-index where acquisition locked, or None if the matched
+    filter never exceeded threshold (in which case decoding is attempted
+    from chip 0 as a fallback, which will return garbage).
+
+    `max_search_chips` bounds the acquisition search window. None searches
+    the full capture (safe for short files, slow for multi-gigabyte ones).
+    A sensible default for bench use is ~100k chips (covers ~100 ms at
+    1 Mcps, enough for RX startup + acquisition).
     """
     raw = np.fromfile(cfile_path, dtype=np.complex64)
-    i_component = raw.real.astype(np.float32)
+    chip_stream = _decimate_to_chips(raw, samps_per_chip=samps_per_chip)
 
-    # Integer-decimate by nearest-int samps_per_chip (coarse)
-    n_int = int(round(samps_per_chip))
-    decimated = i_component[::n_int]
-    # Sign → ±1 chips
-    chips = np.sign(decimated).astype(np.int8)
-    chips[chips == 0] = 1
-    return sf.rx_chips_to_bytes(chips, n_bytes)
+    if len(chip_stream) < n_bytes * 8 * sf.CHIPS_PER_SYMBOL:
+        raise ValueError(
+            f"capture too short: need "
+            f"{n_bytes * 8 * sf.CHIPS_PER_SYMBOL} chips, got {len(chip_stream)}"
+        )
+
+    offset = sf.find_frame_start(chip_stream, max_search=max_search_chips)
+    start = offset if offset is not None else 0
+    needed = n_bytes * 8 * sf.CHIPS_PER_SYMBOL
+    if start + needed > len(chip_stream):
+        raise ValueError(
+            f"acquisition at chip {start} leaves only "
+            f"{len(chip_stream) - start} chips, need {needed}"
+        )
+    recovered = sf.rx_chips_to_bytes(chip_stream[start:start + needed], n_bytes)
+    return recovered, offset
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="SISL Phase 1 DSSS demo")
-    parser.add_argument("--mode", choices=("tx", "rx", "offline"),
+    parser.add_argument("--mode",
+                        choices=("tx", "rx", "tx-to-file", "offline"),
                         required=True)
     parser.add_argument("--message", default="SISL HELLO WORLD")
     parser.add_argument("--capture", default="/tmp/sisl_rx.cfile",
-                        help="RX capture file for offline decode")
+                        help="capture file (input for offline, output for tx-to-file)")
     parser.add_argument("--duration", type=float, default=10.0,
                         help="seconds to run tx or rx")
+    parser.add_argument("--prefix-ms", type=float, default=0.0,
+                        help="tx-to-file: leading silence in ms")
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="tx-to-file: message repetitions")
+    parser.add_argument("--max-search-chips", type=int, default=None,
+                        help="offline: bound the acquisition search window")
     args = parser.parse_args()
+
+    if args.mode == "tx-to-file":
+        msg = args.message.encode()
+        n = tx_to_file(msg, args.capture,
+                       prefix_ms=args.prefix_ms, repeats=args.repeats)
+        print(f"wrote {n} complex64 samples ({n * 8} bytes) to {args.capture}")
+        print(f"  message: {msg!r}")
+        print(f"  prefix:  {args.prefix_ms} ms, repeats: {args.repeats}")
+        return 0
 
     if args.mode == "offline":
         msg = args.message.encode()
-        data = offline_despread(args.capture, n_bytes=len(msg))
+        data, offset = offline_despread(
+            args.capture, n_bytes=len(msg),
+            max_search_chips=args.max_search_chips,
+        )
+        print(f"acquisition offset: {offset} chips "
+              f"({'locked' if offset is not None else 'NO LOCK — fallback to chip 0'})")
         print(f"recovered: {data!r}")
         print(f"match:     {data == msg}")
-        return 0
+        return 0 if data == msg else 1
 
     if not _HAVE_GR:
         print("gnuradio not installed — run after:")
