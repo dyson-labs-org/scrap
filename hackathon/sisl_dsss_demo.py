@@ -635,61 +635,75 @@ class LlrAccumulator:
     and passed through the same 6-XOR + Chase-II decrypt pipeline used
     for single-copy decode.
 
-    Set `max_copies` to bound memory (default 16).
+    Admission gates (v2 — tuned against bench_llr_accumulator.py):
+    - pass_rms = 0.6 (was 0.3). The single-copy "CLEAN" threshold is
+      appropriate for reporting a confirmed decrypt, but too tight
+      for accumulator admission. At the waterfall where combining is
+      most useful, clean copies have rms ≈ 0.3–0.5; we want to admit
+      them even when individually they couldn't decrypt alone.
+    - asm_errs ≤ 2 (was == 0). Strictly structural: with 32 ASM bits,
+      up to 2 errors still leaves an unambiguous match while letting
+      marginal-SNR copies contribute their body bits.
+
+    Polarity anchor (v2): the sign of llrs[0] is noise-fragile. We now
+    use the dot product of llrs[:32] with the signed ASM pattern as a
+    32-dimensional polarity vote. Positive → matches ASM normal;
+    negative → inverted. At any plausible SNR this 32-bit coherent
+    vote is effectively noise-free.
+
+    `max_copies` is the cap before the oldest copies are decayed by
+    halving (exponential forgetting). Set to a large number in
+    simulation to get unbounded accumulation.
     """
 
-    def __init__(self, n_bits: int, pass_rms: float = 0.3,
-                 max_copies: int = 16):
+    def __init__(self, n_bits: int, pass_rms: float = 0.6,
+                 max_copies: int = 64, max_asm_errs: int = 2):
         self.n_bits = n_bits
         self.pass_rms = pass_rms
         self.max_copies = max_copies
+        self.max_asm_errs = max_asm_errs
         self.accumulated = np.zeros(n_bits, dtype=np.float64)
         self.n_copies = 0
-        self.first_polarity_bit0: Optional[int] = None
+        self._asm_signs = np.where(_ASM_BITS == 0, 1.0, -1.0).astype(np.float64)
 
     def reset(self) -> None:
         self.accumulated.fill(0.0)
         self.n_copies = 0
-        self.first_polarity_bit0 = None
 
     def try_add(self, result: dict) -> bool:
         """Try to add a block-decode result to the accumulator.
 
         Returns True if the result was accepted and added, False otherwise.
         Accept conditions:
-        - status in {frame_soft, decrypt_ok, noise_lock-with-clean-fit}
-        - result contains 'llrs' and 'c_frame' keys
-        - phase_rms_residual_rad ≤ pass_rms (clean fit)
-        - asm_errs_in_coherent == 0 (ASM structurally matches)
+        - result contains 'llrs' (per-bit coherent soft values)
+        - phase_rms_residual_rad ≤ pass_rms
+        - asm_errs_in_coherent ≤ max_asm_errs (≤2 by default)
         """
         llrs = result.get("llrs")
-        c_frame = result.get("c_frame")
         rms = result.get("phase_rms_residual_rad")
         asm_errs = result.get("asm_errs_in_coherent")
-        if llrs is None or c_frame is None:
+        if llrs is None:
             return False
         if rms is None or rms > self.pass_rms:
             return False
-        if asm_errs is None or asm_errs != 0:
+        if asm_errs is None or asm_errs > self.max_asm_errs:
             return False
         if len(llrs) < self.n_bits:
             return False
 
-        # Polarity alignment: use the first byte as polarity anchor.
-        # If bit 0 of this copy differs from our stored anchor, flip
-        # the sign of this copy's LLRs before adding.
-        this_bit0 = int(llrs[0] < 0)    # sign of first bit decision
-        if self.first_polarity_bit0 is None:
-            self.first_polarity_bit0 = this_bit0
-            self.accumulated[:] = llrs[:self.n_bits].astype(np.float64)
-        else:
-            sign = 1.0 if this_bit0 == self.first_polarity_bit0 else -1.0
-            self.accumulated += sign * llrs[:self.n_bits].astype(np.float64)
+        # Polarity vote: correlate this copy's first-32 LLRs against the
+        # signed ASM pattern. Positive → matches normal; negative →
+        # matches inverted. 32-dimensional coherent vote is effectively
+        # noise-free at any SNR the decoder can reach.
+        llrs_f64 = llrs[:self.n_bits].astype(np.float64)
+        polarity_vote = float(np.dot(llrs_f64[:32], self._asm_signs))
+        sign = 1.0 if polarity_vote >= 0 else -1.0
+        self.accumulated += sign * llrs_f64
         self.n_copies += 1
         if self.n_copies >= self.max_copies:
-            # Make room for next: drop the oldest by halving. This gives
-            # exponential forgetting; old evidence gets de-weighted but
-            # isn't discarded outright.
+            # Exponential forgetting: halve the accumulator when full.
+            # Only reachable with very long-running accumulation; in the
+            # default config of 64 this is effectively never hit.
             self.accumulated *= 0.5
             self.n_copies //= 2
         return True

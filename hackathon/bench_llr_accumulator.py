@@ -194,8 +194,7 @@ def _run_one_trial(
 ) -> dict:
     accumulator = dd.LlrAccumulator(
         n_bits=sc.HAIL_FRAME_LEN * 8,
-        pass_rms=0.3,
-        max_copies=max_n * 2 + 1,
+        max_copies=max_n * 2 + 1,   # never hit the halving decay in sim
     )
     single_copy = np.zeros(max_n, dtype=bool)
     admissions = np.zeros(max_n, dtype=bool)
