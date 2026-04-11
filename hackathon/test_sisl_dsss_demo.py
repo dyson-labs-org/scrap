@@ -232,6 +232,60 @@ def test_offline_decode_hail_wrong_key_fails():
         os.unlink(path)
 
 
+# ── Live block decoder (pure numpy, no SoapySDR) ──────────────────────────
+
+def _make_block_with_hail(prefix_samples: int = 50_000,
+                          suffix_samples: int = 50_000,
+                          phase_offset: int = 0) -> tuple[np.ndarray, bytes]:
+    """Synthesize a baseband block containing one demo hail.
+
+    `phase_offset`: shift the signal start by N samples so the chip grid
+    doesn't align at sample 0. Exercises the sub-chip phase search in
+    _decode_one_hail_in_block.
+    """
+    frame = dd.build_demo_hail()
+    chips = dd.build_tx_chips(frame)
+    signal = dd.upsample_chips_to_samples(chips)
+    prefix = np.zeros(prefix_samples + phase_offset, dtype=np.complex64)
+    suffix = np.zeros(suffix_samples, dtype=np.complex64)
+    block = np.concatenate([prefix, signal, suffix])
+    return block, frame
+
+
+def test_decode_one_hail_in_block_correct_key():
+    block, _ = _make_block_with_hail()
+    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    assert result["status"] == "decrypt_ok", result
+    assert result["body"].center_freq_offset == 100
+    assert result["body"].mode == 0x01
+
+
+def test_decode_one_hail_in_block_wrong_key():
+    block, _ = _make_block_with_hail()
+    result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
+    assert result["status"] == "decrypt_fail", result
+
+
+def test_decode_one_hail_in_block_pure_noise():
+    rng = np.random.default_rng(seed=42)
+    noise = (
+        rng.normal(0, 0.05, 8_000_000).astype(np.float32)
+        + 1j * rng.normal(0, 0.05, 8_000_000).astype(np.float32)
+    ).astype(np.complex64)
+    result = dd._decode_one_hail_in_block(noise, dd.demo_responder_key())
+    # Pure noise: no signal, no lock, no hail — any of these is acceptable
+    assert result["status"] in ("no_signal", "no_lock", "no_hail"), result
+
+
+def test_decode_one_hail_in_block_sub_chip_phase_offset():
+    """Signal starts at a non-integer-chip sample — sub-chip search needed."""
+    block, _ = _make_block_with_hail(phase_offset=3)   # 3 of 8 samples off
+    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    # Because _decode_one_hail_in_block iterates all 8 chip phases, it
+    # finds the shifted signal and recovers it.
+    assert result["status"] == "decrypt_ok", result
+
+
 def test_offline_decode_hail_repeats():
     """Multiple hail copies in the capture still decode the first."""
     with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:

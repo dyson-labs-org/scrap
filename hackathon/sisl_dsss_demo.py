@@ -343,6 +343,242 @@ def offline_despread(cfile_path: str,
 
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 
+# ── Live RX: stream samples and decode hails in real time ─────────────────
+
+# Detection threshold for "is there a signal here at all?" — matched-filter
+# peak magnitude must exceed SIGNAL_FLOOR_RATIO × median. For a clean TX
+# under attenuators, the signal peak is ~CHIPS_PER_SYMBOL (≈1023); noise
+# floor is ~30. Ratio of 10 rejects pure noise cheaply.
+_SIGNAL_FLOOR_RATIO = 10.0
+
+
+def _decode_one_hail_in_block(
+    samples: np.ndarray,
+    responder_static: ec.EllipticCurvePrivateKey,
+    samps_per_chip: int = SAMPS_PER_CHIP,
+) -> dict:
+    """Process one block of baseband samples, try to decode one SISL hail.
+
+    Iterates over all `samps_per_chip` possible sub-chip decimation phases
+    (HackRF RX starts at an arbitrary sample relative to the TX chip grid);
+    the first phase that both locks the matched filter AND contains a
+    detectable SISL frame is used.
+
+    Returns a status dict. Statuses:
+      no_signal       — no matched-filter peak above noise in any phase
+      no_lock         — signal present but find_frame_start rejected
+      short_block     — not enough chips after the lock for one hail
+      no_hail         — locked but decoded bytes contain no SISL ASM
+      decrypt_fail    — hail found but Poly1305 tag mismatch (wrong key)
+      decrypt_ok      — hail decoded and decrypted under responder_static
+    """
+    any_signal = False
+    attempted_decode = False
+
+    for phase in range(samps_per_chip):
+        trimmed = samples[phase:]
+        n_full = (len(trimmed) // samps_per_chip) * samps_per_chip
+        if n_full < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
+            # Need at least 200 chips worth of stream to matter
+            continue
+
+        i = trimmed[:n_full].real.astype(np.float32)
+        chips = i.reshape(-1, samps_per_chip).mean(axis=1)
+
+        mag = sf.matched_filter_magnitude(chips)
+        if len(mag) == 0:
+            continue
+        peak_mag = float(mag.max())
+        median_mag = float(np.median(mag))
+        if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
+            continue    # no signal at this phase
+
+        any_signal = True
+        offset = sf.find_frame_start(chips)
+        if offset is None:
+            continue
+
+        # Decode twice a hail's worth — ensures the ASM (and entire frame)
+        # fits within the decoded bytes regardless of alignment.
+        chips_per_byte = 8 * sf.CHIPS_PER_SYMBOL
+        target_bytes = 2 * sc.HAIL_FRAME_LEN
+        avail_chips = len(chips) - offset
+        n_bytes = min(target_bytes, avail_chips // chips_per_byte)
+        if n_bytes < sc.HAIL_FRAME_LEN:
+            continue                       # not enough room in this phase
+        needed = n_bytes * chips_per_byte
+        decoded = sf.rx_chips_to_bytes(
+            chips[offset:offset + needed], n_bytes
+        )
+        attempted_decode = True
+
+        info = identify_sisl_frame(decoded)
+        if info is None or info["frame_type"] != "hail":
+            continue                       # try next phase
+        if info["frame_bytes"] is None:
+            continue                       # ASM near end of decoded block
+
+        decoded_hail = sc.decode_hail(info["frame_bytes"], responder_static)
+        if decoded_hail is None:
+            return {
+                "status": "decrypt_fail",
+                "phase": phase,
+                "offset": offset,
+                "asm_at_byte": info["asm_offset"],
+                "peak_mag": peak_mag,
+            }
+        return {
+            "status": "decrypt_ok",
+            "phase": phase,
+            "offset": offset,
+            "asm_at_byte": info["asm_offset"],
+            "peak_mag": peak_mag,
+            "body": decoded_hail.body,
+            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+        }
+
+    if not any_signal:
+        return {"status": "no_signal"}
+    if attempted_decode:
+        return {"status": "no_hail"}
+    return {"status": "no_lock"}
+
+
+def _print_live_event(block_num: int, result: dict) -> None:
+    s = result["status"]
+    if s == "decrypt_ok":
+        b = result["body"]
+        print(f"[{block_num:4d}] DECRYPTED  phase={result['phase']}  "
+              f"offset={result['offset']}  asm@byte{result['asm_at_byte']}  "
+              f"peak={result['peak_mag']:.0f}  "
+              f"nonce={b.body_nonce.hex()}  "
+              f"freq=+{b.center_freq_offset}MHz  mode=0x{b.mode:02x}")
+    elif s == "decrypt_fail":
+        print(f"[{block_num:4d}] FRAME FOUND  phase={result['phase']}  "
+              f"asm@byte{result['asm_at_byte']}  — DECRYPT FAILED "
+              f"(wrong target key)")
+    elif s == "no_hail":
+        print(f"[{block_num:4d}] locked but no SISL hail in decoded bytes")
+    elif s == "no_lock":
+        print(f"[{block_num:4d}] signal present but no frame lock")
+    elif s == "no_signal":
+        print(f"[{block_num:4d}] no signal (noise only)")
+    elif s == "short_block":
+        print(f"[{block_num:4d}] short block (processing gap)")
+
+
+def live_rx_decode(
+    duration_s: float = 10.0,
+    block_seconds: float = 1.5,
+    responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
+    save_path: Optional[str] = None,
+) -> dict:
+    """Stream samples from HackRF, decode SISL hails in real time.
+
+    Uses SoapySDR directly (not GNU Radio) so we have synchronous control
+    of the sample buffer and can run numpy processing in the same thread.
+    Each ~block_seconds worth of samples is processed as a unit; a hail
+    that spans a block boundary is missed this block but caught on the
+    next TX repetition.
+
+    Returns a stats dict: blocks_processed, hails_detected, hails_decrypted,
+    elapsed_s, ok, error.
+    """
+    try:
+        import SoapySDR
+        from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
+    except ImportError as e:
+        return {
+            "ok": False,
+            "error": f"SoapySDR Python bindings not available: {e}. "
+                     f"Install with 'sudo pacman -S python-soapysdr' (Arch).",
+        }
+
+    if responder_static is None:
+        responder_static = demo_responder_key()
+
+    print(f"opening HackRF at {CENTER_FREQ_HZ/1e6:.1f} MHz, "
+          f"{SAMP_RATE_HZ/1e6:.1f} Msps, block={block_seconds}s "
+          f"(processing {int(block_seconds*SAMP_RATE_HZ*8/1e6)} MB/block)")
+
+    device = SoapySDR.Device({"driver": "hackrf"})
+    device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
+    device.setFrequency(SOAPY_SDR_RX, 0, CENTER_FREQ_HZ)
+    try:
+        device.setGain(SOAPY_SDR_RX, 0, "AMP", False)
+    except Exception:
+        pass   # some SoapyHackRF builds expose AMP as float
+    device.setGain(SOAPY_SDR_RX, 0, "LNA", HACKRF_RX_LNA_DB)
+    device.setGain(SOAPY_SDR_RX, 0, "VGA", HACKRF_RX_VGA_DB)
+
+    stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0])
+    device.activateStream(stream)
+
+    save_file = open(save_path, "wb") if save_path else None
+    block_samples = int(block_seconds * SAMP_RATE_HZ)
+    buf = np.empty(block_samples, dtype=np.complex64)
+
+    stats = {
+        "ok": True,
+        "blocks_processed": 0,
+        "hails_detected": 0,
+        "hails_decrypted": 0,
+    }
+    t_start = time.time()
+
+    try:
+        while time.time() - t_start < duration_s:
+            filled = 0
+            overflow = False
+            while filled < block_samples:
+                sr = device.readStream(
+                    stream,
+                    [buf[filled:]],
+                    block_samples - filled,
+                    timeoutUs=1_000_000,
+                )
+                if sr.ret > 0:
+                    filled += sr.ret
+                elif sr.ret == -1:              # SOAPY_SDR_TIMEOUT
+                    break
+                elif sr.ret == -4:              # SOAPY_SDR_OVERFLOW
+                    overflow = True
+                    break
+                else:
+                    print(f"  readStream error {sr.ret}")
+                    break
+
+            if filled < block_samples // 2:
+                if overflow:
+                    print("  OVERFLOW — processing can't keep up, "
+                          "drop block")
+                continue
+
+            stats["blocks_processed"] += 1
+
+            if save_file is not None:
+                buf[:filled].tofile(save_file)
+
+            result = _decode_one_hail_in_block(buf[:filled], responder_static)
+            _print_live_event(stats["blocks_processed"], result)
+
+            if result["status"] == "decrypt_ok":
+                stats["hails_detected"] += 1
+                stats["hails_decrypted"] += 1
+            elif result["status"] in ("decrypt_fail", "no_hail"):
+                stats["hails_detected"] += 1
+    except KeyboardInterrupt:
+        print("  interrupted")
+    finally:
+        device.deactivateStream(stream)
+        device.closeStream(stream)
+        if save_file is not None:
+            save_file.close()
+
+    stats["elapsed_s"] = time.time() - t_start
+    return stats
+
+
 def offline_decode_hail(
     cfile_path: str,
     responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
@@ -451,9 +687,13 @@ def main() -> int:
                         help="offline: bound the acquisition search window")
     parser.add_argument("--as", dest="as_key",
                         choices=("responder", "other"), default="responder",
-                        help="offline: which demo key to trial-decrypt as. "
+                        help="offline/rx: which demo key to trial-decrypt as. "
                              "'responder' is the correct target, 'other' "
                              "should fail (demonstrates the identity oracle)")
+    parser.add_argument("--save", action="store_true",
+                        help="rx: also write raw samples to --capture path")
+    parser.add_argument("--block-seconds", type=float, default=1.5,
+                        help="rx: processing block duration (default 1.5 s)")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
@@ -531,6 +771,38 @@ def main() -> int:
               f"{decoded_hail.caller_eph_pub_canonical.hex()}")
         return 0
 
+    if args.mode == "rx":
+        # Live RX: stream from HackRF, decode hails in real time.
+        # Uses SoapySDR directly (not GR) so the processing thread can do
+        # numpy DSP synchronously without a GR flowgraph wrapper.
+        responder = (demo_responder_key() if args.as_key == "responder"
+                     else demo_other_key())
+        label = ("demo-responder (correct target)"
+                 if args.as_key == "responder"
+                 else "demo-other (WRONG key — should fail)")
+        print(f"rx: live decode for {args.duration:.1f} s as {label}")
+        save = args.capture if args.save else None
+        if save is not None:
+            print(f"  also saving raw samples → {save}")
+        stats = live_rx_decode(
+            duration_s=args.duration,
+            block_seconds=args.block_seconds,
+            responder_static=responder,
+            save_path=save,
+        )
+        if not stats.get("ok", False):
+            print(f"rx failed: {stats.get('error', 'unknown')}",
+                  file=sys.stderr)
+            return 2
+        print()
+        print("RX summary:")
+        print(f"  elapsed:         {stats['elapsed_s']:.1f} s")
+        print(f"  blocks:          {stats['blocks_processed']}")
+        print(f"  hails detected:  {stats['hails_detected']}")
+        print(f"  hails decrypted: {stats['hails_decrypted']}")
+        return 0 if stats["hails_decrypted"] > 0 else 1
+
+    # mode == "tx"
     if not _HAVE_GR:
         print("gnuradio not installed — run after:")
         print("  sudo pacman -S gnuradio gnuradio-companion "
@@ -538,22 +810,18 @@ def main() -> int:
         return 2
 
     tb = DSSSHiddenSignalTop(args.mode)
-    if args.mode == "tx":
-        frame = tb.hail_frame
-        print(f"tx: transmitting demo hail ({len(frame)} bytes) "
-              f"to {CENTER_FREQ_HZ / 1e6:.1f} MHz for {args.duration:.1f} s")
-        print(f"  asm:           {frame[0:4].hex()}")
-        print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
-        print(f"  target key:    demo-responder (deterministic)")
-    else:
-        print(f"rx: capturing {args.duration:.1f} s @ "
-              f"{SAMP_RATE_HZ / 1e6:.1f} Msps to /tmp/sisl_rx.cfile")
+    frame = tb.hail_frame
+    print(f"tx: transmitting demo hail ({len(frame)} bytes) "
+          f"to {CENTER_FREQ_HZ / 1e6:.1f} MHz for {args.duration:.1f} s")
+    print(f"  asm:           {frame[0:4].hex()}")
+    print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
+    print(f"  target key:    demo-responder (deterministic)")
 
     tb.start()
     time.sleep(args.duration)
     tb.stop()
     tb.wait()
-    print(f"done; capture at /tmp/sisl_{args.mode}.cfile")
+    print(f"done")
     return 0
 
 
