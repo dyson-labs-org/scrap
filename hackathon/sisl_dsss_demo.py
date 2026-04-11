@@ -72,7 +72,7 @@ import sisl_framer as sf
 
 # ── Demo parameters ─────────────────────────────────────────────────────────
 
-CENTER_FREQ_HZ = 2_437_000_000          # WiFi ch 6
+CENTER_FREQ_HZ = 2_437_000_000          # default: WiFi ch 6 (may be noisy!)
 CHIP_RATE_HZ = 1_000_000                # 1 Mcps
 SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF supported integer rate)
 SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
@@ -80,6 +80,46 @@ HACKRF_TX_VGA_DB = 0                    # TX IF gain, 0..47 dB. Default = min.
 HACKRF_TX_AMP_ON = False                # TX RF PA (14 dB). Off by default.
 HACKRF_RX_VGA_DB = 20                   # conservative
 HACKRF_RX_LNA_DB = 16                   # conservative
+
+
+# ── Suggested quieter frequencies ──────────────────────────────────────────
+#
+# 2.4 GHz ISM is saturated at hackathons and any venue with WiFi/BT. These
+# are alternatives the HackRF can reach (1 MHz – 6 GHz tuning range). All
+# values are in MHz. Regulatory note: ISM bands are generally permitted
+# for low-power research; licensed bands (amateur, commercial) are not.
+# Check your local regulator.
+SUGGESTED_FREQS_MHZ = [
+    # (MHz,  band,            notes)
+    (2484,   "2.4 GHz ISM",   "Japan WiFi ch 14 — empty in US/EU"),
+    (2422,   "2.4 GHz ISM",   "between WiFi ch 2/3, narrow quiet slot"),
+    (2467,   "2.4 GHz ISM",   "between WiFi ch 11/13"),
+    (5760,   "5.8 GHz ISM",   "below WiFi 802.11a ch 153 — usually clean"),
+    (5820,   "5.8 GHz ISM",   "between WiFi ch 161/165"),
+    (5875,   "5.8 GHz ISM",   "top of 5 GHz ISM, usually empty"),
+    (915,    "US 915 ISM",    "LoRa/Z-Wave band (US only)"),
+    (868,    "EU 868 ISM",    "LoRa/Sigfox (EU only)"),
+    (433,    "433 ISM",       "garage-remote band (worldwide)"),
+]
+
+
+def _format_freq_suggestions() -> str:
+    lines = [
+        "",
+        "Suggested quieter frequencies (--freq in MHz):",
+        "",
+        "  MHz    band           notes",
+        "  -----  -------------  ----------------------------------------",
+    ]
+    for mhz, band, note in SUGGESTED_FREQS_MHZ:
+        lines.append(f"  {mhz:<5}  {band:<13}  {note}")
+    lines.append("")
+    lines.append("  Default is 2437 MHz (WiFi ch 6 — often noisy at hackathons).")
+    lines.append("  Higher frequencies (5.8 GHz) have ~8 dB more path loss than")
+    lines.append("  2.4 GHz; lower frequencies (< 1 GHz) need larger antennas.")
+    lines.append("  All listed values are legal ISM bands for low-power research")
+    lines.append("  in the regions noted. Check your local regulator.")
+    return "\n".join(lines)
 
 
 # ── Demo keys (reproducible, NOT SECRET) ────────────────────────────────────
@@ -191,12 +231,14 @@ if _HAVE_GR:
         def __init__(self, mode: str,
                      tx_vga_db: int = HACKRF_TX_VGA_DB,
                      tx_amp_on: bool = HACKRF_TX_AMP_ON,
+                     center_hz: float = CENTER_FREQ_HZ,
                      hackrf_device: str = "hackrf=0"):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
             self.tx_vga_db = tx_vga_db
             self.tx_amp_on = tx_amp_on
+            self.center_hz = center_hz
 
             if mode == "tx":
                 # Always TX a fresh SISL v3 hail targeting demo-responder.
@@ -216,7 +258,7 @@ if _HAVE_GR:
                         "driver=hackrf", "fc32", 1, "", "", [""], [""]
                     )
                     self._sink.set_sample_rate(0, SAMP_RATE_HZ)
-                    self._sink.set_frequency(0, CENTER_FREQ_HZ)
+                    self._sink.set_frequency(0, center_hz)
                     # Explicit float dB for AMP — matches RX AMP handling.
                     # HackRF TX AMP is two-state: 0.0 dB (off) or 14.0 dB (on).
                     self._sink.set_gain(0, "AMP", 14.0 if tx_amp_on else 0.0)
@@ -234,7 +276,7 @@ if _HAVE_GR:
                         "driver=hackrf", "fc32", 1, "", "", [""], [""]
                     )
                     self._src.set_sample_rate(0, SAMP_RATE_HZ)
-                    self._src.set_frequency(0, CENTER_FREQ_HZ)
+                    self._src.set_frequency(0, center_hz)
                     self._src.set_gain(0, "AMP", False)
                     self._src.set_gain(0, "LNA", HACKRF_RX_LNA_DB)
                     self._src.set_gain(0, "VGA", HACKRF_RX_VGA_DB)
@@ -534,6 +576,7 @@ def live_rx_decode(
     lna_db: int = HACKRF_RX_LNA_DB,
     vga_db: int = HACKRF_RX_VGA_DB,
     amp_on: bool = False,
+    center_hz: float = CENTER_FREQ_HZ,
 ) -> dict:
     """Stream samples from HackRF, decode SISL hails in real time.
 
@@ -566,7 +609,7 @@ def live_rx_decode(
     if responder_static is None:
         responder_static = demo_responder_key()
 
-    print(f"opening HackRF at {CENTER_FREQ_HZ/1e6:.1f} MHz, "
+    print(f"opening HackRF at {center_hz/1e6:.1f} MHz, "
           f"{SAMP_RATE_HZ/1e6:.1f} Msps, block={block_seconds}s "
           f"(processing {int(block_seconds*SAMP_RATE_HZ*8/1e6)} MB/block)")
     print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
@@ -574,7 +617,7 @@ def live_rx_decode(
 
     device = SoapySDR.Device("driver=hackrf")
     device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
-    device.setFrequency(SOAPY_SDR_RX, 0, CENTER_FREQ_HZ)
+    device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
     # SoapyHackRF exposes AMP as a two-state float gain: 0.0 dB (off) or
     # 14.0 dB (on). Passing a bool silently coerces True→1.0 which is not
     # the same as 14.0 dB. Always use explicit dB values.
@@ -746,7 +789,11 @@ def identify_sisl_frame(data: bytes) -> Optional[dict]:
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="SISL Phase 1 DSSS demo")
+    parser = argparse.ArgumentParser(
+        description="SISL Phase 1 DSSS demo",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_format_freq_suggestions(),
+    )
     parser.add_argument("--mode",
                         choices=("tx", "rx", "tx-to-file", "offline"),
                         required=True)
@@ -791,6 +838,12 @@ def main() -> int:
                              "default — only enable if link budget demands "
                              "it and you have ≥40 dB of attenuation to the "
                              "peer RX")
+    parser.add_argument("--freq", type=float,
+                        default=CENTER_FREQ_HZ / 1e6,
+                        help=f"tx/rx center frequency in MHz "
+                             f"(default {CENTER_FREQ_HZ/1e6:.0f}). "
+                             f"See list at bottom of --help for quieter "
+                             f"alternatives.")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
@@ -889,6 +942,7 @@ def main() -> int:
             lna_db=args.rx_lna,
             vga_db=args.rx_vga,
             amp_on=args.rx_amp,
+            center_hz=args.freq * 1e6,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -918,10 +972,11 @@ def main() -> int:
         args.mode,
         tx_vga_db=args.tx_vga,
         tx_amp_on=args.tx_amp,
+        center_hz=args.freq * 1e6,
     )
     frame = tb.hail_frame
     print(f"tx: transmitting demo hail ({len(frame)} bytes) "
-          f"to {CENTER_FREQ_HZ / 1e6:.1f} MHz for {args.duration:.1f} s")
+          f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
     print(f"  asm:           {frame[0:4].hex()}")
     print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
     print(f"  target key:    demo-responder (deterministic)")

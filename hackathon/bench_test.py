@@ -7,11 +7,16 @@ SoapySDRUtil, hackrf_sweep) are optional: the diag mode reports which
 ones are present and skips the rest.
 
 Usage (from the repo root or the hackathon directory):
-    python hackathon/bench_test.py diag   # RF diagnostics
-    python hackathon/bench_test.py loop   # pure-DSP loopback (no radio)
-    python hackathon/bench_test.py tx     # TX power sweep (TX machine)
-    python hackathon/bench_test.py rx     # RX gain sweep (RX machine)
-    python hackathon/bench_test.py help   # this help
+    python hackathon/bench_test.py diag             # RF diagnostics
+    python hackathon/bench_test.py loop             # pure-DSP loopback
+    python hackathon/bench_test.py tx [freq_mhz]    # TX power sweep
+    python hackathon/bench_test.py rx [freq_mhz]    # RX gain sweep
+    python hackathon/bench_test.py help             # this help
+
+Optional `freq_mhz` overrides the center frequency for that sweep. Both
+machines must use the same value. Default is 2437 MHz. Try 5820 if the
+2.4 GHz band is crowded. See sisl_dsss_demo.py --help for a full list
+of suggested quieter frequencies.
 
 Each step runs until the sub-process exits (usually 30 s duration), then
 waits for ENTER before advancing. Ctrl+C aborts the current step; Ctrl+C
@@ -141,7 +146,8 @@ def mode_loop() -> int:
     return 0
 
 
-def mode_tx() -> int:
+def mode_tx(freq_mhz: float | None = None) -> int:
+    freq_args = ["--freq", f"{freq_mhz:.3f}"] if freq_mhz is not None else []
     steps = [
         ("T0", "MINIMUM power (VGA=0, AMP off)",
          ["--tx-vga", "0"],
@@ -168,12 +174,15 @@ def mode_tx() -> int:
     for tag, desc, extra, note in steps:
         banner(f"{tag}. TX step — {desc}")
         print(note)
+        if freq_args:
+            print(f"  using center freq {freq_mhz:.3f} MHz")
         pause()
-        demo("--mode", "tx", "--duration", "30", *extra)
+        demo("--mode", "tx", "--duration", "30", *freq_args, *extra)
     return 0
 
 
-def mode_rx() -> int:
+def mode_rx(freq_mhz: float | None = None) -> int:
+    freq_args = ["--freq", f"{freq_mhz:.3f}"] if freq_mhz is not None else []
     steps = [
         ("R0", "default gain (LNA=16, VGA=20)",
          [],
@@ -200,8 +209,10 @@ def mode_rx() -> int:
     for tag, desc, extra, note in steps:
         banner(f"{tag}. RX step — {desc}")
         print(note)
+        if freq_args:
+            print(f"  using center freq {freq_mhz:.3f} MHz")
         pause()
-        demo("--mode", "rx", "--duration", "30", *extra)
+        demo("--mode", "rx", "--duration", "30", *freq_args, *extra)
     print()
     print("If R5 wrote /tmp/sisl_rx.cfile, try:")
     print(f"  python {DEMO} --mode offline --capture /tmp/sisl_rx.cfile --as responder")
@@ -227,8 +238,19 @@ MODES = {
 def main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] not in MODES:
         return mode_help()
+    mode = argv[1]
     try:
-        return MODES[argv[1]]()
+        if mode in ("tx", "rx"):
+            # Optional positional: frequency in MHz
+            freq_mhz = None
+            if len(argv) >= 3:
+                try:
+                    freq_mhz = float(argv[2])
+                except ValueError:
+                    print(f"bad freq argument: {argv[2]!r}", file=sys.stderr)
+                    return 2
+            return MODES[mode](freq_mhz)
+        return MODES[mode]()
     except KeyboardInterrupt:
         print("\n(bench test aborted)")
         return 130
