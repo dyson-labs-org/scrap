@@ -518,6 +518,59 @@ _ASM_BITS = np.unpackbits(
 ).astype(np.uint8)
 
 
+def find_sisl_frame_bitwise_fuzzy(
+    decoded_bytes: bytes,
+    frame_len: int = sc.HAIL_FRAME_LEN,
+    max_errors: int = 3,
+) -> Optional[tuple[int, bytes, int]]:
+    """Like find_sisl_frame_bitwise but tolerates up to `max_errors` flipped
+    bits in the ASM, returning the best match found.
+
+    Scans every bit offset and computes the Hamming distance between the
+    32-bit ASM pattern and each candidate window. Returns the match with
+    the SMALLEST distance, as long as it's ≤ max_errors.
+
+    False positive rates (vs random 32-bit windows):
+      0 errors → ≈ 2⁻³² per offset (1 in 4 billion)
+      1 error  → ≈ 32 × 2⁻³² ≈ 7 × 10⁻⁹
+      2 errors → ≈ 496 × 2⁻³² ≈ 1 × 10⁻⁷
+      3 errors → ≈ 4960 × 2⁻³² ≈ 1 × 10⁻⁶
+    Over ~2000 bit offsets per block, 3-error threshold gives ~0.2 %
+    block false positive rate. Acceptable for diagnostic use.
+
+    Returns (bit_offset, frame_bytes, asm_distance) on success, else None.
+    """
+    n_frame_bits = frame_len * 8
+    if len(decoded_bytes) * 8 < n_frame_bits + 32:
+        return None
+
+    bits = np.unpackbits(np.frombuffer(decoded_bytes, dtype=np.uint8))
+    max_bit_offset = len(bits) - n_frame_bits
+    if max_bit_offset <= 0:
+        return None
+
+    asm_len = len(_ASM_BITS)
+    best_distance = asm_len + 1
+    best_offset = -1
+
+    # Vectorized: convert the sliding-window hamming distance to an xor+sum
+    for bit_start in range(max_bit_offset + 1):
+        window = bits[bit_start:bit_start + asm_len]
+        distance = int(np.sum(window ^ _ASM_BITS))
+        if distance < best_distance:
+            best_distance = distance
+            best_offset = bit_start
+            if distance == 0:
+                break   # exact match; can't improve
+
+    if best_distance > max_errors:
+        return None
+
+    frame_bits = bits[best_offset:best_offset + n_frame_bits]
+    frame_bytes = np.packbits(frame_bits).tobytes()
+    return best_offset, frame_bytes, best_distance
+
+
 def find_sisl_frame_bitwise(
     decoded_bytes: bytes,
     frame_len: int = sc.HAIL_FRAME_LEN,
@@ -713,6 +766,9 @@ def _decode_one_hail_in_block(
 
     # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
     decoded_inv = bytes(b ^ 0xFF for b in decoded)
+    # Track the best fuzzy match across both polarities so we can at least
+    # REPORT the ASM hamming distance even if exact/fuzzy decrypt fails.
+    best_fuzzy = None        # (polarity, bit_offset, frame_bytes, distance)
     for variant_label, variant in (("normal", decoded), ("inverted", decoded_inv)):
         # ── First: byte-aligned ASM search (fast, common case) ─────
         info = identify_sisl_frame(variant)
@@ -722,16 +778,27 @@ def _decode_one_hail_in_block(
             frame_bytes = info["frame_bytes"]
             asm_location = f"byte{info['asm_offset']}"
 
-        # ── Fallback: bit-level sliding ASM search ─────────────────
-        # The live decoder reconstructs bits in TX order but has no
-        # idea where the TX's byte boundaries are — the first decoded
-        # bit could be at any of 8 possible sub-byte positions within
-        # a TX byte. Bit-level search catches this.
+        # ── Fallback 1: bit-level exact sliding ASM search ─────────
         if frame_bytes is None:
             bitwise = find_sisl_frame_bitwise(variant, sc.HAIL_FRAME_LEN)
             if bitwise is not None:
                 bit_offset, frame_bytes = bitwise
                 asm_location = f"bit{bit_offset}"
+
+        # ── Fallback 2: fuzzy bit-level ASM search (up to 3 errs) ──
+        # Even under moderate bit errors we can find the ASM within
+        # hamming distance 3. The frame probably won't decrypt (Poly1305
+        # is bit-exact) but we can REPORT that a frame was found with
+        # quantitative error information — valuable diagnostic.
+        if frame_bytes is None:
+            fuzzy = find_sisl_frame_bitwise_fuzzy(
+                variant, sc.HAIL_FRAME_LEN, max_errors=3,
+            )
+            if fuzzy is not None:
+                bit_offset, fuzzy_bytes, asm_distance = fuzzy
+                if best_fuzzy is None or asm_distance < best_fuzzy[3]:
+                    best_fuzzy = (variant_label, bit_offset, fuzzy_bytes,
+                                   asm_distance)
 
         if frame_bytes is None:
             continue
@@ -759,6 +826,26 @@ def _decode_one_hail_in_block(
             "freq_offset_hz": freq_hz,
             "body": decoded_hail.body,
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+        }
+
+    # ── Neither polarity has an exact ASM, but we may have a fuzzy match
+    # If so, return a diagnostic status showing the decoder found the
+    # frame with some bit errors. This proves the demodulator is
+    # working even when we can't fully decrypt.
+    if best_fuzzy is not None:
+        polarity_label, fuzzy_bit_offset, fuzzy_frame, fuzzy_dist = best_fuzzy
+        return {
+            "status": "frame_fuzzy",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "start_sample": positions[0] if positions else 0,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "polarity": polarity_label,
+            "asm_distance": fuzzy_dist,
+            "asm_at_byte": f"bit{fuzzy_bit_offset}",
+            "first_16_bytes_hex": fuzzy_frame[:16].hex(),
+            "drift_per_symbol_rad": track_result.get("drift_per_symbol_rad", 0.0),
         }
 
     # Neither polarity contains a SISL ASM — either interference or
@@ -803,6 +890,16 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"Δf={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
               f"— DECRYPT FAILED (not addressed to this key)")
+    elif s == "frame_fuzzy":
+        d = result.get("asm_distance", -1)
+        print(f"[{block_num:4d}] FRAME FUZZY  "
+              f"asm@{result['asm_at_byte']}  "
+              f"ASM hamming={d}/32  "
+              f"peak={result['peak_mag']:.3g}  "
+              f"Δf={foff:+.0f}Hz  pol={result.get('polarity', '?')}  "
+              f"— frame detected with {d} bit errors, "
+              f"too noisy to decrypt")
+        print(f"       first 16 bytes: {result.get('first_16_bytes_hex','')}")
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
@@ -956,6 +1053,7 @@ def live_rx_decode(
         "blocks_processed": 0,
         "hails_detected": 0,     # frame header parsed (decrypt ok OR fail)
         "hails_decrypted": 0,    # decrypt_ok only
+        "frames_fuzzy": 0,       # ASM found with 1-3 bit errors
         "interference": 0,       # signal crossed threshold but no SISL ASM
         "overflows": 0,
     }
@@ -1007,6 +1105,8 @@ def live_rx_decode(
                 stats["hails_decrypted"] += 1
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
+            elif s == "frame_fuzzy":
+                stats["frames_fuzzy"] += 1
             elif s == "no_hail":
                 stats["interference"] += 1
     except KeyboardInterrupt:
@@ -1298,6 +1398,8 @@ def main() -> int:
         print(f"  overflows:       {stats.get('overflows', 0)}")
         print(f"  interference:    {stats.get('interference', 0)} "
               "(strong signal, non-SISL)")
+        print(f"  fuzzy matches:   {stats.get('frames_fuzzy', 0)} "
+              "(ASM found with 1-3 bit errors, too noisy to decrypt)")
         print(f"  hails detected:  {stats['hails_detected']} "
               "(SISL frame parsed)")
         print(f"  hails decrypted: {stats['hails_decrypted']} "
