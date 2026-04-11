@@ -998,18 +998,50 @@ def _decode_one_hail_in_block(
                 # drift accumulation that breaks long frames.
                 aligned_peaks = peak_values[soft_offset:]
                 n_frame_bits = sc.HAIL_FRAME_LEN * 8
+                c_frame = None
+                c_theta0 = c_delta = c_rms = None
+                c_asm_errs = None
                 if len(aligned_peaks) >= n_frame_bits:
                     coherent = sf.coherent_decode_from_pilot(
                         aligned_peaks, 0, _ASM_BITS, n_frame_bits,
                     )
                     if coherent is not None:
                         c_frame, _c_soft, c_theta0, c_delta, c_rms = coherent
-                        # Absolute phase has π ambiguity: try both polarities
-                        for label, candidate in (
+                        # How many of the first 32 decoded bits match the
+                        # ASM? If >8 wrong, the linear fit likely settled
+                        # on a slope off by ±π/symbol (common at residual
+                        # freq offsets near half the symbol rate).
+                        c_bits_first32 = np.unpackbits(
+                            np.frombuffer(c_frame[:4], dtype=np.uint8))
+                        c_asm_errs = int(np.sum(c_bits_first32 != _ASM_BITS))
+
+                        # Candidate decrypts. In addition to the π global
+                        # phase ambiguity (XOR 0xFF per byte), we also try
+                        # the "π/symbol" ambiguity: alternating bit flips
+                        # via XOR 0xAA/0x55 which undo a polyfit slope
+                        # settled on slope±π/symbol.
+                        def _xor_bytes(b: bytes, mask: int) -> bytes:
+                            return bytes(x ^ mask for x in b)
+                        def _xor_alt(b: bytes, even_mask: int,
+                                      odd_mask: int) -> bytes:
+                            out = bytearray(len(b))
+                            for i, x in enumerate(b):
+                                out[i] = x ^ (even_mask if i % 2 == 0
+                                              else odd_mask)
+                            return bytes(out)
+                        candidates = [
                             ("coherent", c_frame),
-                            ("coherent-inv",
-                             bytes(b ^ 0xFF for b in c_frame)),
-                        ):
+                            ("coherent-inv", _xor_bytes(c_frame, 0xFF)),
+                            ("coherent-alt",
+                             bytes(x ^ 0xAA for x in c_frame)),
+                            ("coherent-alt2",
+                             bytes(x ^ 0x55 for x in c_frame)),
+                            ("coherent-alt-inv",
+                             _xor_alt(c_frame, 0x55, 0xAA)),
+                            ("coherent-alt2-inv",
+                             _xor_alt(c_frame, 0xAA, 0x55)),
+                        ]
+                        for label, candidate in candidates:
                             decoded_hail = sc.decode_hail(
                                 candidate, responder_static)
                             if decoded_hail is not None:
@@ -1026,24 +1058,28 @@ def _decode_one_hail_in_block(
                                     "theta0_rad": c_theta0,
                                     "delta_theta_per_sym": c_delta,
                                     "phase_rms_residual_rad": c_rms,
+                                    "asm_errs_in_coherent": c_asm_errs,
                                     "body": decoded_hail.body,
                                     "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                                 }
                 # Soft correlator found the frame but Poly1305 body
-                # verification failed (both differential and coherent).
-                # NOT a false positive: this is real signal at SNR where
-                # body bit errors prevent AEAD verification. Report as
-                # frame_soft for demo purposes.
-                # Try one more fit to report phase diagnostics.
-                phase_rms = None
-                theta0_diag = None
-                delta_diag = None
-                aligned_peaks_diag = peak_values[soft_offset:]
-                if len(aligned_peaks_diag) >= 32:
-                    fit_diag = sf.fit_phase_from_known_bits(
-                        aligned_peaks_diag, 0, _ASM_BITS)
-                    if fit_diag is not None:
-                        theta0_diag, delta_diag, phase_rms = fit_diag
+                # verification failed (all coherent ambiguity candidates
+                # AND the soft differential frame). NOT a false positive:
+                # this is real signal at SNR where body bit errors prevent
+                # AEAD verification. Report as frame_soft for demo purposes.
+                # Use coherent fit diagnostics from the attempt above.
+                if c_theta0 is None:
+                    # Coherent decode never ran (frame too short after
+                    # aligned_peaks). Do a lightweight fit on just the
+                    # pilot so we can still report phase_rms.
+                    aligned_peaks_diag = peak_values[soft_offset:]
+                    if len(aligned_peaks_diag) >= 32:
+                        fit_diag = sf.fit_phase_from_known_bits(
+                            aligned_peaks_diag, 0, _ASM_BITS)
+                        if fit_diag is not None:
+                            c_theta0, c_delta, c_rms = fit_diag
+                coherent_hex = (c_frame[:16].hex()
+                                 if c_frame is not None else None)
                 return {
                     "status": "frame_soft",
                     "start_sample": positions[0] if positions else 0,
@@ -1055,11 +1091,13 @@ def _decode_one_hail_in_block(
                     "freq_offset_hz": freq_hz,
                     "soft_score": soft_score,
                     "first_16_bytes_hex": soft_frame[:16].hex(),
+                    "coherent_16_bytes_hex": coherent_hex,
+                    "asm_errs_in_coherent": c_asm_errs,
                     "drift_per_symbol_rad": track_result.get(
                         "drift_per_symbol_rad", 0.0),
-                    "theta0_rad": theta0_diag,
-                    "delta_theta_per_sym": delta_diag,
-                    "phase_rms_residual_rad": phase_rms,
+                    "theta0_rad": c_theta0,
+                    "delta_theta_per_sym": c_delta,
+                    "phase_rms_residual_rad": c_rms,
                 }
 
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match
@@ -1170,7 +1208,13 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"phase_rms={rms_str} rad{qual}  "
               f"— SISL frame detected via soft correlator, body bit "
               f"errors prevent Poly1305 verification")
-        print(f"       first 16 bytes: {result.get('first_16_bytes_hex', '')}")
+        print(f"       diff 16 bytes: {result.get('first_16_bytes_hex', '')}")
+        coh = result.get("coherent_16_bytes_hex")
+        asm_errs = result.get("asm_errs_in_coherent")
+        if coh is not None:
+            err_str = (f"(ASM errs in coherent first 32 bits: {asm_errs}/32)"
+                       if asm_errs is not None else "")
+            print(f"       coh  16 bytes: {coh}  {err_str}")
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
