@@ -664,6 +664,9 @@ def _decode_one_hail_in_block(
         "freq_offset_hz": freq_hz,
         "first_16_bytes_hex": decoded[:16].hex(),
         "first_16_inv_hex": decoded_inv[:16].hex(),
+        "drift_per_symbol_rad": track_result.get("drift_per_symbol_rad", 0.0),
+        "first_peak_magnitudes": track_result.get("first_peak_magnitudes", []),
+        "first_peak_angles_rad": track_result.get("first_peak_angles_rad", []),
     }
 
 
@@ -705,13 +708,22 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
         r = p / m if m > 0 else float("inf")
+        drift = result.get("drift_per_symbol_rad", 0.0)
+        drift_deg = drift * 180.0 / 3.14159265
         print(f"[{block_num:4d}] interference: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"Δf={foff:+.0f}Hz")
+              f"Δf={foff:+.0f}Hz, drift={drift_deg:+.1f}°/sym")
         print(f"       first 16 bytes (normal):   "
               f"{result.get('first_16_bytes_hex', '')}")
         print(f"       first 16 bytes (inverted): "
               f"{result.get('first_16_inv_hex', '')}")
+        mags = result.get('first_peak_magnitudes', [])
+        angs = result.get('first_peak_angles_rad', [])
+        if mags and angs:
+            mag_str = " ".join(f"{m_i:.0f}" for m_i in mags[:8])
+            ang_str = " ".join(f"{a_i*180/3.14159:+4.0f}" for a_i in angs[:8])
+            print(f"       first 8 peak |c|:   {mag_str}")
+            print(f"       first 8 peak ∠c:    {ang_str} (degrees)")
     elif s == "no_signal":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)

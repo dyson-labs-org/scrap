@@ -364,46 +364,104 @@ def decode_with_freq_tracking(
 
     ref_angle = float(np.angle(corr_c[pos]))
 
-    # ── 4. Per-symbol tracking loop ───────────────────────────────────
-    # Collect the complex correlator value at each symbol peak. We then
-    # decode DIFFERENTIALLY: each bit is determined by the phase
-    # relationship between CONSECUTIVE symbols, not against a fixed
-    # reference. This is immune to slow carrier phase drift — the drift
-    # per symbol only needs to stay below ±π/2, which allows residual
-    # offsets up to ~250 Hz (≈ 0.25 rad/symbol at 1 ms symbols) even
-    # without any phase tracking. Any residual drift the R[1] estimator
-    # couldn't fully remove is absorbed.
+    # ── 4. Per-symbol tracking loop with sub-sample peak refinement ───
+    # At 2 samples/chip the MF mainlobe is only 2-3 samples wide, so a
+    # bare argmax can lock on the wrong sample and put us on the sinc
+    # sidelobe (wrong phase). Refine each peak via parabolic
+    # interpolation of the magnitude and take a linearly interpolated
+    # correlator value at the refined sample index.
     peak_values: list[complex] = []
     positions: list[int] = []
 
+    def _refine_peak(lo: int, hi: int) -> tuple[Optional[float], Optional[complex]]:
+        """Parabolic peak interpolation.
+
+        Fits y(x) = a·(x-x0)² + b·x + c to the three magnitudes around
+        the argmax. Returns (refined_pos, refined_complex_value). The
+        complex value is linearly interpolated between the two bracket
+        samples at the refined position.
+        """
+        if hi - lo < 3:
+            idx = int(np.argmax(mag[lo:hi]))
+            actual = lo + idx
+            return float(actual), complex(corr_c[actual])
+        window = mag[lo:hi]
+        local_idx = int(np.argmax(window))
+        if local_idx == 0 or local_idx == len(window) - 1:
+            actual = lo + local_idx
+            return float(actual), complex(corr_c[actual])
+        y0 = float(window[local_idx - 1])
+        y1 = float(window[local_idx])
+        y2 = float(window[local_idx + 1])
+        denom = (y0 - 2 * y1 + y2)
+        if abs(denom) < 1e-12:
+            actual = lo + local_idx
+            return float(actual), complex(corr_c[actual])
+        frac = 0.5 * (y0 - y2) / denom              # in [-0.5, 0.5]
+        refined = lo + local_idx + frac
+        # Linear-interpolate the complex correlator value at the refined
+        # fractional position. Phase unwrapping isn't needed over 1 sample
+        # because the mainlobe is smooth.
+        i0 = int(np.floor(refined))
+        i1 = i0 + 1
+        if i1 >= len(corr_c):
+            return float(refined), complex(corr_c[i0])
+        t = refined - i0
+        c_refined = (1 - t) * corr_c[i0] + t * corr_c[i1]
+        return float(refined), complex(c_refined)
+
     for bit_idx in range(n_bits):
-        lo = max(0, pos - search_half_samples)
-        hi = min(len(mag), pos + search_half_samples + 1)
+        lo = max(0, int(round(pos)) - search_half_samples)
+        hi = min(len(mag), int(round(pos)) + search_half_samples + 1)
         if hi - lo < samps_per_chip:
             return None
-        window_mag = mag[lo:hi]
-        local_idx = int(np.argmax(window_mag))
-        actual_pos = lo + local_idx
-        local_peak = float(window_mag[local_idx])
+        refined_pos, refined_c = _refine_peak(lo, hi)
+        if refined_pos is None or refined_c is None:
+            return None
+        local_peak = abs(refined_c)
         if local_peak < lock_floor:
             return None
 
-        peak_values.append(complex(corr_c[actual_pos]))
-        positions.append(actual_pos)
-        pos = actual_pos + samples_per_symbol
+        peak_values.append(refined_c)
+        positions.append(int(round(refined_pos)))
+        pos = refined_pos + samples_per_symbol
 
-    # ── 5. Differential bit decoding ───────────────────────────────────
-    # For BPSK, consecutive symbols differ in phase by 0 (same bit) or π
-    # (different bit), plus a small drift due to residual frequency
-    # offset. We classify via the real part of (c_k · conj(c_{k-1})):
-    #   dot > 0  →  phase difference in (-π/2, +π/2)  →  same bit
-    #   dot < 0  →  phase difference near ±π          →  different bit
-    # The absolute bit polarity (which value bit_0 represents) is
-    # arbitrary and resolved by the caller trying both orientations.
+    # ── 5. Carrier phase drift estimation + differential decoding ─────
+    # With 2 samples/chip and bench-grade SDRs, residual frequency offset
+    # after R[1] correction can be 50-500 Hz — right in the range where
+    # per-symbol phase drift approaches or crosses ±π/2. We now track
+    # the per-symbol phase drift and remove it before making each
+    # differential decision.
+    #
+    # Drift is estimated via the Viterbi-Viterbi squared estimator: if
+    # each peak value c_k has phase θ_0 + k·Δθ + b_k·π (where b_k is
+    # the BPSK bit), then (c_k)² has phase 2·(θ_0 + k·Δθ) (the b_k·π
+    # term vanishes because 2π ≡ 0). Squaring removes the BPSK ambiguity
+    # and lets us estimate Δθ from the mean phase advance of squared
+    # values.
+    if len(peak_values) >= 4:
+        squared = np.array(peak_values, dtype=np.complex128) ** 2
+        # Phase difference between consecutive squared values = 2·Δθ
+        diffs = squared[1:] * np.conjugate(squared[:-1])
+        mean_diff = complex(np.sum(diffs))
+        if abs(mean_diff) > 1e-12:
+            drift_per_symbol_2x = float(np.angle(mean_diff))
+            drift_per_symbol = drift_per_symbol_2x / 2.0
+        else:
+            drift_per_symbol = 0.0
+    else:
+        drift_per_symbol = 0.0
+
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0                          # caller tries both polarities
+    # Pre-compute the drift rotator so we can cancel it before each
+    # differential dot product
+    drift_rotator = complex(np.cos(drift_per_symbol),
+                             -np.sin(drift_per_symbol))
     for k in range(1, n_bits):
-        dot = (peak_values[k] * peak_values[k - 1].conjugate()).real
+        # Remove the expected per-symbol drift before comparing
+        c_prev_rotated = peak_values[k - 1] * np.conj(drift_rotator)
+        dot = (peak_values[k] * np.conj(c_prev_rotated)).real
         bits[k] = bits[k - 1] if dot >= 0 else (1 - bits[k - 1])
 
     return {
@@ -412,6 +470,11 @@ def decode_with_freq_tracking(
         "rad_per_sample": rad_per_sample,
         "peak_magnitude": global_peak,
         "ref_angle_rad": ref_angle,
+        "drift_per_symbol_rad": drift_per_symbol,
+        # Diagnostic: first few peak magnitudes/angles so callers can
+        # inspect what the decoder is seeing
+        "first_peak_magnitudes": [abs(c) for c in peak_values[:16]],
+        "first_peak_angles_rad": [float(np.angle(c)) for c in peak_values[:16]],
     }
 
 
