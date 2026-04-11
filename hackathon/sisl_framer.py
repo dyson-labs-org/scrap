@@ -485,28 +485,47 @@ def fit_phase_from_known_bits(
     peak_values,
     start_bit_offset: int,
     known_bits: np.ndarray,
+    delta_search_range: float = np.pi,
+    delta_fine_steps: int = 8,
 ) -> Optional[tuple[float, float, float]]:
-    """Fit absolute phase θ₀ and per-symbol drift Δθ from a known-bit pilot.
+    """ML fit of absolute phase θ₀ and per-symbol drift Δθ from a known pilot.
 
-    Given that peak_values[start_bit_offset : start_bit_offset+N] should
-    carry bits with known values `known_bits` (0 or 1), compute the best
-    linear model for the carrier phase at the peak positions:
+    Maximum-likelihood estimator for the linear carrier-phase model
+    θ(k) = θ₀ + k·Δθ, given that peak_values[start:start+N] carry bits
+    with known signs. Robust at arbitrary residual frequency offsets up
+    to ±symbol_rate/2 — does NOT use np.unwrap, which diverges when the
+    true slope approaches π/symbol.
 
-        expected_phase(k) = θ₀ + k·Δθ   (for k in the known region)
+    Derivation. After derotating each peak by the known bit sign:
+        d[k] = sign(known_bits[k]) · peak[k]
+             ≈ |p| · exp(j·(θ₀ + k·Δθ))  +  noise
 
-    Each peak, in a clean BPSK signal, has complex value:
+    The ML estimate of Δθ is:
+        Δθ̂ = argmax_{δ}  | Σ_k d[k] · exp(-j·k·δ) |²
 
-        peak[k] = |p| · exp(j·(θ₀ + k·Δθ))   if bit k = 0
-                  -|p| · exp(j·(θ₀ + k·Δθ))  if bit k = 1
+    This is exactly the peak of the FFT of d[k], zero-padded for fine
+    resolution. Given Δθ̂, the ML estimate of θ₀ is the angle of the
+    coherent sum:
+        θ̂₀ = angle( Σ_k d[k] · exp(-j·k·Δθ̂) )
 
-    We derotate by the known bit sign (+1 or -1), then unwrap and
-    linear-fit the resulting phase sequence. The fit recovers both
-    θ₀ (intercept) and Δθ (slope) in radians per symbol.
+    The rms_residual diagnostic is computed as the ratio between the
+    coherent-sum magnitude and the incoherent sum of magnitudes — a
+    value near 0 means all peaks are phase-aligned after correction
+    (clean), values near 1 mean they are randomly oriented (noise).
+    For backward compatibility with existing callers expecting a radians
+    value, we return the equivalent phase spread:
+        rms_residual ≈ sqrt(-2 · ln(coherent_mag / incoherent_mag))
+
+    So rms_residual < 0.3 rad → clean, > 0.9 rad → marginal, > 1.5 rad
+    → essentially noise.
+
+    `delta_search_range` is the half-width of the Δθ search interval in
+    radians per symbol (default π, the full unambiguous range).
+
+    `delta_fine_steps` is the number of fine-refinement FFT iterations
+    around the coarse peak; default 8 gives ~0.001 rad resolution.
 
     Returns (theta0, delta_theta, rms_residual_rad) or None on failure.
-    rms_residual_rad is the root-mean-square phase residual after the
-    fit — a diagnostic for fit quality. Values ≲0.3 rad indicate clean
-    signal; values ≳0.9 rad indicate marginal SNR or wrong ASM position.
     """
     n_known = len(known_bits)
     if n_known < 4:
@@ -526,29 +545,77 @@ def fit_phase_from_known_bits(
     sign = np.where(known_bits == 0, 1.0, -1.0).astype(np.float64)
     derotated = peaks * sign
 
-    # Unwrapped phase sequence (should be approximately linear in k)
-    phases = np.angle(derotated)
-    phases_unwrapped = np.unwrap(phases)
+    # Coarse grid search via zero-padded FFT. With M = 16*n_known samples,
+    # the DFT bin spacing corresponds to Δθ = 2π/M per bin, covering
+    # [-π, π] around DC. For n_known=48 this gives ~768 bins at 8 mrad
+    # spacing — sufficient to localize the peak to one bin.
+    n_fft = max(256, 16 * n_known)
+    spectrum = np.fft.fft(derotated, n=n_fft)
+    mag_sq = (spectrum.real ** 2 + spectrum.imag ** 2)
+    coarse_idx = int(np.argmax(mag_sq))
+    # Map FFT bin index to Δθ in (-π, π]
+    if coarse_idx > n_fft // 2:
+        coarse_idx -= n_fft
+    coarse_delta = 2.0 * np.pi * coarse_idx / n_fft
+    # Restrict to user-provided range (in case caller has a tighter prior)
+    if abs(coarse_delta) > delta_search_range:
+        # Search was too wide; clamp by re-searching within the allowed band
+        bin_lo = int(-delta_search_range * n_fft / (2.0 * np.pi))
+        bin_hi = int(delta_search_range * n_fft / (2.0 * np.pi))
+        # Build masked magnitudes allowing only [bin_lo, bin_hi]
+        idx_wrapped = np.arange(n_fft)
+        signed = np.where(idx_wrapped > n_fft // 2,
+                           idx_wrapped - n_fft, idx_wrapped)
+        mask = (signed >= bin_lo) & (signed <= bin_hi)
+        masked = np.where(mask, mag_sq, -1.0)
+        coarse_idx_raw = int(np.argmax(masked))
+        coarse_delta = 2.0 * np.pi * signed[coarse_idx_raw] / n_fft
 
-    k = np.arange(n_known, dtype=np.float64)
-    try:
-        coeffs = np.polyfit(k, phases_unwrapped, 1)
-    except (np.linalg.LinAlgError, ValueError):
+    # Fine refinement: iterative bisection around the coarse peak.
+    # At each step, evaluate the likelihood at (δ - h, δ, δ + h), move
+    # to the best, halve h. This converges quadratically to machine
+    # precision in a handful of steps.
+    k_arr = np.arange(n_known, dtype=np.float64)
+    def _likelihood(delta_val: float) -> float:
+        phasor = np.exp(-1j * k_arr * delta_val)
+        s = float(np.abs(np.sum(derotated * phasor)))
+        return s
+    delta_hat = float(coarse_delta)
+    h = 2.0 * np.pi / n_fft   # half the coarse bin width
+    for _ in range(delta_fine_steps):
+        left = _likelihood(delta_hat - h)
+        center = _likelihood(delta_hat)
+        right = _likelihood(delta_hat + h)
+        if left > center and left >= right:
+            delta_hat -= h
+        elif right > center and right > left:
+            delta_hat += h
+        h *= 0.5
+
+    # ML θ₀ is the angle of the coherent sum at the best Δθ,
+    # translated from "at start_bit_offset" back to "at bit index 0".
+    phasor = np.exp(-1j * k_arr * delta_hat)
+    coherent_sum = np.sum(derotated * phasor)
+    coherent_mag = float(np.abs(coherent_sum))
+    theta0_local = float(np.angle(coherent_sum))
+    theta0_at_zero = theta0_local - start_bit_offset * delta_hat
+
+    # Phase-spread residual: how much are the derotated peaks scattered
+    # around the fitted trajectory? Compute via the ratio of coherent to
+    # incoherent sums. coherent/incoherent = 1 for a perfectly aligned
+    # signal; → 1/sqrt(N) for random noise.
+    incoherent_mag = float(np.sum(np.abs(derotated)))
+    if incoherent_mag <= 0:
         return None
-    slope = float(coeffs[0])       # Δθ per symbol
-    intercept = float(coeffs[1])   # θ₀ at local k=0
+    ratio = coherent_mag / incoherent_mag
+    # Convert ratio to an equivalent radian phase-spread:
+    # For a Gaussian phase jitter σ, E[e^{jφ}] = e^{-σ²/2}, so
+    #    σ² = -2 · ln(ratio), σ = sqrt(-2 · ln ratio).
+    # Clamped below so a perfect match doesn't log(0).
+    safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
+    rms_residual = float(np.sqrt(-2.0 * np.log(safe_ratio)))
 
-    # Intercept is at local k=0 which corresponds to the first known-bit
-    # position (bit index `start_bit_offset` in the full peak array).
-    # Translate back to "phase at bit index 0" for caller convenience:
-    #   phase_at_bit_0 = intercept - start_bit_offset · slope
-    theta0_at_zero = intercept - start_bit_offset * slope
-
-    # Residual of the fit — smaller = cleaner signal / better ASM lock
-    residual = phases_unwrapped - (slope * k + intercept)
-    rms_residual = float(np.sqrt(np.mean(residual ** 2)))
-
-    return theta0_at_zero, slope, rms_residual
+    return theta0_at_zero, float(delta_hat), rms_residual
 
 
 def coherent_decode_from_pilot(

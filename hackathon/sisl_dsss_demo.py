@@ -530,6 +530,16 @@ _ASM_BITS = np.unpackbits(
     np.frombuffer(_ASM_BYTES, dtype=np.uint8)
 ).astype(np.uint8)
 
+# Extended pilot: ASM + deterministic version (0x03) and msg_type (0x01)
+# bytes. Every valid SISL hail frame begins with ASM || 0x03 || 0x01,
+# so these 48 bits are a free extended training sequence for phase and
+# frequency estimation. Longer pilot = tighter slope variance = better
+# coherent decode at marginal SNR.
+_PILOT_BYTES = _ASM_BYTES + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
+_PILOT_BITS = np.unpackbits(
+    np.frombuffer(_PILOT_BYTES, dtype=np.uint8)
+).astype(np.uint8)
+
 
 def _chase_decrypt_body(
     frame_bytes: bytes,
@@ -854,6 +864,7 @@ def _try_coherent_decrypt_at_position(
     """
     aligned_peaks = peak_values[soft_offset:]
     n_frame_bits = sc.HAIL_FRAME_LEN * 8
+    n_pilot_bits = len(_PILOT_BITS)     # 48: ASM + ver + type
     out = {
         "decoded_hail": None,
         "polarity": None,
@@ -865,21 +876,27 @@ def _try_coherent_decrypt_at_position(
         "c_soft": None,
         "chase_flips": None,
     }
+    if len(aligned_peaks) < n_pilot_bits:
+        # Not even enough peaks for the extended pilot fit.
+        return out
+
+    # Always run the 48-bit pilot fit first — it's fast and gives us
+    # phase_rms regardless of whether a full frame decode is possible.
+    fit_diag = sf.fit_phase_from_known_bits(
+        aligned_peaks, 0, _PILOT_BITS)
+    if fit_diag is not None:
+        out["theta0_rad"] = fit_diag[0]
+        out["delta_theta_per_sym"] = fit_diag[1]
+        out["phase_rms_residual_rad"] = fit_diag[2]
+
     if len(aligned_peaks) < n_frame_bits:
-        # Coherent decoder needs a full frame's worth of peaks; still
-        # do a lightweight fit for diagnostics.
-        if len(aligned_peaks) >= 32:
-            fit_diag = sf.fit_phase_from_known_bits(
-                aligned_peaks, 0, _ASM_BITS)
-            if fit_diag is not None:
-                t0, dd_, rms_ = fit_diag
-                out["theta0_rad"] = t0
-                out["delta_theta_per_sym"] = dd_
-                out["phase_rms_residual_rad"] = rms_
+        # Truncated: can't decode a full frame. The pilot-fit diagnostics
+        # are still useful (phase_rms tells us if the ASM lock is real
+        # or spurious).
         return out
 
     coherent = sf.coherent_decode_from_pilot(
-        aligned_peaks, 0, _ASM_BITS, n_frame_bits,
+        aligned_peaks, 0, _PILOT_BITS, n_frame_bits,
     )
     if coherent is None:
         return out
@@ -891,7 +908,8 @@ def _try_coherent_decrypt_at_position(
     out["phase_rms_residual_rad"] = c_rms
 
     # How many of the first 32 decoded bits match the ASM? >8 wrong means
-    # the linear fit probably settled on a slope off by ±π/symbol.
+    # the linear fit hit the ±π/symbol boundary in the (now-ML) search
+    # and landed on a secondary peak. Primary peak should give 0 errors.
     c_bits_first32 = np.unpackbits(
         np.frombuffer(c_frame[:4], dtype=np.uint8))
     c_asm_errs = int(np.sum(c_bits_first32 != _ASM_BITS))
@@ -1214,12 +1232,21 @@ def _decode_one_hail_in_block(
         c_frame = best_attempt["c_frame"]
         coherent_hex = (c_frame[:16].hex()
                          if c_frame is not None else None)
-        # Noise rejection: if phase_rms is clearly bad AND asm_errs is
-        # clearly bad, this is a spurious interference lock, not a real
-        # SISL frame we failed to decrypt. Downgrade to noise_lock so
-        # quiet mode suppresses it and real events stand out.
-        is_noise = (c_rms is not None and c_rms > 0.9
-                    and c_asm_errs is not None and c_asm_errs > 4)
+        # Noise rejection. Two sufficient conditions for "this is
+        # spurious interference, not a SISL frame":
+        #   (a) phase_rms > 1.5 rad — the ML pilot fit could not find
+        #       a coherent phase trajectory across the 48 known bits;
+        #       essentially noise. This is a hard reject.
+        #   (b) phase_rms > 0.9 rad AND asm_errs > 4 — marginal fit
+        #       and wrong bits in the decoded ASM region; also noise.
+        # Case (b) kept for belt-and-suspenders but (a) handles the
+        # truncated-frame case where c_asm_errs is None.
+        is_noise = False
+        if c_rms is not None and c_rms > 1.5:
+            is_noise = True
+        elif (c_rms is not None and c_rms > 0.9
+              and c_asm_errs is not None and c_asm_errs > 4):
+            is_noise = True
         status = "noise_lock" if is_noise else "frame_soft"
         return {
             "status": status,

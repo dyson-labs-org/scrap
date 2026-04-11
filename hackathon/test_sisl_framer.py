@@ -216,9 +216,9 @@ def test_fit_phase_from_known_bits_clean():
     fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
     assert fit is not None
     theta0, delta, rms = fit
-    assert abs(theta0 - theta0_true) < 1e-6
-    assert abs(delta - delta_true) < 1e-6
-    assert rms < 1e-6
+    assert abs(theta0 - theta0_true) < 1e-3
+    assert abs(delta - delta_true) < 1e-4
+    assert rms < 1e-2
 
 
 def test_fit_phase_from_known_bits_with_offset():
@@ -233,8 +233,8 @@ def test_fit_phase_from_known_bits_with_offset():
     fit = sf.fit_phase_from_known_bits(peaks, start, pilot)
     assert fit is not None
     theta0, delta, _ = fit
-    assert abs(theta0 - theta0_true) < 1e-6
-    assert abs(delta - delta_true) < 1e-6
+    assert abs(theta0 - theta0_true) < 5e-3
+    assert abs(delta - delta_true) < 5e-4
 
 
 def test_coherent_decode_from_pilot_clean():
@@ -251,7 +251,7 @@ def test_coherent_decode_from_pilot_clean():
     # Reconstruct bits and compare
     decoded_bits = sf.bytes_to_bits(frame_bytes)[:n_bits]
     assert np.array_equal(decoded_bits, bits)
-    assert rms < 1e-6
+    assert rms < 1e-2
 
 
 def test_coherent_decode_from_pilot_noisy():
@@ -278,6 +278,60 @@ def test_coherent_decode_from_pilot_noisy():
     ber = float(np.mean(decoded_bits != bits))
     assert ber < 0.02, f"BER too high: {ber}"
     assert rms < 0.3
+
+
+def test_fit_phase_from_known_bits_large_slope_no_pi_ambiguity():
+    """The old unwrap+polyfit estimator fails at slope ≈ π/symbol
+    (the π ambiguity boundary). The new ML estimator must work here.
+    """
+    rng = np.random.default_rng(seed=21)
+    bits = rng.integers(0, 2, size=48).astype(np.uint8)
+    theta0_true = 0.2
+    # Slope near the boundary that broke unwrap
+    delta_true = np.pi * 0.9
+    peaks = _synth_peaks(bits, theta0_true, delta_true, noise_std=0.05,
+                          seed=22)
+    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    assert fit is not None
+    theta0, delta, rms = fit
+    # Must resolve the correct slope within ~0.02 rad/symbol
+    assert abs(delta - delta_true) < 0.02, \
+        f"delta recovered {delta} vs true {delta_true}"
+    assert rms < 0.3
+
+
+def test_fit_phase_from_known_bits_negative_slope():
+    """Negative slopes should be recovered correctly too."""
+    rng = np.random.default_rng(seed=23)
+    bits = rng.integers(0, 2, size=48).astype(np.uint8)
+    theta0_true = -1.1
+    delta_true = -0.4
+    peaks = _synth_peaks(bits, theta0_true, delta_true, noise_std=0.05,
+                          seed=24)
+    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    assert fit is not None
+    theta0, delta, _ = fit
+    assert abs(delta - delta_true) < 0.02
+    assert abs(theta0 - theta0_true) < 0.05
+
+
+def test_fit_phase_noise_ratio_reflects_quality():
+    """rms_residual should grow monotonically with noise level."""
+    rng = np.random.default_rng(seed=25)
+    bits = rng.integers(0, 2, size=64).astype(np.uint8)
+    rmss = []
+    for noise in [0.0, 0.1, 0.3, 0.6, 1.0]:
+        peaks = _synth_peaks(bits, theta0=0.1, delta=0.001,
+                              noise_std=noise, seed=26)
+        fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+        assert fit is not None
+        rmss.append(fit[2])
+    # Monotone nondecreasing
+    for a, b in zip(rmss, rmss[1:]):
+        assert b >= a - 0.05, f"non-monotone: {rmss}"
+    # Clean case near zero, noisy case clearly larger
+    assert rmss[0] < 0.1
+    assert rmss[-1] > rmss[0]
 
 
 def test_fit_phase_from_known_bits_too_short():
