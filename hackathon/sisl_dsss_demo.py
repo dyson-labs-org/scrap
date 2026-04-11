@@ -640,6 +640,51 @@ def _decode_one_hail_in_block(
             "freq_offset_hz": freq_hz,
         }
 
+    # ── 4b. Periodic structure test ────────────────────────────────────
+    # A single strong noise spike can exceed the peak/median ratio
+    # threshold. Verify the matched filter has PERIODIC peaks at the
+    # expected symbol-spacing interval: a real DSSS signal produces
+    # ~1000 peaks per frame all of similar magnitude, while noise
+    # produces only 1-2 outlier peaks and noise floor elsewhere.
+    #
+    # Starting at the global max position, sample the matched filter
+    # magnitude at 16 symbol-spaced positions. The MEDIAN of those
+    # samples should be at least 30% of the global max for a real
+    # periodic signal. Pure noise with a spurious spike will have a
+    # tiny median (the rest are noise-floor values).
+    first_peak_pos = int(np.argmax(mag))
+    samples_per_symbol = sf.CHIPS_PER_SYMBOL * samps_per_chip
+    n_test_symbols = 16
+    search_half = samples_per_symbol // 4
+    test_peaks: list[float] = []
+    for k in range(n_test_symbols):
+        pos_k = first_peak_pos + k * samples_per_symbol
+        if pos_k + search_half >= len(mag):
+            break
+        lo = max(0, pos_k - search_half)
+        hi = min(len(mag), pos_k + search_half + 1)
+        test_peaks.append(float(mag[lo:hi].max()))
+
+    if len(test_peaks) < 4:
+        return {
+            "status": "short_block",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+        }
+
+    median_test_peak = float(np.median(test_peaks))
+    periodic_ratio = median_test_peak / peak_mag if peak_mag > 0 else 0.0
+    if periodic_ratio < 0.3:
+        return {
+            "status": "no_signal",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "periodic_ratio": periodic_ratio,
+            "note": "spurious spike, no periodic structure",
+        }
+
     # ── 5. Tracking decode (reuses precomputed freq offset) ───────────
     target_bytes = 2 * sc.HAIL_FRAME_LEN
     track_result = sf.decode_with_freq_tracking(
@@ -791,9 +836,16 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
         r = p / m if m > 0 else float("inf")
+        periodic = result.get("periodic_ratio", None)
+        note = result.get("note", "")
+        extra = ""
+        if periodic is not None:
+            extra = f", periodic={periodic:.2f}"
+            if note:
+                extra += f" ({note})"
         print(f"[{block_num:4d}] no signal: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"Δf={foff:+.0f}Hz")
+              f"Δf={foff:+.0f}Hz{extra}")
     elif s == "short_block":
         print(f"[{block_num:4d}] short block (processing gap)")
 
