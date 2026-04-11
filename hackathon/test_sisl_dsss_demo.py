@@ -277,8 +277,15 @@ def test_decode_one_hail_in_block_pure_noise():
         + 1j * rng.normal(0, 0.05, 8_000_000).astype(np.float32)
     ).astype(np.complex64)
     result = dd._decode_one_hail_in_block(noise, dd.demo_responder_key())
-    # Pure noise: no signal, no lock, no hail — any of these is acceptable
-    assert result["status"] in ("no_signal", "no_lock", "no_hail"), result
+    # Pure noise: any non-decode status is acceptable. With the lower
+    # signal threshold (4x) we now let more borderline blocks through
+    # so downstream periodicity / tracking / ASM checks can reject them.
+    assert result["status"] in (
+        "no_signal", "no_lock", "no_hail",
+        "track_lost", "frame_fuzzy", "short_block",
+    ), result
+    # The critical invariant: pure noise must NEVER decrypt.
+    assert result["status"] != "decrypt_ok"
 
 
 def test_decode_one_hail_in_block_sub_chip_phase_offset():
