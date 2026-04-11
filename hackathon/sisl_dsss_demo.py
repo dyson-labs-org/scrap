@@ -614,16 +614,18 @@ def find_sisl_frame_bitwise(
 
 # ── Live RX: stream samples and decode hails in real time ─────────────────
 
-# Detection threshold for "is there a signal here at all?" — matched-filter
-# peak magnitude must exceed SIGNAL_FLOOR_RATIO × median. For a clean,
-# coherent signal the ratio can be 50–200; for a weak but legitimate
-# bench capture it's typically 10–30. Pure Gaussian noise gives peak
-# /median ≈ 7–8 at block lengths of millions of samples.
+# Initial signal-presence prefilter — a cheap peak/median ratio test
+# that rejects the noisiest blocks before running the more expensive
+# periodicity check. The periodicity check (16 symbol-spaced peaks
+# median ≥ 30% of global max) is the authoritative test; this ratio
+# is just a cheap first-pass filter.
 #
-# Default is 10: permissive enough to process borderline bench
-# captures, strict enough to avoid wasting decode attempts on pure
-# noise. Override with the --signal-threshold CLI flag.
-_SIGNAL_FLOOR_RATIO = 10.0
+# Pure Gaussian noise gives peak/median ≈ 5–8 for block lengths of
+# millions of samples. Weak-but-real bench signals can sit at ratio
+# 4–10 when antennas are misaligned or path loss is large. Default
+# of 4 admits most real signals and lets the periodicity check do
+# the real rejection. Override with --signal-threshold.
+_SIGNAL_FLOOR_RATIO = 4.0
 
 
 def _decode_one_hail_in_block(
