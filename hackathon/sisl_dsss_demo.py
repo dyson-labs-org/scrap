@@ -528,24 +528,28 @@ def _decode_one_hail_in_block(
     samples: np.ndarray,
     responder_static: ec.EllipticCurvePrivateKey,
     samps_per_chip: int = SAMPS_PER_CHIP,
+    samp_hz: float = SAMP_RATE_HZ,
 ) -> dict:
     """Process one block of baseband samples, try to decode one SISL hail.
 
-    Uses a SAMPLE-RATE matched filter for signal detection and then
-    a per-symbol peak-tracking decoder (sf.decode_with_tracking) to
-    extract bits. The tracker makes each symbol's decision at a locally-
-    found peak, so clock drift between TX and RX (typical 20-40 ppm
-    between cheap SDRs) is absorbed continuously rather than
-    accumulating across the frame.
+    Pipeline:
+      1. Estimate carrier frequency offset via R[1] autocorrelation.
+      2. Apply frequency correction.
+      3. Run a COMPLEX sample-rate matched filter on the corrected signal.
+      4. Check peak/median ratio — this is the actual signal-presence test.
+         Without frequency correction the matched filter does not peak
+         sharply at symbol boundaries when TX and RX clocks differ by
+         more than a few hundred Hz, which is always the case between
+         independent SDRs. Only after correction does peak/median become
+         a reliable detection statistic.
+      5. If detected, run per-symbol tracking decode (reusing the
+         precomputed freq offset so we don't re-estimate).
+      6. Try both bit polarities (BPSK 180° ambiguity) when looking
+         for the SISL ASM.
 
-    BPSK phase ambiguity is resolved by trying both the decoded bytes
-    and their bitwise complement when searching for the SISL ASM —
-    a 180° carrier phase offset flips every bit, and one orientation
-    or the other will contain the framing marker.
-
-    Returns a status dict. Statuses:
+    Statuses:
       short_block   — fewer than one code-period of samples
-      no_signal     — matched filter peak/median below threshold
+      no_signal     — CORRECTED peak/median below threshold
       track_lost    — tracker lost lock partway through the frame
       no_hail       — decoded bytes contain no SISL ASM in either polarity
       decrypt_fail  — hail frame found but Poly1305 tag mismatch
@@ -554,48 +558,59 @@ def _decode_one_hail_in_block(
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
         return {"status": "short_block"}
 
-    # ── 1. Signal detection via magnitude matched filter ─────────────────
-    mag = sf.matched_filter_magnitude_sample_rate(samples, samps_per_chip)
-    if len(mag) == 0:
-        return {"status": "short_block"}
+    # ── 1. Carrier offset estimation ──────────────────────────────────
+    rad_per_sample = sf.estimate_freq_offset_rad_per_sample(samples)
+    freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
 
+    # ── 2. Apply correction ─────────────────────────────────────────────
+    samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
+
+    # ── 3. Complex matched filter ──────────────────────────────────────
+    corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
+    if len(corr_c) == 0:
+        return {"status": "short_block"}
+    mag = np.abs(corr_c).astype(np.float32)
     peak_mag = float(mag.max())
     median_mag = float(np.median(mag))
 
+    # ── 4. Signal presence test (post-correction) ─────────────────────
     if median_mag == 0.0 or peak_mag < _SIGNAL_FLOOR_RATIO * median_mag:
         return {
             "status": "no_signal",
             "peak_mag": peak_mag,
             "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
         }
 
-    # ── 2. Per-symbol tracking decode ────────────────────────────────────
-    # Decode 2x a hail worth so the ASM is inside the decoded bytes
-    # regardless of where it falls within the block.
+    # ── 5. Tracking decode (reuses precomputed freq offset) ───────────
     target_bytes = 2 * sc.HAIL_FRAME_LEN
-    track_result = sf.decode_with_tracking(
+    track_result = sf.decode_with_freq_tracking(
         samples,
         samps_per_chip=samps_per_chip,
         n_bytes=target_bytes,
+        freq_offset_rad_per_sample=rad_per_sample,
     )
     if track_result is None:
-        # Fall back to decoding one hail worth — maybe we ran short
-        track_result = sf.decode_with_tracking(
+        track_result = sf.decode_with_freq_tracking(
             samples,
             samps_per_chip=samps_per_chip,
             n_bytes=sc.HAIL_FRAME_LEN,
+            freq_offset_rad_per_sample=rad_per_sample,
         )
         if track_result is None:
             return {
                 "status": "track_lost",
                 "peak_mag": peak_mag,
                 "median_mag": median_mag,
+                "rad_per_sample": rad_per_sample,
+                "freq_offset_hz": freq_hz,
             }
-    decoded, positions = track_result
+    decoded = track_result["bytes"]
+    positions = track_result["positions"]
 
     # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
     decoded_inv = bytes(b ^ 0xFF for b in decoded)
-
     for variant_label, variant in (("normal", decoded), ("inverted", decoded_inv)):
         info = identify_sisl_frame(variant)
         if info is None or info["frame_type"] != "hail":
@@ -610,14 +625,20 @@ def _decode_one_hail_in_block(
                 "start_sample": positions[0] if positions else 0,
                 "asm_at_byte": info["asm_offset"],
                 "peak_mag": peak_mag,
+                "median_mag": median_mag,
                 "polarity": variant_label,
+                "rad_per_sample": rad_per_sample,
+                "freq_offset_hz": freq_hz,
             }
         return {
             "status": "decrypt_ok",
             "start_sample": positions[0] if positions else 0,
             "asm_at_byte": info["asm_offset"],
             "peak_mag": peak_mag,
+            "median_mag": median_mag,
             "polarity": variant_label,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
             "body": decoded_hail.body,
             "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
         }
@@ -629,6 +650,8 @@ def _decode_one_hail_in_block(
         "peak_mag": peak_mag,
         "median_mag": median_mag,
         "start_sample": positions[0] if positions else 0,
+        "rad_per_sample": rad_per_sample,
+        "freq_offset_hz": freq_hz,
         "first_16_bytes_hex": decoded[:16].hex(),
         "first_16_inv_hex": decoded_inv[:16].hex(),
     }
@@ -641,19 +664,31 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
     the operator only sees genuine SISL events (decrypt ok / fail).
     """
     s = result["status"]
+    foff = result.get("freq_offset_hz", 0.0)
     if s == "decrypt_ok":
         b = result["body"]
         print(f"[{block_num:4d}] DECRYPTED  "
               f"sample={result['start_sample']}  "
               f"asm@byte{result['asm_at_byte']}  "
               f"peak={result['peak_mag']:.3g}  "
+              f"Δf={foff:+.0f}Hz  "
+              f"pol={result.get('polarity', '?')}  "
               f"nonce={b.body_nonce.hex()}  "
               f"freq=+{b.center_freq_offset}MHz  mode=0x{b.mode:02x}")
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
               f"sample={result.get('start_sample', 0)}  "
-              f"asm@byte{result['asm_at_byte']}  — DECRYPT FAILED "
-              f"(not addressed to this key)")
+              f"asm@byte{result['asm_at_byte']}  "
+              f"Δf={foff:+.0f}Hz  "
+              f"pol={result.get('polarity', '?')}  "
+              f"— DECRYPT FAILED (not addressed to this key)")
+    elif s == "track_lost":
+        p = result.get("peak_mag", 0)
+        m = result.get("median_mag", 0)
+        r = p / m if m > 0 else float("inf")
+        print(f"[{block_num:4d}] TRACK LOST: "
+              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
+              f"Δf={foff:+.0f}Hz")
     elif quiet:
         return
     elif s == "no_hail":
@@ -661,14 +696,19 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         m = result.get("median_mag", 0)
         r = p / m if m > 0 else float("inf")
         print(f"[{block_num:4d}] interference: "
-              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f} "
-              f"— signal above threshold but no SISL ASM")
+              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
+              f"Δf={foff:+.0f}Hz")
+        print(f"       first 16 bytes (normal):   "
+              f"{result.get('first_16_bytes_hex', '')}")
+        print(f"       first 16 bytes (inverted): "
+              f"{result.get('first_16_inv_hex', '')}")
     elif s == "no_signal":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
         r = p / m if m > 0 else float("inf")
         print(f"[{block_num:4d}] no signal: "
-              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}")
+              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
+              f"Δf={foff:+.0f}Hz")
     elif s == "short_block":
         print(f"[{block_num:4d}] short block (processing gap)")
 
@@ -818,6 +858,7 @@ def live_rx_decode(
             result = _decode_one_hail_in_block(
                 buf[:filled], responder_static,
                 samps_per_chip=samps_per_chip,
+                samp_hz=samp_hz,
             )
             _print_live_event(stats["blocks_processed"], result)
 

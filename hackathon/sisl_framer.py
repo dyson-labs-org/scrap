@@ -179,6 +179,198 @@ def matched_filter_magnitude(chips: np.ndarray,
     return np.abs(corr.astype(np.float32))
 
 
+def _estimate_freq_offset_r1(samples: np.ndarray) -> float:
+    """Single R[1] autocorrelation freq estimate (rad/sample)."""
+    s = np.asarray(samples, dtype=np.complex64)
+    if len(s) < 2:
+        return 0.0
+    r1 = np.vdot(s[1:], s[:-1])     # ≡ Σ s[n]·conj(s[n+1])
+    if abs(r1) < 1e-9:
+        return 0.0
+    return -float(np.angle(r1))
+
+
+def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
+                                         iterations: int = 2) -> float:
+    """Estimate carrier frequency offset of a BPSK-DSSS baseband signal.
+
+    Uses the 1-sample-lag autocorrelation R[1] = Σ s[n]·conj(s[n+1]).
+    For a signal s[n] = x[n]·exp(j·2π·Δf·n·T + jφ), with x[n] ∈ {+1,-1},
+    the autocorrelation has phase -2π·Δf·T. When samps_per_chip ≥ 2, many
+    sample-pairs (n, n+1) fall inside the same chip (x[n] = x[n+1] = ±1)
+    so they coherently contribute `exp(-j·2π·Δf·T)`; cross-chip pairs
+    contribute random-sign products that average toward zero.
+
+    To improve accuracy over long streams, this function iterates the
+    R[1] estimator: after computing a coarse offset, it applies the
+    correction and re-estimates on the corrected samples. Each iteration
+    typically reduces the residual error by 1-2 orders of magnitude
+    until numerical precision is reached. Two iterations are usually
+    enough for ~0.01 Hz residual on multi-second streams, which keeps
+    cumulative phase drift below 0.1 rad across a one-second frame.
+
+    Returns the total phase advance per sample in radians (= 2π·Δf·T).
+    Multiply by f_s / (2π) to convert to Hz.
+    """
+    total = _estimate_freq_offset_r1(samples)
+    for _ in range(iterations - 1):
+        # Apply the current correction and re-estimate the residual
+        corrected = apply_freq_correction(samples, total)
+        delta = _estimate_freq_offset_r1(corrected)
+        total += delta
+        # Early exit once the refinement drops below numerical floor
+        if abs(delta) < 1e-9:
+            break
+    return total
+
+
+def apply_freq_correction(samples: np.ndarray,
+                           rad_per_sample: float) -> np.ndarray:
+    """Multiply samples by exp(-j·δ·n) to remove a constant frequency offset."""
+    if rad_per_sample == 0.0:
+        return samples
+    n = np.arange(len(samples), dtype=np.float64)
+    correction = np.exp(-1j * rad_per_sample * n).astype(np.complex64)
+    return (samples * correction).astype(np.complex64)
+
+
+def matched_filter_complex_sample_rate(
+    samples: np.ndarray,
+    samps_per_chip: int,
+    code: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Complex sample-rate matched filter.
+
+    Returns a COMPLEX correlator output. |corr| at a symbol boundary is
+    the symbol energy; angle(corr) is the (residual) carrier phase at
+    that symbol. Use this when the input may have a non-trivial carrier
+    phase offset — taking only `.real` (as in the simpler helpers above)
+    loses up to half the signal energy when the phase is near π/2.
+    """
+    if code is None:
+        code = public_hail_code()
+    code_upsampled = np.repeat(
+        code.astype(np.float32), samps_per_chip
+    ).astype(np.float32)
+    if len(samples) < len(code_upsampled):
+        return np.zeros(0, dtype=np.complex64)
+    kernel = code_upsampled[::-1]
+    s = np.asarray(samples, dtype=np.complex64)
+    corr_re = _fftconvolve(s.real.astype(np.float32), kernel, mode="valid")
+    corr_im = _fftconvolve(s.imag.astype(np.float32), kernel, mode="valid")
+    return (corr_re + 1j * corr_im).astype(np.complex64)
+
+
+def decode_with_freq_tracking(
+    samples: np.ndarray,
+    samps_per_chip: int,
+    n_bytes: int,
+    code: Optional[np.ndarray] = None,
+    search_half_samples: Optional[int] = None,
+    lock_threshold_frac: float = 0.3,
+    freq_offset_rad_per_sample: Optional[float] = None,
+) -> Optional[dict]:
+    """Full-stack decoder: carrier offset correction + complex MF + tracking.
+
+    Handles both carrier frequency offset (via one-shot R[1] estimation
+    and correction) AND symbol-timing drift (via per-symbol peak search
+    within a local window). Works with any integer samps_per_chip ≥ 2.
+
+    Returns a dict with:
+        bytes           — decoded bytes (one bit polarity; caller should
+                          try this and its complement for SISL framing)
+        positions       — peak position (sample index) per decoded bit
+        freq_offset_hz  — estimated frequency offset applied (needs the
+                          caller to supply the original sample rate; we
+                          return rad/sample and let the caller scale)
+        freq_rad_per_sample
+        peak_magnitude  — global matched-filter peak after correction
+        ref_angle_rad   — reference carrier phase taken from first peak
+
+    Returns None if:
+        - Stream too short for one symbol
+        - No matched-filter peak above lock threshold
+        - Tracker lost lock before decoding n_bytes*8 bits
+    """
+    if code is None:
+        code = public_hail_code()
+
+    n_bits = n_bytes * 8
+    samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip
+    if search_half_samples is None:
+        search_half_samples = samples_per_symbol // 4
+
+    if len(samples) < samples_per_symbol:
+        return None
+
+    # ── 1. Carrier offset estimation + correction ─────────────────────
+    if freq_offset_rad_per_sample is None:
+        rad_per_sample = estimate_freq_offset_rad_per_sample(samples)
+    else:
+        rad_per_sample = float(freq_offset_rad_per_sample)
+    samples_corr = apply_freq_correction(samples, rad_per_sample)
+
+    # ── 2. Complex matched filter ─────────────────────────────────────
+    corr_c = matched_filter_complex_sample_rate(
+        samples_corr, samps_per_chip, code
+    )
+    if len(corr_c) == 0:
+        return None
+    mag = np.abs(corr_c).astype(np.float32)
+
+    global_peak = float(mag.max())
+    if global_peak == 0.0:
+        return None
+
+    # ── 3. Find first peak and its reference phase ────────────────────
+    high_threshold = 0.9 * global_peak
+    first_candidate = int(np.argmax(mag >= high_threshold))
+    if mag[first_candidate] < high_threshold:
+        return None
+    lo = max(0, first_candidate - search_half_samples)
+    hi = min(len(mag), first_candidate + search_half_samples + 1)
+    local_idx = int(np.argmax(mag[lo:hi]))
+    pos = lo + local_idx
+    initial_peak = float(mag[pos])
+    lock_floor = lock_threshold_frac * initial_peak
+
+    ref_angle = float(np.angle(corr_c[pos]))
+    # Pre-compute the unit complex conjugate for faster per-symbol rotation
+    rotator = complex(np.cos(ref_angle), -np.sin(ref_angle))
+
+    # ── 4. Per-symbol tracking loop ───────────────────────────────────
+    bits = np.empty(n_bits, dtype=np.uint8)
+    positions: list[int] = []
+
+    for bit_idx in range(n_bits):
+        lo = max(0, pos - search_half_samples)
+        hi = min(len(mag), pos + search_half_samples + 1)
+        if hi - lo < samps_per_chip:
+            return None
+        window_mag = mag[lo:hi]
+        local_idx = int(np.argmax(window_mag))
+        actual_pos = lo + local_idx
+        local_peak = float(window_mag[local_idx])
+        if local_peak < lock_floor:
+            return None
+
+        # Project the complex correlator output onto the reference phase.
+        # After rotation, the signal lies mostly along the real axis;
+        # its sign tells us the BPSK bit value.
+        c_rotated = complex(corr_c[actual_pos]) * rotator
+        bits[bit_idx] = 0 if c_rotated.real >= 0 else 1
+        positions.append(actual_pos)
+        pos = actual_pos + samples_per_symbol
+
+    return {
+        "bytes": bits_to_bytes(bits),
+        "positions": positions,
+        "rad_per_sample": rad_per_sample,
+        "peak_magnitude": global_peak,
+        "ref_angle_rad": ref_angle,
+    }
+
+
 def matched_filter_signed_sample_rate(
     samples: np.ndarray,
     samps_per_chip: int,
