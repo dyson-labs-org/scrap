@@ -73,13 +73,53 @@ import sisl_framer as sf
 # ── Demo parameters ─────────────────────────────────────────────────────────
 
 CENTER_FREQ_HZ = 2_437_000_000          # default: WiFi ch 6 (may be noisy!)
-CHIP_RATE_HZ = 1_000_000                # 1 Mcps
-SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF supported integer rate)
+CHIP_RATE_HZ = 1_000_000                # 1 Mcps — fixed across devices
+SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF default)
 SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
 HACKRF_TX_VGA_DB = 0                    # TX IF gain, 0..47 dB. Default = min.
 HACKRF_TX_AMP_ON = False                # TX RF PA (14 dB). Off by default.
 HACKRF_RX_VGA_DB = 20                   # conservative
 HACKRF_RX_LNA_DB = 16                   # conservative
+
+
+# ── Per-device RX configuration ────────────────────────────────────────────
+#
+# The HackRF and RTL-SDR families have very different sample rate grids
+# and frequency ranges. The TX path is HackRF-only (RTL-SDR is RX-only
+# hardware); the RX path can use either.
+
+class DeviceInfo:
+    def __init__(self, name, driver, samp_hz, samps_per_chip, freq_min_hz,
+                 freq_max_hz, notes):
+        self.name = name
+        self.driver = driver
+        self.samp_hz = samp_hz
+        self.samps_per_chip = samps_per_chip
+        self.freq_min_hz = freq_min_hz
+        self.freq_max_hz = freq_max_hz
+        self.notes = notes
+
+
+DEVICES = {
+    "hackrf": DeviceInfo(
+        name="HackRF One",
+        driver="driver=hackrf",
+        samp_hz=8_000_000,
+        samps_per_chip=8,
+        freq_min_hz=1_000_000,           # 1 MHz
+        freq_max_hz=6_000_000_000,       # 6 GHz
+        notes="TX + RX, 1 MHz – 6 GHz, 8-bit ADC, 3 gain stages",
+    ),
+    "rtlsdr": DeviceInfo(
+        name="NESDR / RTL-SDR",
+        driver="driver=rtlsdr",
+        samp_hz=2_000_000,               # 2 Msps → 2 samps/chip (Nyquist)
+        samps_per_chip=2,
+        freq_min_hz=24_000_000,          # 24 MHz (R820T2)
+        freq_max_hz=1_766_000_000,       # ~1766 MHz (R820T2 ceiling)
+        notes="RX only, 24–1766 MHz, 8-bit ADC, single tuner gain",
+    ),
+}
 
 
 # ── Suggested quieter frequencies ──────────────────────────────────────────
@@ -577,21 +617,17 @@ def live_rx_decode(
     vga_db: int = HACKRF_RX_VGA_DB,
     amp_on: bool = False,
     center_hz: float = CENTER_FREQ_HZ,
+    device_name: str = "hackrf",
 ) -> dict:
-    """Stream samples from HackRF, decode SISL hails in real time.
+    """Stream samples from the selected device, decode SISL hails live.
 
-    Uses SoapySDR directly (not GNU Radio) so we have synchronous control
-    of the sample buffer and can run numpy processing in the same thread.
-    Each ~block_seconds worth of samples is processed as a unit; a hail
-    that spans a block boundary is missed this block but caught on the
-    next TX repetition.
+    `device_name` ∈ DEVICES.keys(). HackRF uses three gain stages
+    (AMP/LNA/VGA); RTL-SDR has a single tuner gain, so when device_name
+    is "rtlsdr" we clamp (lna_db + vga_db) into [0, 49] and apply it as
+    the single gain (amp_on is ignored — RTL-SDR has no pre-tuner AMP).
 
-    HackRF RF gain stages:
-        AMP (14 dB switchable amplifier)  — off by default
-        LNA (0..40 dB, 8 dB steps)         — default 16
-        VGA (0..62 dB, 2 dB steps)         — default 20
-    For bench tests under heavy attenuation, bump LNA/VGA closer to max.
-    Too much gain saturates the ADC and destroys dynamic range.
+    Frequency and sample-rate capabilities vary per device; we validate
+    `center_hz` against the selected device's range before opening it.
 
     Returns a stats dict: blocks_processed, hails_detected, hails_decrypted,
     interference, overflows, elapsed_s, ok, error.
@@ -606,30 +642,64 @@ def live_rx_decode(
                      f"Install with 'sudo pacman -S python-soapysdr' (Arch).",
         }
 
+    if device_name not in DEVICES:
+        return {
+            "ok": False,
+            "error": f"unknown device {device_name!r}; "
+                     f"choices: {list(DEVICES.keys())}",
+        }
+    info = DEVICES[device_name]
+
+    if center_hz < info.freq_min_hz or center_hz > info.freq_max_hz:
+        return {
+            "ok": False,
+            "error": (
+                f"{info.name} cannot tune to {center_hz/1e6:.1f} MHz; "
+                f"range is {info.freq_min_hz/1e6:.0f}..{info.freq_max_hz/1e6:.0f} "
+                f"MHz. ({info.notes})"
+            ),
+        }
+
     if responder_static is None:
         responder_static = demo_responder_key()
 
-    print(f"opening HackRF at {center_hz/1e6:.1f} MHz, "
-          f"{SAMP_RATE_HZ/1e6:.1f} Msps, block={block_seconds}s "
-          f"(processing {int(block_seconds*SAMP_RATE_HZ*8/1e6)} MB/block)")
-    print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
-          f"LNA={lna_db} dB VGA={vga_db} dB")
+    samp_hz = info.samp_hz
+    samps_per_chip = info.samps_per_chip
 
-    device = SoapySDR.Device("driver=hackrf")
-    device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
+    print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
+          f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
+          f"(processing ~{int(block_seconds*samp_hz*8/1e6)} MB/block, "
+          f"{samps_per_chip} samples/chip)")
+
+    device = SoapySDR.Device(info.driver)
+    device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
-    # SoapyHackRF exposes AMP as a two-state float gain: 0.0 dB (off) or
-    # 14.0 dB (on). Passing a bool silently coerces True→1.0 which is not
-    # the same as 14.0 dB. Always use explicit dB values.
-    device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
-    device.setGain(SOAPY_SDR_RX, 0, "LNA", lna_db)
-    device.setGain(SOAPY_SDR_RX, 0, "VGA", vga_db)
+
+    if device_name == "hackrf":
+        # Three independent gain stages. AMP is a two-state float (0 or 14).
+        device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
+        device.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
+        device.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
+        print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
+              f"LNA={lna_db} dB VGA={vga_db} dB")
+    elif device_name == "rtlsdr":
+        # Single tuner gain. Combine LNA+VGA so the operator has one
+        # knob that behaves intuitively: "bigger number = more gain".
+        combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
+        device.setGain(SOAPY_SDR_RX, 0, combined_db)
+        print(f"  RX gain: TUNER={combined_db:.1f} dB "
+              f"(from --rx-lna {lna_db} + --rx-vga {vga_db}; "
+              f"clamped to [0, 49])")
+        if amp_on:
+            print("  NOTE: --rx-amp ignored — RTL-SDR has no AMP stage")
+    else:
+        raise ValueError(f"unhandled device {device_name}")
 
     stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0])
     device.activateStream(stream)
 
     save_file = open(save_path, "wb") if save_path else None
-    block_samples = int(block_seconds * SAMP_RATE_HZ)
+    block_samples = int(block_seconds * samp_hz)
     buf = np.empty(block_samples, dtype=np.complex64)
 
     stats = {
@@ -674,7 +744,10 @@ def live_rx_decode(
             if save_file is not None:
                 buf[:filled].tofile(save_file)
 
-            result = _decode_one_hail_in_block(buf[:filled], responder_static)
+            result = _decode_one_hail_in_block(
+                buf[:filled], responder_static,
+                samps_per_chip=samps_per_chip,
+            )
             _print_live_event(stats["blocks_processed"], result)
 
             s = result["status"]
@@ -844,6 +917,15 @@ def main() -> int:
                              f"(default {CENTER_FREQ_HZ/1e6:.0f}). "
                              f"See list at bottom of --help for quieter "
                              f"alternatives.")
+    parser.add_argument("--device", choices=list(DEVICES.keys()),
+                        default="hackrf",
+                        help="rx: which SDR to use. 'hackrf' (default) "
+                             "covers 1 MHz – 6 GHz at 8 Msps with three "
+                             "gain stages. 'rtlsdr' (NESDR Smart / "
+                             "generic RTL-SDR) covers 24 MHz – 1766 MHz "
+                             "at 2 Msps with a single tuner gain; "
+                             "useful as a second observer on sub-GHz "
+                             "bands. tx mode is always HackRF.")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
@@ -943,6 +1025,7 @@ def main() -> int:
             vga_db=args.rx_vga,
             amp_on=args.rx_amp,
             center_hz=args.freq * 1e6,
+            device_name=args.device,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",

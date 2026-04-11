@@ -52,6 +52,24 @@ except ImportError:
           file=sys.stderr)
     sys.exit(2)
 
+# Per-device driver string + sample rate + frequency range.
+_DEVICES = {
+    "hackrf": {
+        "driver": "driver=hackrf",
+        "default_rate_msps": 8.0,
+        "freq_min_mhz": 1,
+        "freq_max_mhz": 6000,
+        "gain_stages": ("AMP", "LNA", "VGA"),
+    },
+    "rtlsdr": {
+        "driver": "driver=rtlsdr",
+        "default_rate_msps": 2.0,
+        "freq_min_mhz": 24,
+        "freq_max_mhz": 1766,
+        "gain_stages": ("TUNER",),
+    },
+}
+
 
 def watch(
     duration_s: float,
@@ -62,16 +80,38 @@ def watch(
     amp_on: bool,
     samples_per_measurement: int,
     period_s: float,
+    device_name: str = "hackrf",
 ) -> int:
-    dev = SoapySDR.Device("driver=hackrf")
+    if device_name not in _DEVICES:
+        print(f"unknown device {device_name!r}", file=sys.stderr)
+        return 2
+    info = _DEVICES[device_name]
+    if (center_hz / 1e6 < info["freq_min_mhz"]
+            or center_hz / 1e6 > info["freq_max_mhz"]):
+        print(
+            f"{device_name} cannot tune to {center_hz/1e6:.1f} MHz; "
+            f"range {info['freq_min_mhz']}..{info['freq_max_mhz']} MHz",
+            file=sys.stderr,
+        )
+        return 2
+
+    dev = SoapySDR.Device(info["driver"])
     dev.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     dev.setFrequency(SOAPY_SDR_RX, 0, center_hz)
-    dev.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
-    dev.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
-    dev.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
 
-    print(f"watching {center_hz/1e6:.1f} MHz at {samp_hz/1e6:.1f} Msps  "
-          f"LNA={lna_db} VGA={vga_db} AMP={'on' if amp_on else 'off'}")
+    if device_name == "hackrf":
+        dev.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
+        dev.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
+        dev.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
+        gain_desc = (f"LNA={lna_db} VGA={vga_db} "
+                     f"AMP={'on' if amp_on else 'off'}")
+    else:  # rtlsdr
+        combined = max(0.0, min(49.0, float(lna_db + vga_db)))
+        dev.setGain(SOAPY_SDR_RX, 0, combined)
+        gain_desc = f"TUNER={combined:.1f} dB (lna+vga)"
+
+    print(f"watching {center_hz/1e6:.1f} MHz at {samp_hz/1e6:.3f} Msps  "
+          f"{gain_desc}  device={device_name}")
     print(f"measuring {samples_per_measurement} samples "
           f"(~{samples_per_measurement/samp_hz*1000:.1f} ms) every "
           f"{period_s:.1f} s")
@@ -159,8 +199,9 @@ def main() -> int:
                    help="total duration in seconds (default 30)")
     p.add_argument("--freq", type=float, default=2437.0,
                    help="center frequency in MHz (default 2437 = WiFi ch6)")
-    p.add_argument("--rate", type=float, default=8.0,
-                   help="sample rate in Msps (default 8)")
+    p.add_argument("--rate", type=float, default=None,
+                   help="sample rate in Msps "
+                        "(default: 8 for hackrf, 2 for rtlsdr)")
     p.add_argument("--lna", type=int, default=16,
                    help="HackRF LNA gain in dB (default 16)")
     p.add_argument("--vga", type=int, default=20,
@@ -171,17 +212,30 @@ def main() -> int:
                    help="samples per measurement (default 262144)")
     p.add_argument("--period", type=float, default=0.5,
                    help="seconds between measurements (default 0.5)")
+    p.add_argument("--device", choices=list(_DEVICES.keys()),
+                   default="hackrf",
+                   help="which SDR to use: 'hackrf' (1 MHz – 6 GHz, "
+                        "3 gain stages) or 'rtlsdr' (NESDR / generic "
+                        "RTL-SDR, 24 MHz – 1766 MHz, single tuner gain). "
+                        "For rtlsdr, --amp is ignored and --lna+--vga are "
+                        "combined into the single tuner gain.")
     args = p.parse_args()
+
+    # Default sample rate depends on device
+    rate = args.rate
+    if rate is None:
+        rate = _DEVICES[args.device]["default_rate_msps"]
 
     return watch(
         duration_s=args.duration,
         center_hz=args.freq * 1e6,
-        samp_hz=args.rate * 1e6,
+        samp_hz=rate * 1e6,
         lna_db=args.lna,
         vga_db=args.vga,
         amp_on=args.amp,
         samples_per_measurement=args.samples,
         period_s=args.period,
+        device_name=args.device,
     )
 
 
