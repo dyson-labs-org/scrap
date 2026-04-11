@@ -481,6 +481,134 @@ def decode_with_freq_tracking(
     }
 
 
+def fit_phase_from_known_bits(
+    peak_values,
+    start_bit_offset: int,
+    known_bits: np.ndarray,
+) -> Optional[tuple[float, float, float]]:
+    """Fit absolute phase θ₀ and per-symbol drift Δθ from a known-bit pilot.
+
+    Given that peak_values[start_bit_offset : start_bit_offset+N] should
+    carry bits with known values `known_bits` (0 or 1), compute the best
+    linear model for the carrier phase at the peak positions:
+
+        expected_phase(k) = θ₀ + k·Δθ   (for k in the known region)
+
+    Each peak, in a clean BPSK signal, has complex value:
+
+        peak[k] = |p| · exp(j·(θ₀ + k·Δθ))   if bit k = 0
+                  -|p| · exp(j·(θ₀ + k·Δθ))  if bit k = 1
+
+    We derotate by the known bit sign (+1 or -1), then unwrap and
+    linear-fit the resulting phase sequence. The fit recovers both
+    θ₀ (intercept) and Δθ (slope) in radians per symbol.
+
+    Returns (theta0, delta_theta, rms_residual_rad) or None on failure.
+    rms_residual_rad is the root-mean-square phase residual after the
+    fit — a diagnostic for fit quality. Values ≲0.3 rad indicate clean
+    signal; values ≳0.9 rad indicate marginal SNR or wrong ASM position.
+    """
+    n_known = len(known_bits)
+    if n_known < 4:
+        return None
+    total = len(peak_values)
+    if start_bit_offset < 0 or start_bit_offset + n_known > total:
+        return None
+
+    peaks = np.array(
+        peak_values[start_bit_offset:start_bit_offset + n_known],
+        dtype=np.complex128,
+    )
+    if np.any(np.abs(peaks) < 1e-12):
+        return None
+
+    # Derotate by known sign: bit 0 → +1, bit 1 → -1
+    sign = np.where(known_bits == 0, 1.0, -1.0).astype(np.float64)
+    derotated = peaks * sign
+
+    # Unwrapped phase sequence (should be approximately linear in k)
+    phases = np.angle(derotated)
+    phases_unwrapped = np.unwrap(phases)
+
+    k = np.arange(n_known, dtype=np.float64)
+    try:
+        coeffs = np.polyfit(k, phases_unwrapped, 1)
+    except (np.linalg.LinAlgError, ValueError):
+        return None
+    slope = float(coeffs[0])       # Δθ per symbol
+    intercept = float(coeffs[1])   # θ₀ at local k=0
+
+    # Intercept is at local k=0 which corresponds to the first known-bit
+    # position (bit index `start_bit_offset` in the full peak array).
+    # Translate back to "phase at bit index 0" for caller convenience:
+    #   phase_at_bit_0 = intercept - start_bit_offset · slope
+    theta0_at_zero = intercept - start_bit_offset * slope
+
+    # Residual of the fit — smaller = cleaner signal / better ASM lock
+    residual = phases_unwrapped - (slope * k + intercept)
+    rms_residual = float(np.sqrt(np.mean(residual ** 2)))
+
+    return theta0_at_zero, slope, rms_residual
+
+
+def coherent_decode_from_pilot(
+    peak_values,
+    pilot_bit_offset: int,
+    pilot_bits: np.ndarray,
+    n_data_bits: int,
+) -> Optional[tuple[bytes, np.ndarray, float, float, float]]:
+    """Coherent BPSK decode using a known pilot for absolute phase recovery.
+
+    1. Fit θ₀, Δθ, residual from the pilot bits (pilot_bits_offset = where
+       the known pilot starts within peak_values, pilot_bits = the values).
+    2. For each data-bit position k ∈ [0, n_data_bits), compute the
+       expected phase θ₀+k·Δθ and derotate the corresponding peak.
+    3. The sign of the real part of the derotated peak is the coherent
+       BPSK decision; its magnitude is the soft LLR.
+
+    Decodes bits starting at peak index 0 in peak_values (not at the
+    pilot position — the caller is responsible for aligning peak_values
+    so that bit 0 is the frame start). Typically called with
+    pilot_bit_offset = 0 when the ASM begins at the start of the frame.
+
+    Returns (frame_bytes, soft_bits, theta0, delta_theta, rms_residual)
+    where soft_bits is a float array of signed correlator outputs
+    (positive for bit 0, negative for bit 1) — caller can use these
+    for FEC decoding or fuzzy frame search.
+
+    Returns None on fit failure or insufficient peaks.
+    """
+    fit = fit_phase_from_known_bits(
+        peak_values, pilot_bit_offset, pilot_bits,
+    )
+    if fit is None:
+        return None
+    theta0, delta_theta, rms_residual = fit
+
+    total = len(peak_values)
+    if n_data_bits < 8 or n_data_bits > total:
+        n_data_bits = min(n_data_bits, total)
+    if n_data_bits < 8:
+        return None
+
+    peaks_arr = np.array(peak_values[:n_data_bits], dtype=np.complex128)
+    k_arr = np.arange(n_data_bits, dtype=np.float64)
+    # Derotate each peak by -(θ₀ + k·Δθ)
+    rot = np.exp(-1j * (theta0 + k_arr * delta_theta))
+    derotated = peaks_arr * rot
+    # Real part carries the bit info (positive → 0, negative → 1)
+    soft = derotated.real.astype(np.float32)
+    bits = (soft < 0).astype(np.uint8)
+
+    # Pad to byte boundary if needed
+    pad = (-n_data_bits) % 8
+    if pad:
+        bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
+    frame_bytes = np.packbits(bits).tobytes()
+
+    return frame_bytes, soft, theta0, delta_theta, rms_residual
+
+
 def matched_filter_signed_sample_rate(
     samples: np.ndarray,
     samps_per_chip: int,

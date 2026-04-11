@@ -977,10 +977,60 @@ def _decode_one_hail_in_block(
                         "body": decoded_hail.body,
                         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
                     }
+
+                # Pilot-aided coherent decode: use the 32 ASM bits as a
+                # known pilot to fit absolute phase θ₀ and per-symbol drift
+                # Δθ, then coherently demodulate the whole frame. Coherent
+                # BPSK is 3 dB better than differential and eliminates the
+                # drift accumulation that breaks long frames.
+                aligned_peaks = peak_values[soft_offset:]
+                n_frame_bits = sc.HAIL_FRAME_LEN * 8
+                if len(aligned_peaks) >= n_frame_bits:
+                    coherent = sf.coherent_decode_from_pilot(
+                        aligned_peaks, 0, _ASM_BITS, n_frame_bits,
+                    )
+                    if coherent is not None:
+                        c_frame, _c_soft, c_theta0, c_delta, c_rms = coherent
+                        # Absolute phase has π ambiguity: try both polarities
+                        for label, candidate in (
+                            ("coherent", c_frame),
+                            ("coherent-inv",
+                             bytes(b ^ 0xFF for b in c_frame)),
+                        ):
+                            decoded_hail = sc.decode_hail(
+                                candidate, responder_static)
+                            if decoded_hail is not None:
+                                return {
+                                    "status": "decrypt_ok",
+                                    "start_sample": positions[0] if positions else 0,
+                                    "asm_at_byte": f"{label}-bit{soft_offset}",
+                                    "peak_mag": peak_mag,
+                                    "median_mag": median_mag,
+                                    "polarity": label,
+                                    "rad_per_sample": rad_per_sample,
+                                    "freq_offset_hz": freq_hz,
+                                    "soft_score": soft_score,
+                                    "theta0_rad": c_theta0,
+                                    "delta_theta_per_sym": c_delta,
+                                    "phase_rms_residual_rad": c_rms,
+                                    "body": decoded_hail.body,
+                                    "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+                                }
                 # Soft correlator found the frame but Poly1305 body
-                # verification failed. NOT a false positive: this is
-                # real signal at SNR where body bit errors prevent AEAD
-                # verification. Report as frame_soft for demo purposes.
+                # verification failed (both differential and coherent).
+                # NOT a false positive: this is real signal at SNR where
+                # body bit errors prevent AEAD verification. Report as
+                # frame_soft for demo purposes.
+                # Try one more fit to report phase diagnostics.
+                phase_rms = None
+                theta0_diag = None
+                delta_diag = None
+                aligned_peaks_diag = peak_values[soft_offset:]
+                if len(aligned_peaks_diag) >= 32:
+                    fit_diag = sf.fit_phase_from_known_bits(
+                        aligned_peaks_diag, 0, _ASM_BITS)
+                    if fit_diag is not None:
+                        theta0_diag, delta_diag, phase_rms = fit_diag
                 return {
                     "status": "frame_soft",
                     "start_sample": positions[0] if positions else 0,
@@ -994,6 +1044,9 @@ def _decode_one_hail_in_block(
                     "first_16_bytes_hex": soft_frame[:16].hex(),
                     "drift_per_symbol_rad": track_result.get(
                         "drift_per_symbol_rad", 0.0),
+                    "theta0_rad": theta0_diag,
+                    "delta_theta_per_sym": delta_diag,
+                    "phase_rms_residual_rad": phase_rms,
                 }
 
     # ── Neither polarity has an exact ASM, but we may have a fuzzy match

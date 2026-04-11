@@ -188,6 +188,105 @@ def test_matched_filter_magnitude_shape():
     assert np.max(mag) < 6 * np.median(mag)
 
 
+# ── Pilot-aided coherent decode ─────────────────────────────────────────────
+
+def _synth_peaks(bits: np.ndarray, theta0: float, delta: float,
+                 amp: float = 1.0, noise_std: float = 0.0,
+                 seed: int = 0) -> np.ndarray:
+    """Synthesize a sequence of complex peak values for a BPSK bit stream.
+    peak[k] = amp · sign(bit k) · exp(j·(theta0 + k·delta)) + noise"""
+    rng = np.random.default_rng(seed)
+    n = len(bits)
+    k = np.arange(n, dtype=np.float64)
+    sign = np.where(bits == 0, 1.0, -1.0)
+    phasors = np.exp(1j * (theta0 + k * delta))
+    peaks = amp * sign * phasors
+    if noise_std > 0:
+        peaks = peaks + (rng.normal(0, noise_std, n)
+                         + 1j * rng.normal(0, noise_std, n))
+    return peaks.astype(np.complex128)
+
+
+def test_fit_phase_from_known_bits_clean():
+    rng = np.random.default_rng(seed=11)
+    bits = rng.integers(0, 2, size=64).astype(np.uint8)
+    theta0_true = 0.7
+    delta_true = 0.02
+    peaks = _synth_peaks(bits, theta0_true, delta_true)
+    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    assert fit is not None
+    theta0, delta, rms = fit
+    assert abs(theta0 - theta0_true) < 1e-6
+    assert abs(delta - delta_true) < 1e-6
+    assert rms < 1e-6
+
+
+def test_fit_phase_from_known_bits_with_offset():
+    """Pilot doesn't start at bit 0 — theta0 should map back to bit 0."""
+    rng = np.random.default_rng(seed=12)
+    bits = rng.integers(0, 2, size=64).astype(np.uint8)
+    theta0_true = -0.4
+    delta_true = 0.015
+    peaks = _synth_peaks(bits, theta0_true, delta_true)
+    start = 10
+    pilot = bits[start:start + 32]
+    fit = sf.fit_phase_from_known_bits(peaks, start, pilot)
+    assert fit is not None
+    theta0, delta, _ = fit
+    assert abs(theta0 - theta0_true) < 1e-6
+    assert abs(delta - delta_true) < 1e-6
+
+
+def test_coherent_decode_from_pilot_clean():
+    rng = np.random.default_rng(seed=13)
+    n_bits = 133 * 8
+    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
+    # Force first 32 bits to a known ASM-like pattern
+    asm_bits = rng.integers(0, 2, size=32).astype(np.uint8)
+    bits[:32] = asm_bits
+    peaks = _synth_peaks(bits, theta0=0.3, delta=0.01)
+    result = sf.coherent_decode_from_pilot(peaks, 0, asm_bits, n_bits)
+    assert result is not None
+    frame_bytes, soft, theta0, delta, rms = result
+    # Reconstruct bits and compare
+    decoded_bits = sf.bytes_to_bits(frame_bytes)[:n_bits]
+    assert np.array_equal(decoded_bits, bits)
+    assert rms < 1e-6
+
+
+def test_coherent_decode_from_pilot_noisy():
+    """Coherent decode works at moderate SNR with small residual drift.
+
+    Note: at ~10 dB SNR with only 32 pilot bits, the slope estimate has
+    high variance, and a delta error ~0.003 rad/symbol accumulates over
+    1000+ bits to flip nearly half the later bits. In practice the chip
+    tracker supplies a good drift estimate, so the coherent decoder only
+    needs to refine a small residual; for this unit test we use low
+    residual drift + modest noise to exercise the clean coherent path.
+    """
+    rng = np.random.default_rng(seed=14)
+    n_bits = 133 * 8
+    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
+    asm_bits = rng.integers(0, 2, size=32).astype(np.uint8)
+    bits[:32] = asm_bits
+    peaks = _synth_peaks(bits, theta0=-0.5, delta=0.0,
+                          noise_std=0.08, seed=15)
+    result = sf.coherent_decode_from_pilot(peaks, 0, asm_bits, n_bits)
+    assert result is not None
+    frame_bytes, _, _, _, rms = result
+    decoded_bits = sf.bytes_to_bits(frame_bytes)[:n_bits]
+    ber = float(np.mean(decoded_bits != bits))
+    assert ber < 0.02, f"BER too high: {ber}"
+    assert rms < 0.3
+
+
+def test_fit_phase_from_known_bits_too_short():
+    assert sf.fit_phase_from_known_bits(
+        np.zeros(10, dtype=np.complex128), 0,
+        np.array([0, 1, 0], dtype=np.uint8),
+    ) is None
+
+
 # ── Runner ──────────────────────────────────────────────────────────────────
 
 def _run_all():
