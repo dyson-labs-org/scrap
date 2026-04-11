@@ -335,11 +335,17 @@ def decode_with_freq_tracking(
     lock_floor = lock_threshold_frac * initial_peak
 
     ref_angle = float(np.angle(corr_c[pos]))
-    # Pre-compute the unit complex conjugate for faster per-symbol rotation
-    rotator = complex(np.cos(ref_angle), -np.sin(ref_angle))
 
     # ── 4. Per-symbol tracking loop ───────────────────────────────────
-    bits = np.empty(n_bits, dtype=np.uint8)
+    # Collect the complex correlator value at each symbol peak. We then
+    # decode DIFFERENTIALLY: each bit is determined by the phase
+    # relationship between CONSECUTIVE symbols, not against a fixed
+    # reference. This is immune to slow carrier phase drift — the drift
+    # per symbol only needs to stay below ±π/2, which allows residual
+    # offsets up to ~250 Hz (≈ 0.25 rad/symbol at 1 ms symbols) even
+    # without any phase tracking. Any residual drift the R[1] estimator
+    # couldn't fully remove is absorbed.
+    peak_values: list[complex] = []
     positions: list[int] = []
 
     for bit_idx in range(n_bits):
@@ -354,13 +360,23 @@ def decode_with_freq_tracking(
         if local_peak < lock_floor:
             return None
 
-        # Project the complex correlator output onto the reference phase.
-        # After rotation, the signal lies mostly along the real axis;
-        # its sign tells us the BPSK bit value.
-        c_rotated = complex(corr_c[actual_pos]) * rotator
-        bits[bit_idx] = 0 if c_rotated.real >= 0 else 1
+        peak_values.append(complex(corr_c[actual_pos]))
         positions.append(actual_pos)
         pos = actual_pos + samples_per_symbol
+
+    # ── 5. Differential bit decoding ───────────────────────────────────
+    # For BPSK, consecutive symbols differ in phase by 0 (same bit) or π
+    # (different bit), plus a small drift due to residual frequency
+    # offset. We classify via the real part of (c_k · conj(c_{k-1})):
+    #   dot > 0  →  phase difference in (-π/2, +π/2)  →  same bit
+    #   dot < 0  →  phase difference near ±π          →  different bit
+    # The absolute bit polarity (which value bit_0 represents) is
+    # arbitrary and resolved by the caller trying both orientations.
+    bits = np.empty(n_bits, dtype=np.uint8)
+    bits[0] = 0                          # caller tries both polarities
+    for k in range(1, n_bits):
+        dot = (peak_values[k] * peak_values[k - 1].conjugate()).real
+        bits[k] = bits[k - 1] if dot >= 0 else (1 - bits[k - 1])
 
     return {
         "bytes": bits_to_bytes(bits),
