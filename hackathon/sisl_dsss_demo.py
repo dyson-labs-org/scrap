@@ -501,7 +501,7 @@ def live_rx_decode(
           f"{SAMP_RATE_HZ/1e6:.1f} Msps, block={block_seconds}s "
           f"(processing {int(block_seconds*SAMP_RATE_HZ*8/1e6)} MB/block)")
 
-    device = SoapySDR.Device({"driver": "hackrf"})
+    device = SoapySDR.Device("driver=hackrf")
     device.setSampleRate(SOAPY_SDR_RX, 0, SAMP_RATE_HZ)
     device.setFrequency(SOAPY_SDR_RX, 0, CENTER_FREQ_HZ)
     try:
