@@ -228,10 +228,22 @@ def offline_despread(cfile_path: str, n_bytes: int,
     raw = np.fromfile(cfile_path, dtype=np.complex64)
     chip_stream = _decimate_to_chips(raw, samps_per_chip=samps_per_chip)
 
-    if len(chip_stream) < n_bytes * 8 * sf.CHIPS_PER_SYMBOL:
+    needed_chips = n_bytes * 8 * sf.CHIPS_PER_SYMBOL
+    if len(chip_stream) < needed_chips:
+        have_samples = len(raw)
+        have_seconds = have_samples / SAMP_RATE_HZ
+        need_seconds = needed_chips * samps_per_chip / SAMP_RATE_HZ
         raise ValueError(
-            f"capture too short: need "
-            f"{n_bytes * 8 * sf.CHIPS_PER_SYMBOL} chips, got {len(chip_stream)}"
+            f"capture too short to decode {n_bytes} bytes:\n"
+            f"  file:       {cfile_path}\n"
+            f"  have:       {have_samples} samples "
+            f"({len(chip_stream)} chips, {have_seconds*1000:.1f} ms)\n"
+            f"  need:       {needed_chips} chips, "
+            f"{need_seconds*1000:.1f} ms of signal\n"
+            f"  shortfall:  {(needed_chips - len(chip_stream))} chips "
+            f"({(need_seconds - have_seconds)*1000:.1f} ms)\n"
+            f"Re-capture with a longer --duration (rx), shorten --message,\n"
+            f"or verify the RX was actually capturing signal (not just idle)."
         )
 
     offset = sf.find_frame_start(chip_stream, max_search=max_search_chips)
