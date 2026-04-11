@@ -341,22 +341,35 @@ if _HAVE_GR:
                      tx_vga_db: int = HACKRF_TX_VGA_DB,
                      tx_amp_on: bool = HACKRF_TX_AMP_ON,
                      center_hz: float = CENTER_FREQ_HZ,
-                     hackrf_device: str = "hackrf=0"):
+                     hackrf_device: str = "hackrf=0",
+                     preamble_only: bool = False):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
             self.tx_vga_db = tx_vga_db
             self.tx_amp_on = tx_amp_on
             self.center_hz = center_hz
+            self.preamble_only = preamble_only
 
             if mode == "tx":
-                # Always TX a fresh SISL v3 hail targeting demo-responder.
-                # The frame contains a random per-call body_nonce and a
-                # fresh caller ephemeral, so the RX sees cryptographically
-                # distinct hails even though the target key is constant.
-                frame = build_demo_hail()
-                self.hail_frame = frame
-                chips = build_tx_chips(frame)
+                if preamble_only:
+                    # Diagnostic mode: transmit only the 4-byte ASM on
+                    # repeat. No body, no crypto, no per-call variation.
+                    # At RX, the soft correlator should fire EVERY 32 bits
+                    # (every 32 ms at 1 ksym/s), giving a dense, highly
+                    # verifiable reference signal. Used to debug the RF
+                    # path independent of frame structure.
+                    frame = _ASM_BYTES
+                    self.hail_frame = frame
+                    chips = build_tx_chips(frame)
+                else:
+                    # Always TX a fresh SISL v3 hail targeting demo-responder.
+                    # The frame contains a random per-call body_nonce and a
+                    # fresh caller ephemeral, so the RX sees cryptographically
+                    # distinct hails even though the target key is constant.
+                    frame = build_demo_hail()
+                    self.hail_frame = frame
+                    chips = build_tx_chips(frame)
                 # Repeat the hail indefinitely so the RX can lock at any time
                 samples = upsample_chips_to_samples(chips)
                 self._src = blocks.vector_source_c(
@@ -1136,6 +1149,17 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         ss = result.get("soft_score", 0.0)
         drift = result.get("drift_per_symbol_rad", 0.0)
         drift_deg = drift * 180.0 / 3.14159265
+        rms = result.get("phase_rms_residual_rad")
+        rms_str = f"{rms:.2f}" if rms is not None else "n/a"
+        # Quality hint: <0.3 → clean lock, 0.3-0.9 → marginal, >0.9 → noise
+        if rms is None:
+            qual = ""
+        elif rms < 0.3:
+            qual = " CLEAN"
+        elif rms < 0.9:
+            qual = " MARGINAL"
+        else:
+            qual = " NOISE"
         print(f"[{block_num:4d}] FRAME SOFT-DETECTED  "
               f"asm@bit{result['asm_at_bit']}  "
               f"soft={ss:+.1f}/31  "
@@ -1143,6 +1167,7 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"Δf={foff:+.0f}Hz  "
               f"drift={drift_deg:+.1f}°/sym  "
               f"pol={result.get('polarity', '?')}  "
+              f"phase_rms={rms_str} rad{qual}  "
               f"— SISL frame detected via soft correlator, body bit "
               f"errors prevent Poly1305 verification")
         print(f"       first 16 bytes: {result.get('first_16_bytes_hex', '')}")
@@ -1525,6 +1550,17 @@ def main() -> int:
                              "default — only enable if link budget demands "
                              "it and you have ≥40 dB of attenuation to the "
                              "peer RX")
+    parser.add_argument("--tx-preamble", action="store_true",
+                        help="tx: diagnostic mode — transmit ONLY the "
+                             "4-byte ASM (1acffc1d) on repeat, no body. "
+                             "The RX should see a soft correlator hit "
+                             "every 32 bits (~32 ms) with full score ~31. "
+                             "Use this to debug the RF path independent "
+                             "of frame structure, crypto, or per-call "
+                             "randomness. Wrong key doesn't apply — there "
+                             "is no body to decrypt, so 'decrypt_ok' will "
+                             "never fire; watch for frame_soft at high "
+                             "score + low phase_rms instead.")
     parser.add_argument("--freq", type=float,
                         default=CENTER_FREQ_HZ / 1e6,
                         help=f"tx/rx center frequency in MHz "
@@ -1683,13 +1719,22 @@ def main() -> int:
         tx_vga_db=args.tx_vga,
         tx_amp_on=args.tx_amp,
         center_hz=args.freq * 1e6,
+        preamble_only=args.tx_preamble,
     )
     frame = tb.hail_frame
-    print(f"tx: transmitting demo hail ({len(frame)} bytes) "
-          f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
-    print(f"  asm:           {frame[0:4].hex()}")
-    print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
-    print(f"  target key:    demo-responder (deterministic)")
+    if args.tx_preamble:
+        print(f"tx: transmitting PREAMBLE-ONLY (4-byte ASM) "
+              f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
+        print(f"  asm:           {frame.hex()} (repeating forever)")
+        print(f"  symbols:       32 per cycle (~32 ms period)")
+        print(f"  note:          no body, no crypto — expect frame_soft "
+              f"with score ~31 at the RX, not decrypt_ok")
+    else:
+        print(f"tx: transmitting demo hail ({len(frame)} bytes) "
+              f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
+        print(f"  asm:           {frame[0:4].hex()}")
+        print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
+        print(f"  target key:    demo-responder (deterministic)")
     print(f"  TX gain:       VGA={args.tx_vga} dB "
           f"AMP={'on (+14 dB)' if args.tx_amp else 'off'}")
 
