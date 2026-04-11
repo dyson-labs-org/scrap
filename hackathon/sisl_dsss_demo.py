@@ -1251,7 +1251,9 @@ def main() -> int:
     parser.add_argument("--rx-amp", action="store_true",
                         help="rx: enable HackRF AMP (switchable 14 dB RF "
                              "preamplifier ahead of the LNA; off by default "
-                             "to avoid saturating the ADC)")
+                             "to avoid saturating the ADC). **HackRF only** "
+                             "— RTL-SDR/NESDR has no AMP stage and this "
+                             "flag is silently ignored when --device rtlsdr.")
     parser.add_argument("--tx-vga", type=int, default=HACKRF_TX_VGA_DB,
                         help=f"tx: HackRF TX VGA (IF gain, baseband "
                              f"amplification before upconversion, 0..47 dB "
