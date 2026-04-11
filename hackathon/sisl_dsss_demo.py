@@ -36,6 +36,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -44,6 +45,10 @@ from typing import Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
+
+from cryptography.hazmat.primitives.asymmetric import ec
+
+import sisl_crypto as sc
 
 try:
     from gnuradio import analog, blocks, gr
@@ -69,6 +74,65 @@ SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
 HACKRF_TX_GAIN_DB = 0                   # minimum
 HACKRF_RX_VGA_DB = 20                   # conservative
 HACKRF_RX_LNA_DB = 16                   # conservative
+
+
+# ── Demo keys (reproducible, NOT SECRET) ────────────────────────────────────
+#
+# The Phase 1/2 demo uses deterministic secp256k1 keys derived from fixed
+# labels so TX and RX sides share identity without a ground-station uplink.
+# DO NOT use these for anything other than the hackathon demo: the seeds
+# are literally this source file.
+
+_DEMO_SEED_PREFIX = b"SISL-PHASE1-DEMO-KEY-v1:"
+
+
+def _demo_key_from_label(label: str) -> ec.EllipticCurvePrivateKey:
+    seed = hashlib.sha256(_DEMO_SEED_PREFIX + label.encode()).digest()
+    scalar = int.from_bytes(seed, "big")
+    if scalar == 0:
+        scalar = 1
+    return ec.derive_private_key(scalar, ec.SECP256K1())
+
+
+def demo_caller_key() -> ec.EllipticCurvePrivateKey:
+    """Reproducible 'satellite A' static key."""
+    return _demo_key_from_label("caller")
+
+
+def demo_responder_key() -> ec.EllipticCurvePrivateKey:
+    """Reproducible 'satellite B' static key — the hail target."""
+    return _demo_key_from_label("responder")
+
+
+def demo_other_key() -> ec.EllipticCurvePrivateKey:
+    """Reproducible 'satellite X' static key — NOT the hail target.
+
+    Used to demonstrate the trial-decryption identity oracle: decoding
+    a demo hail under this key MUST fail (Poly1305 tag mismatch).
+    """
+    return _demo_key_from_label("other")
+
+
+# ── Demo hail frame builder ─────────────────────────────────────────────────
+
+def build_demo_hail() -> bytes:
+    """Produce a real SISL v3 hail frame targeting the demo responder.
+
+    Returns the 100-byte on-wire frame. Body fields are a fixed demo set
+    except `body_nonce` which is fresh per call (replay protection). The
+    caller's ephemeral key is generated inside and consumed by encode_hail.
+    """
+    responder_static = demo_responder_key()
+    caller_eph = sc.Ephemeral()
+    body = sc.HailBody(
+        center_freq_offset=100,   # +100 MHz reference offset
+        bandwidth_code=0x03,      # 5 MHz
+        mode=0x01,                # DSSS
+        chip_rate_code=0x32,      # 5 Mcps
+        body_nonce=os.urandom(8),
+        flags=0x03,               # DSSS + FHSS capable
+    )
+    return sc.encode_hail(caller_eph, responder_static.public_key(), body)
 
 
 # ── Pure-numpy helpers (no GR) ──────────────────────────────────────────────
@@ -269,6 +333,48 @@ def offline_despread(cfile_path: str,
 
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 
+def offline_decode_hail(
+    cfile_path: str,
+    responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
+    max_search_chips: Optional[int] = None,
+) -> dict:
+    """Full pipeline: capture → despread → detect hail → trial decrypt.
+
+    Returns a dict with:
+        offset            — acquisition chip offset (None if no lock)
+        decoded_bytes     — raw despread bytes
+        frame             — identify_sisl_frame() result or None
+        decoded_hail      — sisl_crypto.DecodedHail or None
+        decrypted         — True iff the hail was for `responder_static`
+        responder_label   — diagnostic string ("demo-responder", etc.)
+    """
+    if responder_static is None:
+        responder_static = demo_responder_key()
+
+    data, offset = offline_despread(
+        cfile_path, max_search_chips=max_search_chips
+    )
+
+    result: dict = {
+        "offset": offset,
+        "decoded_bytes": data,
+        "frame": None,
+        "decoded_hail": None,
+        "decrypted": False,
+    }
+
+    info = identify_sisl_frame(data)
+    result["frame"] = info
+    if info is None or info["frame_type"] != "hail" or info["frame_bytes"] is None:
+        return result
+
+    decoded = sc.decode_hail(info["frame_bytes"], responder_static)
+    if decoded is not None:
+        result["decoded_hail"] = decoded
+        result["decrypted"] = True
+    return result
+
+
 def identify_sisl_frame(data: bytes) -> Optional[dict]:
     """Scan `data` for a SISL v3 frame header and report what was found.
 
@@ -323,9 +429,6 @@ def main() -> int:
     parser.add_argument("--mode",
                         choices=("tx", "rx", "tx-to-file", "offline"),
                         required=True)
-    parser.add_argument("--message", default=None,
-                        help="tx/tx-to-file: payload bytes; "
-                             "offline: optional expected substring to verify")
     parser.add_argument("--capture", default="/tmp/sisl_rx.cfile",
                         help="capture file (input for offline, output for tx-to-file)")
     parser.add_argument("--duration", type=float, default=10.0,
@@ -333,57 +436,89 @@ def main() -> int:
     parser.add_argument("--prefix-ms", type=float, default=0.0,
                         help="tx-to-file: leading silence in ms")
     parser.add_argument("--repeats", type=int, default=1,
-                        help="tx-to-file: message repetitions")
+                        help="tx-to-file: hail repetitions")
     parser.add_argument("--max-search-chips", type=int, default=None,
                         help="offline: bound the acquisition search window")
-    parser.add_argument("--max-bytes", type=int, default=None,
-                        help="offline: stop decoding after N bytes")
+    parser.add_argument("--as", dest="as_key",
+                        choices=("responder", "other"), default="responder",
+                        help="offline: which demo key to trial-decrypt as. "
+                             "'responder' is the correct target, 'other' "
+                             "should fail (demonstrates the identity oracle)")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
-        msg = (args.message or "SISL HELLO WORLD").encode()
-        n = tx_to_file(msg, args.capture,
+        frame = build_demo_hail()
+        n = tx_to_file(frame, args.capture,
                        prefix_ms=args.prefix_ms, repeats=args.repeats)
         print(f"wrote {n} complex64 samples ({n * 8} bytes) to {args.capture}")
-        print(f"  message: {msg!r}")
-        print(f"  prefix:  {args.prefix_ms} ms, repeats: {args.repeats}")
+        print(f"  hail frame:    {len(frame)} bytes")
+        print(f"  asm:           {frame[0:4].hex()}")
+        print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
+        print(f"  eph enc (hex): {frame[6:38].hex()}...")
+        print(f"  prefix:        {args.prefix_ms} ms")
+        print(f"  repeats:       {args.repeats}")
+        print(f"  target key:    demo-responder (deterministic)")
         return 0
 
     if args.mode == "offline":
-        data, offset = offline_despread(
+        if args.as_key == "responder":
+            responder = demo_responder_key()
+            label = "demo-responder (correct target)"
+        else:
+            responder = demo_other_key()
+            label = "demo-other (WRONG key — should fail)"
+
+        result = offline_decode_hail(
             args.capture,
+            responder_static=responder,
             max_search_chips=args.max_search_chips,
-            max_bytes=args.max_bytes,
         )
+
+        offset = result["offset"]
+        data = result["decoded_bytes"]
+        frame = result["frame"]
+        decoded_hail = result["decoded_hail"]
+
         lock_state = "locked" if offset is not None else "NO LOCK — fallback to chip 0"
-        print(f"acquisition: {lock_state}")
+        print(f"acquisition:   {lock_state}")
         if offset is not None:
-            print(f"  offset:  {offset} chips "
+            print(f"  offset:      {offset} chips "
                   f"({offset / CHIP_RATE_HZ * 1000:.1f} ms into capture)")
-        print(f"  decoded: {len(data)} bytes")
+        print(f"decoded:       {len(data)} bytes of despread data")
+        print(f"attempting as: {label}")
         print()
 
-        frame = identify_sisl_frame(data)
-        if frame is not None:
-            print(f"SISL v3 frame detected:")
-            print(f"  asm at byte: {frame['asm_offset']}")
-            print(f"  version:     0x{frame['version']:02x}")
-            print(f"  msg type:    0x{frame['msg_type']:02x} ({frame['frame_type']})")
-            if frame["frame_bytes"] is not None:
-                print(f"  frame hex:   {frame['frame_bytes'].hex()}")
-        else:
-            print(f"No SISL frame ASM found in decoded bytes.")
-            print(f"  first 64: {data[:64]!r}")
+        if frame is None:
+            print("SISL frame:    NO ASM FOUND in despread bytes")
+            print(f"  first 64:    {data[:64]!r}")
+            return 2
+        print("SISL frame:    detected")
+        print(f"  asm offset:  byte {frame['asm_offset']}")
+        print(f"  version:     0x{frame['version']:02x}")
+        print(f"  msg type:    0x{frame['msg_type']:02x} ({frame['frame_type']})")
+        if frame["frame_type"] != "hail":
+            print("  (not a hail — stopping)")
+            return 3
+        print(f"  frame hex:   {frame['frame_bytes'].hex()}")
+        print()
 
-        if args.message:
-            expected = args.message.encode()
-            if expected in data:
-                idx = data.index(expected)
-                print(f"\nexpected substring {expected!r}: found at byte {idx}")
-                return 0
-            else:
-                print(f"\nexpected substring {expected!r}: NOT FOUND")
-                return 1
+        if decoded_hail is None:
+            print("TRIAL DECRYPT: FAILED")
+            print("  Poly1305 tag mismatch — this hail was not addressed to the")
+            print(f"  key we tried ({label}).")
+            print("  This is the v3 identity oracle: wrong key ⇒ silent drop.")
+            return 1
+
+        body = decoded_hail.body
+        print("TRIAL DECRYPT: OK (this hail was for us)")
+        print(f"  center_freq_offset: +{body.center_freq_offset} MHz")
+        print(f"  bandwidth_code:     0x{body.bandwidth_code:02x}")
+        print(f"  mode:               0x{body.mode:02x}")
+        print(f"  chip_rate_code:     0x{body.chip_rate_code:02x}")
+        print(f"  body_nonce:         {body.body_nonce.hex()}")
+        print(f"  flags:              0x{body.flags:02x}")
+        print(f"  caller eph (canon): "
+              f"{decoded_hail.caller_eph_pub_canonical.hex()}")
         return 0
 
     if not _HAVE_GR:

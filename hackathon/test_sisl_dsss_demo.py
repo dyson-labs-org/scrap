@@ -157,6 +157,95 @@ def test_identify_sisl_frame_none_on_noise():
     assert info is None
 
 
+# ── Demo keys and hail builder ──────────────────────────────────────────────
+
+def test_demo_keys_reproducible():
+    """Demo keys are deterministic across calls (required for TX/RX symmetry)."""
+    a1 = dd.demo_caller_key()
+    a2 = dd.demo_caller_key()
+    b1 = dd.demo_responder_key()
+    b2 = dd.demo_responder_key()
+    from cryptography.hazmat.primitives import serialization
+    def pub(k):
+        return k.public_key().public_bytes(
+            serialization.Encoding.X962,
+            serialization.PublicFormat.CompressedPoint,
+        )
+    assert pub(a1) == pub(a2)
+    assert pub(b1) == pub(b2)
+    assert pub(a1) != pub(b1)   # caller and responder must differ
+    assert pub(a1) != pub(dd.demo_other_key())
+
+
+def test_build_demo_hail_round_trip():
+    """build_demo_hail produces a 100 B frame decryptable by demo_responder_key."""
+    frame = dd.build_demo_hail()
+    assert len(frame) == sc.HAIL_FRAME_LEN
+    # Correct key decrypts
+    decoded = sc.decode_hail(frame, dd.demo_responder_key())
+    assert decoded is not None
+    assert decoded.body.center_freq_offset == 100
+    assert decoded.body.mode == 0x01
+    # Wrong key does not decrypt
+    assert sc.decode_hail(frame, dd.demo_other_key()) is None
+    assert sc.decode_hail(frame, dd.demo_caller_key()) is None
+
+
+# ── Full tx → file → offline_decode_hail pipeline ──────────────────────────
+
+def test_offline_decode_hail_correct_key():
+    """tx_to_file(build_demo_hail()) → offline_decode_hail decrypts OK."""
+    with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
+        path = f.name
+    try:
+        frame = dd.build_demo_hail()
+        dd.tx_to_file(frame, path, prefix_ms=3.0)
+
+        result = dd.offline_decode_hail(path)
+        assert result["offset"] is not None
+        assert result["frame"] is not None
+        assert result["frame"]["frame_type"] == "hail"
+        assert result["decrypted"] is True
+        assert result["decoded_hail"] is not None
+        assert result["decoded_hail"].body.center_freq_offset == 100
+    finally:
+        os.unlink(path)
+
+
+def test_offline_decode_hail_wrong_key_fails():
+    """Trying to decode the same capture as demo_other_key MUST fail."""
+    with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
+        path = f.name
+    try:
+        frame = dd.build_demo_hail()
+        dd.tx_to_file(frame, path, prefix_ms=3.0)
+
+        result = dd.offline_decode_hail(
+            path, responder_static=dd.demo_other_key()
+        )
+        # The frame IS detected (ASM + msg_type), but decrypt fails
+        assert result["frame"] is not None
+        assert result["frame"]["frame_type"] == "hail"
+        assert result["decrypted"] is False
+        assert result["decoded_hail"] is None
+    finally:
+        os.unlink(path)
+
+
+def test_offline_decode_hail_repeats():
+    """Multiple hail copies in the capture still decode the first."""
+    with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
+        path = f.name
+    try:
+        frame = dd.build_demo_hail()
+        dd.tx_to_file(frame, path, prefix_ms=2.0, repeats=3)
+        result = dd.offline_decode_hail(path)
+        assert result["decrypted"] is True
+        assert result["decoded_hail"].body.mode == 0x01
+    finally:
+        os.unlink(path)
+
+
 def test_decimate_to_chips_shape():
     # 16 samples at SAMPS_PER_CHIP=8 → 2 chips
     samples = np.ones(16, dtype=np.complex64) * (1 + 0j)
