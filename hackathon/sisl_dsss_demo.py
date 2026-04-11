@@ -122,11 +122,12 @@ if _HAVE_GR:
                 )
                 if _HAVE_SOAPY:
                     self._sink = soapy.sink(
-                        1.0, "driver=hackrf", "", 1, "fc32", "", [""]
+                        "driver=hackrf", "fc32", 1, "", "", [""], [""]
                     )
                     self._sink.set_sample_rate(0, SAMP_RATE_HZ)
                     self._sink.set_frequency(0, CENTER_FREQ_HZ)
-                    self._sink.set_gain(0, HACKRF_TX_GAIN_DB)
+                    self._sink.set_gain(0, "AMP", False)
+                    self._sink.set_gain(0, "VGA", HACKRF_TX_GAIN_DB)
                 else:
                     # Fallback: file sink so something exists without SoapySDR
                     self._sink = blocks.file_sink(
@@ -137,10 +138,11 @@ if _HAVE_GR:
             elif mode == "rx":
                 if _HAVE_SOAPY:
                     self._src = soapy.source(
-                        1.0, "driver=hackrf", "", 1, "fc32", "", [""]
+                        "driver=hackrf", "fc32", 1, "", "", [""], [""]
                     )
                     self._src.set_sample_rate(0, SAMP_RATE_HZ)
                     self._src.set_frequency(0, CENTER_FREQ_HZ)
+                    self._src.set_gain(0, "AMP", False)
                     self._src.set_gain(0, "LNA", HACKRF_RX_LNA_DB)
                     self._src.set_gain(0, "VGA", HACKRF_RX_VGA_DB)
                 else:
