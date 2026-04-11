@@ -179,8 +179,28 @@ def matched_filter_magnitude(chips: np.ndarray,
     return np.abs(corr.astype(np.float32))
 
 
+def _remove_dc(samples: np.ndarray) -> np.ndarray:
+    """Subtract the block-mean (DC component) from a complex sample stream.
+
+    RTL-SDR direct-conversion receivers have significant LO feedthrough
+    that shows up as a large DC spike at the tuned frequency. For our
+    BPSK-DSSS signal the modulated energy is mean-zero over any
+    reasonable window, so subtracting the block mean removes the LO
+    leakage without affecting the useful signal. This matters for R[1]
+    autocorrelation — a DC component contributes a large real-valued
+    (phase-zero) term that biases the phase estimate toward zero.
+    """
+    s = np.asarray(samples, dtype=np.complex64)
+    if len(s) == 0:
+        return s
+    return (s - s.mean()).astype(np.complex64)
+
+
 def _estimate_freq_offset_r1(samples: np.ndarray) -> float:
-    """Single R[1] autocorrelation freq estimate (rad/sample)."""
+    """Single R[1] autocorrelation freq estimate (rad/sample).
+
+    Assumes the input has already had its DC component removed.
+    """
     s = np.asarray(samples, dtype=np.complex64)
     if len(s) < 2:
         return 0.0
@@ -211,14 +231,22 @@ def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
 
     Returns the total phase advance per sample in radians (= 2π·Δf·T).
     Multiply by f_s / (2π) to convert to Hz.
+
+    The input is implicitly DC-centered by subtracting the block mean.
+    This is critical for direct-conversion receivers (notably RTL-SDR)
+    whose LO feedthrough produces a large DC spike right on top of the
+    signal; without DC removal, R[1] is pulled toward zero phase by
+    that bias term and the estimate can be off by hundreds of Hz.
     """
-    total = _estimate_freq_offset_r1(samples)
+    samples_ac = _remove_dc(samples)
+    total = _estimate_freq_offset_r1(samples_ac)
     for _ in range(iterations - 1):
-        # Apply the current correction and re-estimate the residual
-        corrected = apply_freq_correction(samples, total)
+        # Apply the current correction and re-estimate the residual.
+        # DC removal on the corrected stream too, in case the correction
+        # itself introduces a residual DC term.
+        corrected = _remove_dc(apply_freq_correction(samples_ac, total))
         delta = _estimate_freq_offset_r1(corrected)
         total += delta
-        # Early exit once the refinement drops below numerical floor
         if abs(delta) < 1e-9:
             break
     return total

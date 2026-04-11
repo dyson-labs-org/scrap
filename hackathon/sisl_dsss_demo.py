@@ -558,6 +558,13 @@ def _decode_one_hail_in_block(
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
         return {"status": "short_block"}
 
+    # ── 0. Remove DC offset ───────────────────────────────────────────
+    # RTL-SDR (and any direct-conversion receiver) has significant LO
+    # feedthrough — a large spike at the tuned frequency that sits right
+    # on top of our signal. Subtract the block mean before doing any
+    # DSP; our signal is mean-zero BPSK so this preserves the signal.
+    samples = (samples - samples.mean()).astype(np.complex64)
+
     # ── 1. Carrier offset estimation ──────────────────────────────────
     rad_per_sample = sf.estimate_freq_offset_rad_per_sample(samples)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
