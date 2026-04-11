@@ -560,35 +560,28 @@ def find_sisl_frame_soft(
     us which polarity to use for the hard-decision frame extraction.
     """
     n_bits = frame_len * 8
-    if len(peak_values) < n_bits + 32:
+    n_peaks = len(peak_values)
+    # Need only enough peaks to fit the ASM template + one search position
+    if n_peaks < 33:
         return None
 
     peaks = np.array(peak_values, dtype=np.complex128)
-    # Signed differential dot products, one per consecutive pair
     diffs = (peaks[1:] * np.conj(peaks[:-1])).real
     mags = np.abs(peaks[1:]) * np.abs(peaks[:-1])
-    soft = np.where(mags > 1e-12, diffs / mags, 0.0)     # in [-1, +1]
+    soft = np.where(mags > 1e-12, diffs / mags, 0.0).astype(np.float64)
 
     template = _ASM_DIFF_POLARITY                          # length 31
-
-    # Slide over soft values; each alignment uses 31 consecutive soft bits
     n_soft = len(soft)
-    search_end = n_soft - 31
-    if search_end <= 0:
+    if n_soft < 31:
         return None
 
-    # Vectorized correlation via np.convolve-style sliding dot product.
-    # But we also need to align to the full frame length (not just ASM),
-    # so cap the search range so there's room for a full frame AFTER the
-    # match position.
-    max_bit_offset = min(search_end, len(peak_values) - n_bits - 1)
-    if max_bit_offset <= 0:
-        return None
-
-    best_score = -np.inf
+    # Slide ASM template across soft values. No frame-length constraint
+    # on the search range — find the best ASM match anywhere in the
+    # available soft stream. Frame extraction below will handle
+    # truncation if fewer than n_bits peaks remain after the match.
+    best_score = 0.0
     best_offset = -1
-    best_sign = 1
-    for offset in range(max_bit_offset + 1):
+    for offset in range(n_soft - 30):
         window = soft[offset:offset + 31]
         raw = float(np.dot(window, template))
         if abs(raw) > abs(best_score):
@@ -599,25 +592,24 @@ def find_sisl_frame_soft(
         return None
     best_sign = +1 if best_score >= 0 else -1
 
-    # Extract frame bits via hard decisions starting from the matched
-    # position. The differential decoder runs relative to bit[0] at
-    # `best_offset`; which absolute polarity we pick is determined by
-    # best_sign. Bit 0 is fixed at 0 (arbitrary), and we flip the
-    # decoded stream at the end if best_sign is negative.
+    # Extract hard-decision frame bits from the matched position. If the
+    # match is near the end of peak_values and there aren't enough peaks
+    # for a full frame, zero-pad the tail — decrypt will fail but the
+    # soft_score diagnostic is what the caller needs.
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0
-    for k in range(1, n_bits):
-        dot = soft[best_offset + k - 1]
-        bits[k] = bits[k - 1] if dot >= 0 else (1 - bits[k - 1])
+    bits_available = min(n_bits, n_peaks - best_offset)
+    for k in range(1, bits_available):
+        src = best_offset + k - 1
+        if src >= n_soft:
+            break
+        bits[k] = bits[k - 1] if soft[src] >= 0 else (1 - bits[k - 1])
+    if bits_available < n_bits:
+        bits[bits_available:] = 0
     if best_sign < 0:
         bits = 1 - bits
 
     frame_bytes = np.packbits(bits).tobytes()
-    # The bit-offset reported here is the SYMBOL offset × 1 (one symbol
-    # per bit). For consistency with the existing bit_offset API we
-    # return both a symbol offset (for internal use) and a "bit_offset"
-    # equal to the symbol offset (since this decoder is byte-aligned
-    # via the soft correlation match).
     return best_offset, best_offset, float(best_score), frame_bytes
 
 
@@ -962,7 +954,7 @@ def _decode_one_hail_in_block(
     # This can catch frames at SNRs where exact/fuzzy hard-bit search
     # fails.
     soft_result = None
-    if peak_values and len(peak_values) >= sc.HAIL_FRAME_LEN * 8 + 32:
+    if peak_values and len(peak_values) >= 33:
         soft = find_sisl_frame_soft(peak_values, sc.HAIL_FRAME_LEN)
         if soft is not None:
             soft_offset, _, soft_score, soft_frame = soft
