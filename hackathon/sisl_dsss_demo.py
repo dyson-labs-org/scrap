@@ -24,9 +24,14 @@ flowgraph structure at the bench before running live. The pure-numpy DSP
 layer in sisl_framer.py is fully tested (see test_sisl_framer.py) and is
 the ground truth for spread/despread semantics. This file is the GR glue.
 
+Both tx and rx emit/capture a SISL v3 hail frame built by build_demo_hail
+(using the deterministic demo_responder_key target). The offline mode
+decodes the captured file via sisl_crypto.decode_hail.
+
 Usage:
-    python hackathon/sisl_dsss_demo.py --mode tx --message "SISL HELLO"
-    python hackathon/sisl_dsss_demo.py --mode rx
+    python hackathon/sisl_dsss_demo.py --mode tx       # tx a demo hail forever
+    python hackathon/sisl_dsss_demo.py --mode rx       # capture samples to /tmp/sisl_rx.cfile
+    python hackathon/sisl_dsss_demo.py --mode offline  # decode and decrypt a capture
 
 Requires:
     gnuradio (tested on 3.10+)
@@ -171,16 +176,21 @@ if _HAVE_GR:
         and do the demodulation offline.
         """
 
-        def __init__(self, mode: str, message: bytes,
+        def __init__(self, mode: str,
                      hackrf_device: str = "hackrf=0"):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
-            self.message = message
 
             if mode == "tx":
-                chips = build_tx_chips(message)
-                # Repeat the message indefinitely so the RX can lock at any time
+                # Always TX a fresh SISL v3 hail targeting demo-responder.
+                # The frame contains a random per-call body_nonce and a
+                # fresh caller ephemeral, so the RX sees cryptographically
+                # distinct hails even though the target key is constant.
+                frame = build_demo_hail()
+                self.hail_frame = frame
+                chips = build_tx_chips(frame)
+                # Repeat the hail indefinitely so the RX can lock at any time
                 samples = upsample_chips_to_samples(chips)
                 self._src = blocks.vector_source_c(
                     samples.tolist(), repeat=True, vlen=1
@@ -527,7 +537,18 @@ def main() -> int:
               "soapysdr soapysdr-hackrf")
         return 2
 
-    tb = DSSSHiddenSignalTop(args.mode, args.message.encode())
+    tb = DSSSHiddenSignalTop(args.mode)
+    if args.mode == "tx":
+        frame = tb.hail_frame
+        print(f"tx: transmitting demo hail ({len(frame)} bytes) "
+              f"to {CENTER_FREQ_HZ / 1e6:.1f} MHz for {args.duration:.1f} s")
+        print(f"  asm:           {frame[0:4].hex()}")
+        print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
+        print(f"  target key:    demo-responder (deterministic)")
+    else:
+        print(f"rx: capturing {args.duration:.1f} s @ "
+              f"{SAMP_RATE_HZ / 1e6:.1f} Msps to /tmp/sisl_rx.cfile")
+
     tb.start()
     time.sleep(args.duration)
     tb.stop()
