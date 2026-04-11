@@ -76,7 +76,8 @@ CENTER_FREQ_HZ = 2_437_000_000          # WiFi ch 6
 CHIP_RATE_HZ = 1_000_000                # 1 Mcps
 SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF supported integer rate)
 SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
-HACKRF_TX_GAIN_DB = 0                   # minimum
+HACKRF_TX_VGA_DB = 0                    # TX IF gain, 0..47 dB. Default = min.
+HACKRF_TX_AMP_ON = False                # TX RF PA (14 dB). Off by default.
 HACKRF_RX_VGA_DB = 20                   # conservative
 HACKRF_RX_LNA_DB = 16                   # conservative
 
@@ -188,10 +189,14 @@ if _HAVE_GR:
         """
 
         def __init__(self, mode: str,
+                     tx_vga_db: int = HACKRF_TX_VGA_DB,
+                     tx_amp_on: bool = HACKRF_TX_AMP_ON,
                      hackrf_device: str = "hackrf=0"):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
+            self.tx_vga_db = tx_vga_db
+            self.tx_amp_on = tx_amp_on
 
             if mode == "tx":
                 # Always TX a fresh SISL v3 hail targeting demo-responder.
@@ -212,8 +217,10 @@ if _HAVE_GR:
                     )
                     self._sink.set_sample_rate(0, SAMP_RATE_HZ)
                     self._sink.set_frequency(0, CENTER_FREQ_HZ)
-                    self._sink.set_gain(0, "AMP", False)
-                    self._sink.set_gain(0, "VGA", HACKRF_TX_GAIN_DB)
+                    # Explicit float dB for AMP — matches RX AMP handling.
+                    # HackRF TX AMP is two-state: 0.0 dB (off) or 14.0 dB (on).
+                    self._sink.set_gain(0, "AMP", 14.0 if tx_amp_on else 0.0)
+                    self._sink.set_gain(0, "VGA", float(tx_vga_db))
                 else:
                     # Fallback: file sink so something exists without SoapySDR
                     self._sink = blocks.file_sink(
@@ -774,6 +781,16 @@ def main() -> int:
                         help="rx: enable HackRF AMP (switchable 14 dB RF "
                              "preamplifier ahead of the LNA; off by default "
                              "to avoid saturating the ADC)")
+    parser.add_argument("--tx-vga", type=int, default=HACKRF_TX_VGA_DB,
+                        help=f"tx: HackRF TX VGA (IF gain, baseband "
+                             f"amplification before upconversion, 0..47 dB "
+                             f"in 1 dB steps) (default {HACKRF_TX_VGA_DB})")
+    parser.add_argument("--tx-amp", action="store_true",
+                        help="tx: enable HackRF TX AMP (switchable 14 dB RF "
+                             "power amplifier after the upconverter; off by "
+                             "default — only enable if link budget demands "
+                             "it and you have ≥40 dB of attenuation to the "
+                             "peer RX")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
@@ -897,13 +914,19 @@ def main() -> int:
               "soapysdr soapysdr-hackrf")
         return 2
 
-    tb = DSSSHiddenSignalTop(args.mode)
+    tb = DSSSHiddenSignalTop(
+        args.mode,
+        tx_vga_db=args.tx_vga,
+        tx_amp_on=args.tx_amp,
+    )
     frame = tb.hail_frame
     print(f"tx: transmitting demo hail ({len(frame)} bytes) "
           f"to {CENTER_FREQ_HZ / 1e6:.1f} MHz for {args.duration:.1f} s")
     print(f"  asm:           {frame[0:4].hex()}")
     print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
     print(f"  target key:    demo-responder (deterministic)")
+    print(f"  TX gain:       VGA={args.tx_vga} dB "
+          f"AMP={'on (+14 dB)' if args.tx_amp else 'off'}")
 
     tb.start()
     time.sleep(args.duration)
