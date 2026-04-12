@@ -281,6 +281,113 @@ def _estimate_freq_offset_r1(samples: np.ndarray) -> float:
     return -float(np.angle(r1))
 
 
+def _estimate_freq_fft_squared(samples: np.ndarray,
+                               coarse_rad: float = 0.0) -> float:
+    """FFT-based frequency estimator on the squared signal.
+
+    For BPSK/DSSS: s(t) = A*d(t)*c(t)*exp(jωt). Squaring removes the
+    data/code modulation: s²(t) = A²*exp(j2ωt). The FFT of s² has a
+    spectral line at 2ω, giving an unambiguous carrier estimate.
+
+    This works at much lower per-sample SNR than R[1] because the FFT
+    integrates over the entire block with √N gain. For 12M samples at
+    -17 dB per-sample SNR, the spectral line at 2ω has ~30 dB SNR.
+
+    `coarse_rad`: optional coarse frequency estimate (from R[1]) used to
+    center the FFT search window. If 0, searches the full band.
+
+    Returns frequency estimate in rad/sample.
+    """
+    s = np.asarray(samples, dtype=np.complex64)
+    N = len(s)
+    if N < 1024:
+        return coarse_rad
+
+    # Apply coarse correction to bring the signal near baseband,
+    # then square to remove BPSK modulation.
+    if coarse_rad != 0.0:
+        n_arr = np.arange(N, dtype=np.float64)
+        s = s * np.exp(-1j * coarse_rad * n_arr).astype(np.complex64)
+
+    sq = (s * s).astype(np.complex64)
+
+    # FFT with zero-padding for interpolation accuracy
+    nfft = min(N, 2**20)  # cap at 1M-point FFT for speed
+    # Average over segments if block is much longer than nfft
+    n_seg = max(1, N // nfft)
+    seg_len = nfft
+    accum = np.zeros(nfft, dtype=np.complex128)
+    for i in range(n_seg):
+        seg = sq[i * seg_len:(i + 1) * seg_len]
+        if len(seg) < nfft:
+            break
+        accum += np.fft.fft(seg, n=nfft)
+
+    mag = np.abs(accum)
+    # The spectral line is at 2*residual_freq (after coarse correction).
+    # Search the full spectrum for the peak.
+    peak_bin = int(np.argmax(mag))
+    # Convert bin to frequency
+    if peak_bin > nfft // 2:
+        peak_bin -= nfft
+    freq_per_bin = 2 * np.pi / nfft  # rad/sample per bin
+    delta_2x = peak_bin * freq_per_bin
+    # The squared signal has frequency 2*offset, so divide by 2
+    fine_rad = delta_2x / 2.0
+
+    return coarse_rad + fine_rad
+
+
+def estimate_freq_drift_rate(samples: np.ndarray,
+                             n_segments: int = 6) -> tuple[float, float]:
+    """Estimate both carrier offset and linear drift rate from sub-block R[1].
+
+    Splits the block into `n_segments` sub-blocks, runs R[1] on each,
+    fits a line through the per-segment frequency estimates. Returns
+    (rad_per_sample_at_center, drift_rad_per_sample2).
+
+    The drift rate captures RTL-SDR crystal warm-up drift (~1-3 kHz/s at
+    433 MHz). Without this correction, a 6-second block can have ~5 kHz
+    of in-block drift — enough to destroy the 1023-chip MF coherence.
+    """
+    N = len(samples)
+    if N < n_segments * 1000:
+        r = _estimate_freq_offset_r1(_remove_dc(samples))
+        return r, 0.0
+
+    seg_len = N // n_segments
+    freqs = []
+    centers = []
+    for i in range(n_segments):
+        seg = samples[i * seg_len:(i + 1) * seg_len]
+        seg = _remove_dc(seg)
+        f = _estimate_freq_offset_r1(seg)
+        freqs.append(f)
+        centers.append((i + 0.5) * seg_len)  # center sample of segment
+
+    freqs = np.array(freqs)
+    centers = np.array(centers)
+
+    # Robust linear fit (use median of pairwise slopes to reject outliers)
+    if n_segments >= 3:
+        slopes = []
+        for i in range(n_segments):
+            for j in range(i + 1, n_segments):
+                slopes.append((freqs[j] - freqs[i]) / (centers[j] - centers[i]))
+        drift = float(np.median(slopes))
+    else:
+        drift = float((freqs[-1] - freqs[0]) / (centers[-1] - centers[0]))
+
+    # Offset at center of block
+    mid = N / 2.0
+    offset_at_center = float(np.median(freqs - drift * (centers - mid)))
+
+    # Convert to offset at sample 0
+    offset_at_zero = offset_at_center - drift * mid
+
+    return offset_at_zero, drift
+
+
 def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
                                          iterations: int = 2) -> float:
     """Estimate carrier frequency offset of a BPSK-DSSS baseband signal.
@@ -324,12 +431,21 @@ def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
 
 
 def apply_freq_correction(samples: np.ndarray,
-                           rad_per_sample: float) -> np.ndarray:
-    """Multiply samples by exp(-j·δ·n) to remove a constant frequency offset."""
-    if rad_per_sample == 0.0:
+                           rad_per_sample: float,
+                           drift_rad_per_sample2: float = 0.0) -> np.ndarray:
+    """Multiply samples by exp(-j·(δ·n + ½α·n²)) to remove freq offset + drift.
+
+    rad_per_sample: constant frequency offset (rad/sample)
+    drift_rad_per_sample2: linear drift rate (rad/sample², i.e. chirp rate).
+        Compensates oscillator warm-up drift. Zero disables chirp correction.
+    """
+    if rad_per_sample == 0.0 and drift_rad_per_sample2 == 0.0:
         return samples
     n = np.arange(len(samples), dtype=np.float64)
-    correction = np.exp(-1j * rad_per_sample * n).astype(np.complex64)
+    phase = rad_per_sample * n
+    if drift_rad_per_sample2 != 0.0:
+        phase += 0.5 * drift_rad_per_sample2 * n * n
+    correction = np.exp(-1j * phase).astype(np.complex64)
     return (samples * correction).astype(np.complex64)
 
 
@@ -999,15 +1115,20 @@ def dbpsk_decode_from_pilot(
     pilot_llrs = fully_derotated[:n_pilot].real.astype(np.float32)
 
     # ── 5. Body-region LLRs (differential) ──
-    # The first body bit's predecessor is the last pilot peak (known
-    # sign, fully derotated), which matches the TX-side seed convention.
-    body_section = fully_derotated[n_pilot:]
+    # Use RAW (un-derotated) peaks for the differential product. DBPSK
+    # is inherently drift-immune: Re(peak[k] * conj(peak[k-1])) cancels
+    # any constant per-symbol phase drift. Derotating first requires an
+    # accurate Δθ estimate, which fails at low SNR and DESTROYS the
+    # otherwise-good differential LLRs (the derotation introduces a
+    # spurious constant phase offset exp(-j*Δθ_error) into every
+    # differential product, rotating them off the real axis).
+    raw_body = peaks_arr[n_pilot:]
     n_body = n_data_bits - n_pilot
     if n_body > 0:
         prev_peaks = np.empty(n_body, dtype=np.complex128)
-        prev_peaks[0] = fully_derotated[n_pilot - 1]
-        prev_peaks[1:] = body_section[:-1]
-        body_llrs = (body_section * np.conj(prev_peaks)).real.astype(np.float32)
+        prev_peaks[0] = peaks_arr[n_pilot - 1]
+        prev_peaks[1:] = raw_body[:-1]
+        body_llrs = (raw_body * np.conj(prev_peaks)).real.astype(np.float32)
     else:
         body_llrs = np.zeros(0, dtype=np.float32)
 

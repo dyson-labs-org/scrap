@@ -704,7 +704,7 @@ def _extract_llrs_at_position(
     )
     if dbpsk is None:
         return out
-    fec_frame, fec_soft, _, _, rms = dbpsk
+    fec_frame, fec_soft, theta0, delta_theta, rms = dbpsk
     out["fec_llrs"] = fec_soft
     out["phase_rms_residual_rad"] = rms
     c_bits_first32 = np.unpackbits(
@@ -729,8 +729,11 @@ def _acquire_and_track(
         return {"status": "short_block"}
 
     samples = (samples - samples.mean()).astype(np.complex64)
-    rad_per_sample = sf.estimate_freq_offset_rad_per_sample(
-        samples, iterations=3)
+    # Two-stage frequency estimation:
+    # 1. R[1] for coarse estimate (accurate to ~40 kHz at low SNR)
+    # 2. FFT on squared signal for fine refinement (sub-kHz accuracy)
+    coarse_rad = sf.estimate_freq_offset_rad_per_sample(samples, iterations=3)
+    rad_per_sample = sf._estimate_freq_fft_squared(samples, coarse_rad)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
@@ -868,6 +871,8 @@ def _try_fec_decrypt(
         fec_llrs_arr = llr_diag.get("fec_llrs")
         if fec_llrs_arr is None:
             continue
+
+        # (diagnostic prints removed)
 
         attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
         if attempt is None:
@@ -1280,19 +1285,36 @@ def live_rx_decode(
                     if abs(correction) < SETTLED_THRESHOLD_HZ:
                         settled = True
 
-            # ── Auto-gain (AGC): proportional adjustment toward target ──
-            pk = result.get("peak_mag")
-            if pk is not None and pk > 1:
-                if pk < AGC_MIN_PEAK or pk > AGC_MAX_PEAK:
-                    # Proportional step: 10*log10(target/actual) dB, clamped.
-                    step_db = 10.0 * np.log10(AGC_TARGET / pk)
-                    step_db = max(-6.0, min(6.0, step_db))
-                    new_vga = max(vga_min, min(vga_max, current_vga + step_db))
-                    if abs(new_vga - current_vga) >= 1.0:
-                        current_vga = round(new_vga)
-                        _set_rx_vga(current_vga)
-                        print(f"  AGC: peak={pk:.0f}, "
-                              f"gain → {current_vga:.0f} dB")
+            # ── ADC saturation check: reduce gain if samples clip ──
+            sample_max = float(np.max(np.abs(block_data)))
+            sample_p99 = float(np.percentile(np.abs(block_data), 99))
+            # SoapySDR CF32 samples are normalized to [-1, 1]. Values
+            # above ~0.7 indicate the ADC is near saturation; intermod
+            # products from clipping destroy the spreading code's phase
+            # and corrupt R[1] frequency estimates, preventing PPM
+            # convergence. Must check p99 (not just max) because a few
+            # spikes are normal but sustained high amplitude is not.
+            if sample_p99 > 0.5 and current_vga > vga_min:
+                # Proportional reduction to target p99 ≈ 0.3
+                reduce_db = max(3.0, 20.0 * np.log10(sample_p99 / 0.3))
+                current_vga = max(vga_min, current_vga - reduce_db)
+                _set_rx_vga(current_vga)
+                print(f"  AGC: ADC near saturation (p99={sample_p99:.2f}), "
+                      f"gain → {current_vga:.0f} dB")
+            else:
+                # ── Auto-gain (AGC): proportional adjustment ──
+                pk = result.get("peak_mag")
+                if pk is not None and pk > 1:
+                    if pk < AGC_MIN_PEAK or pk > AGC_MAX_PEAK:
+                        step_db = 10.0 * np.log10(AGC_TARGET / pk)
+                        step_db = max(-6.0, min(6.0, step_db))
+                        new_vga = max(vga_min, min(vga_max,
+                                                    current_vga + step_db))
+                        if abs(new_vga - current_vga) >= 1.0:
+                            current_vga = round(new_vga)
+                            _set_rx_vga(current_vga)
+                            print(f"  AGC: peak={pk:.0f}, "
+                                  f"gain → {current_vga:.0f} dB")
 
             # D4: LLR chase-combining. Feed ALL valid candidates' LLRs
             # from this block into the accumulator (multi-frame extraction).
