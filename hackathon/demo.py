@@ -1342,7 +1342,9 @@ def main() -> int:
               f"(period {TX_DURATION+RX_DURATION:.0f}s)")
         print(f"  max rounds:    {MAX_ROUNDS}")
 
-        # ACK decode closure — defined once, captures immutable state
+        # ACK decode closure — defined once, captures immutable state.
+        # samps_per_chip MUST be 2 (matching the RX sample rate of
+        # chip_rate*2), NOT active_samps_per_chip (which is 8 for TX).
         def _ack_decode_fn(block_data):
             return sisl_rx.decode_one_ack_in_block(
                 block_data,
@@ -1350,7 +1352,7 @@ def main() -> int:
                 caller_eph_priv=caller_eph_priv,
                 dh1=dh1,
                 expected_nonce_echo=body.body_nonce,
-                samps_per_chip=active_samps_per_chip,
+                samps_per_chip=2,
                 samp_hz=chip_rate_hz * 2,
             )
 
