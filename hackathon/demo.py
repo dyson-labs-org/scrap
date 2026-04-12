@@ -1325,7 +1325,7 @@ def main() -> int:
         # 4s gives ~2.5 complete ACK frames for reliable decode.
         # gcd(9, T_respond) = 1 for most T_respond values.
         TX_DURATION = 5.0
-        RX_DURATION = 4.0
+        RX_DURATION = 8.0  # must exceed min_block_sec (~5.4s for hail)
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
 
         # Auto-PPM for ACK RX: learn Δf from track_lost/decrypt_fail
