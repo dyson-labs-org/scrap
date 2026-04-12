@@ -16,11 +16,6 @@ Or standalone: python hackathon/test_sisl_crypto.py
 from __future__ import annotations
 
 import hashlib
-import os
-import sys
-import time
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
 import sisl_dsss as sd
@@ -515,28 +510,3 @@ def test_encode_hail_consumes_ephemeral():
         return
     raise AssertionError("expected RuntimeError on ephemeral reuse")
 
-
-# ── Runner ──────────────────────────────────────────────────────────────────
-
-def _run_all():
-    import traceback
-    tests = [(n, f) for n, f in globals().items()
-             if n.startswith("test_") and callable(f)]
-    passed = failed = 0
-    t0 = time.time()
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-            failed += 1
-    dt = time.time() - t0
-    print(f"\n{passed} passed, {failed} failed in {dt:.2f}s")
-    return failed
-
-
-if __name__ == "__main__":
-    sys.exit(_run_all())

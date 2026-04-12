@@ -26,13 +26,9 @@ may supply a session-derived code for the Phase 3 P2P channel.
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Optional
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # scipy is a HARD requirement — the matched-filter correlator must be
 # FFT-based for real-time DSP. A numpy np.convolve fallback on multi-

@@ -5,14 +5,9 @@ Run: python hackathon/test_sisl_fec.py
 
 from __future__ import annotations
 
-import os
-import sys
 import time
-import traceback
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_fec as fec
 
@@ -157,27 +152,3 @@ def test_vectorized_decode_perf():
     assert dt < 1.0, f"decode took {dt*1000:.0f} ms, expected <1000 ms"
     print(f"  perf: {n_payload} payload bits decoded in {dt*1000:.1f} ms")
 
-
-# ── Runner ──────────────────────────────────────────────────────────────────
-
-def _run_all():
-    tests = [(n, f) for n, f in sorted(globals().items())
-             if n.startswith("test_") and callable(f)]
-    passed = failed = 0
-    t0 = time.time()
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-            failed += 1
-    dt = time.time() - t0
-    print(f"\n{passed} passed, {failed} failed in {dt:.2f}s")
-    return failed
-
-
-if __name__ == "__main__":
-    sys.exit(_run_all())
