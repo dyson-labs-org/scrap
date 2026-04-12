@@ -11,4 +11,7 @@
         AMP 14 db
         VGA 24 db
     Tx:
-        2437:   --tx-vga 10 reliable
+        915:    --tx-vga 0 reliable @ 0.3m
+                --tx-vga 25 reliable @ 10m
+        2437:   --tx-vga 10 reliable @ 0.3m
+                --tx-vga 47 reliable @ 10m
