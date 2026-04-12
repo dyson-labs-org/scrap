@@ -633,6 +633,7 @@ def live_rx_decode(
     top_k_soft: int = 5,
     combine_copies: int = 0,
     samps_per_chip: int | None = None,
+    exit_on_decrypt: bool = False,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -839,6 +840,8 @@ def live_rx_decode(
                 # Store the full DecodedHail for ACK construction
                 if "_decoded_hail" not in stats:
                     stats["_decoded_hail"] = result.get("decoded_hail")
+                if exit_on_decrypt:
+                    break
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
 
@@ -1206,7 +1209,7 @@ def main() -> int:
         block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
         decoded_hail = None
 
-        # Phase 1: listen for hail
+        # Phase 1: listen for hail — exit immediately on first decrypt
         while decoded_hail is None:
             stats = live_rx_decode(
                 duration_s=args.duration,
@@ -1219,6 +1222,7 @@ def main() -> int:
                 top_k_soft=args.top_k,
                 combine_copies=args.combine,
                 samps_per_chip=active_samps_per_chip,
+                exit_on_decrypt=True,
             )
             # Check if any hail was decrypted — pull DecodedHail from stats
             dh = stats.get("_decoded_hail")
