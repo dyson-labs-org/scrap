@@ -1395,12 +1395,15 @@ def main() -> int:
                   flush=True)
 
             # RX phase — use live_rx_decode with ACK decode function.
-            # Gets full AGC, PPM, background reader infrastructure.
+            # Start at lower gain: the ACK signal is strong (same TX
+            # power, bench distance). At --rx-lna 40 + AMP + VGA 40,
+            # the ADC clips (p99>1.4), destroying the spreading code.
+            # Start at VGA=20 and let AGC ramp if needed.
             ack_stats = live_rx_decode(
                 duration_s=RX_DURATION,
                 block_seconds=5.0,  # need room for tracker start offset
                 lna_db=args.rx_lna,
-                vga_db=args.rx_vga,
+                vga_db=min(20, args.rx_vga),
                 amp_on=args.rx_amp,
                 center_hz=center_hz,
                 device_name=args.device,
