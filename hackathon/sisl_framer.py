@@ -207,25 +207,23 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     """FFT-based frequency estimator on squared signal.
 
     s²(t) = A²·exp(j2ωt) removes BPSK modulation; FFT peak at 2ω / 2.
-    `coarse_rad`: optional R[1] estimate to center the search window.
+    `coarse_rad` is accepted for API compat but ignored — R[1] is too
+    unreliable at DSSS wideband SNR to be useful as a coarse estimate.
     Returns frequency estimate in rad/sample.
     """
     s = np.asarray(samples, dtype=np.complex64)
     N = len(s)
     if N < 1024:
-        return coarse_rad
+        return 0.0
 
-    # Apply coarse correction to bring the signal near baseband,
-    # then square to remove BPSK modulation.
-    if coarse_rad != 0.0:
-        n_arr = np.arange(N, dtype=np.float64)
-        s = s * np.exp(-1j * coarse_rad * n_arr).astype(np.complex64)
-
+    # Square to remove BPSK modulation. Do NOT apply R[1] coarse
+    # correction — at -17 dB per-sample SNR, R[1] gives random angles
+    # (often ±π = ±Nyquist), which shifts the real signal to the band
+    # edge where it aliases or falls outside any search window.
     sq = (s * s).astype(np.complex64)
 
-    # FFT with zero-padding for interpolation accuracy
+    # FFT with segment averaging for noise reduction
     nfft = min(N, 2**20)  # cap at 1M-point FFT for speed
-    # Average over segments if block is much longer than nfft
     n_seg = max(1, N // nfft)
     seg_len = nfft
     accum = np.zeros(nfft, dtype=np.complex128)
@@ -236,41 +234,72 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
         accum += np.fft.fft(seg, n=nfft)
 
     mag = np.abs(accum)
-    # The spectral line is at 2*residual_freq (after coarse correction).
-    # Restrict the search to ±100 kHz (in the squared domain, that's
-    # ±200 kHz) around DC. After coarse R[1] correction the true
-    # residual is within this window. Searching the full spectrum picks
-    # up PLL/clock spurs on devices like HackRF (fixed-frequency lines
-    # at multiples of 250/500 kHz that dominate the DSSS carrier).
-    # Use a fraction of nfft as the search window: ±5% of the Nyquist
-    # band covers ±100 kHz at 2 Msps and ±400 kHz at 8 Msps — wide
-    # enough for any real crystal offset but excludes clock spurs.
-    search_half = max(256, nfft // 20)
-    mask = np.zeros(nfft, dtype=bool)
-    mask[:search_half] = True
-    mask[-search_half:] = True
+    # Search the full band, excluding only DC and Nyquist bins.
+    mask = np.ones(nfft, dtype=bool)
+    mask[0] = False
+    mask[nfft // 2] = False
     masked_mag = np.where(mask, mag, 0.0)
-    peak_bin = int(np.argmax(masked_mag))
 
-    # Parabolic interpolation for sub-bin accuracy. Fits a parabola
-    # through the peak and its two neighbours to find the fractional
-    # bin offset. Improves frequency resolution from fs/nfft (~2 Hz)
-    # to ~0.1 Hz, which matters for long symbols (1023 chips).
-    left = (peak_bin - 1) % nfft
-    right = (peak_bin + 1) % nfft
-    y0, y1, y2 = float(mag[left]), float(mag[peak_bin]), float(mag[right])
-    frac = _parabolic_frac(y0, y1, y2)
-    refined_bin = peak_bin + frac
+    # Return the top-K candidates (by magnitude) so the caller can
+    # try each one and pick the one that produces the best MF output.
+    # HackRF has PLL spurs at multiples of ~250/500 kHz that can be
+    # stronger than the DSSS carrier; returning only the argmax would
+    # lock onto the spur. With K candidates the caller validates each
+    # against the MF and picks the real signal.
+    K = 5
+    candidates: list[float] = []
+    freq_per_bin = 2 * np.pi / nfft
+    working_mag = masked_mag.copy()
+    for _ in range(K):
+        peak_bin = int(np.argmax(working_mag))
+        if working_mag[peak_bin] <= 0:
+            break
+        # Parabolic interpolation
+        left = (peak_bin - 1) % nfft
+        right = (peak_bin + 1) % nfft
+        y0 = float(mag[left])
+        y1 = float(mag[peak_bin])
+        y2 = float(mag[right])
+        frac = _parabolic_frac(y0, y1, y2)
+        refined_bin = peak_bin + frac
+        if refined_bin > nfft / 2:
+            refined_bin -= nfft
+        delta_2x = refined_bin * freq_per_bin
+        candidates.append(delta_2x / 2.0)  # divide by 2 for squared
+        # Suppress this peak and its neighbors for next iteration
+        lo = max(0, peak_bin - nfft // 100)
+        hi = min(nfft, peak_bin + nfft // 100 + 1)
+        working_mag[lo:hi] = 0.0
 
-    # Convert bin to frequency
-    if refined_bin > nfft / 2:
-        refined_bin -= nfft
-    freq_per_bin = 2 * np.pi / nfft  # rad/sample per bin
-    delta_2x = refined_bin * freq_per_bin
-    # The squared signal has frequency 2*offset, so divide by 2
-    fine_rad = delta_2x / 2.0
+    if not candidates:
+        return 0.0
 
-    return coarse_rad + fine_rad
+    # If only one candidate, return it directly (fast path for tests).
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Validate each candidate: apply correction, run a QUICK MF on a
+    # short segment, pick the one with the best peak/median.
+    seg_len = min(N, 2_000_000)  # 1 second at 2 Msps
+    seg = np.asarray(samples[:seg_len], dtype=np.complex64)
+    best_rad = candidates[0]
+    best_ratio = 0.0
+    for cand_rad in candidates:
+        corrected = apply_freq_correction(seg, cand_rad)
+        # Quick MF — assume 2 samples/chip (works for any samps_per_chip
+        # since we just need relative peak/median, not absolute)
+        spc = max(2, round(len(seg) / 1024 / 1023)) if len(seg) > 2046 else 2
+        spc = min(spc, 8)  # cap at 8
+        corr = matched_filter_complex_sample_rate(corrected, 2)
+        if len(corr) < 100:
+            continue
+        m = np.abs(corr).astype(np.float32)
+        ratio = float(m.max()) / max(float(np.median(m)), 1e-12)
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_rad = cand_rad
+
+    return best_rad
 
 
 def estimate_freq_drift_rate(samples: np.ndarray,
