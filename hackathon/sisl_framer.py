@@ -278,25 +278,49 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     if len(candidates) == 1:
         return candidates[0]
 
-    # Validate each candidate: apply correction, run a QUICK MF on a
-    # short segment, pick the one with the best peak/median.
-    seg_len = min(N, 2_000_000)  # 1 second at 2 Msps
+    # Validate each candidate with a periodicity-aware MF check.
+    # The real DSSS signal has MF peaks every CHIPS_PER_SYMBOL×spc
+    # samples (one symbol period). Spurs produce a single large peak
+    # or irregular peaks. We score candidates by the PERIODIC peak
+    # strength: find the strongest MF peak, check 8 subsequent symbol
+    # positions, and use the median of those 8 peaks. A real signal
+    # gives a high periodic median; a spur gives a high argmax but
+    # low periodic median.
+    seg_len = min(N, 4_000_000)  # 2 seconds at 2 Msps
     seg = np.asarray(samples[:seg_len], dtype=np.complex64)
+    spc = 2  # always validate at 2 samples/chip
+    sym_samples = CHIPS_PER_SYMBOL * spc  # 2046
+
     best_rad = candidates[0]
-    best_ratio = 0.0
+    best_score = -1.0
     for cand_rad in candidates:
         corrected = apply_freq_correction(seg, cand_rad)
-        # Quick MF — assume 2 samples/chip (works for any samps_per_chip
-        # since we just need relative peak/median, not absolute)
-        spc = max(2, round(len(seg) / 1024 / 1023)) if len(seg) > 2046 else 2
-        spc = min(spc, 8)  # cap at 8
-        corr = matched_filter_complex_sample_rate(corrected, 2)
-        if len(corr) < 100:
+        corr = matched_filter_complex_sample_rate(corrected, spc)
+        if len(corr) < sym_samples * 10:
             continue
         m = np.abs(corr).astype(np.float32)
-        ratio = float(m.max()) / max(float(np.median(m)), 1e-12)
-        if ratio > best_ratio:
-            best_ratio = ratio
+        median_noise = float(np.median(m))
+        if median_noise < 1e-12:
+            continue
+        # Find the strongest peak and check periodic structure
+        first_peak = int(np.argmax(m))
+        search_half = sym_samples // 4
+        periodic_peaks: list[float] = []
+        for k in range(8):
+            pos = first_peak + k * sym_samples
+            if pos + search_half >= len(m):
+                break
+            lo = max(0, pos - search_half)
+            hi = min(len(m), pos + search_half + 1)
+            periodic_peaks.append(float(m[lo:hi].max()))
+        if len(periodic_peaks) < 4:
+            continue
+        # Score = median of periodic peaks / noise median.
+        # Real signal: periodic peaks are consistently high → score >> 5
+        # Spur: only the first peak is high, rest are noise → score ≈ 1-3
+        score = float(np.median(periodic_peaks)) / median_noise
+        if score > best_score:
+            best_score = score
             best_rad = cand_rad
 
     return best_rad
