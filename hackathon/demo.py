@@ -1300,15 +1300,18 @@ def main() -> int:
             hail_chips, SAMPS_PER_CHIP)
 
         # Listen-after-talk: coprime periods
-        # Caller: TX 5s, RX 2s → period T₁=7s
+        # Caller: TX 5s, RX 4s → period T₁=9s
+        # RX must be ≥ 1 ACK frame (1.52s) + device overhead + FFT time.
+        # 4s gives ~2.5 complete ACK frames for reliable decode.
+        # gcd(9, T_respond) = 1 for most T_respond values.
         TX_DURATION = 5.0
-        RX_DURATION = 2.0
+        RX_DURATION = 4.0
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
 
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
         print(f"  duty cycle:    TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
-              f"(coprime period 7s)")
+              f"(period {TX_DURATION+RX_DURATION:.0f}s)")
         print(f"  max rounds:    {MAX_ROUNDS}")
 
         for round_num in range(1, MAX_ROUNDS + 1):
