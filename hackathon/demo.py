@@ -267,6 +267,7 @@ def soapy_tx_burst(
     tx_vga_db: int = HACKRF_TX_VGA_DB,
     tx_amp_on: bool = HACKRF_TX_AMP_ON,
     repeats: int = 1,
+    device_str: str = "driver=hackrf",
 ) -> None:
     """Transmit a finite sample buffer via SoapySDR (no GnuRadio).
 
@@ -276,7 +277,7 @@ def soapy_tx_burst(
     import SoapySDR
     from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
 
-    device = SoapySDR.Device("driver=hackrf")
+    device = SoapySDR.Device(device_str)
     device.setSampleRate(SOAPY_SDR_TX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_TX, 0, center_hz)
     device.setGain(SOAPY_SDR_TX, 0, "VGA", float(tx_vga_db))
@@ -1278,6 +1279,17 @@ def main() -> int:
         responder_static_pub = demo_responder_key().public_key()
         center_hz = args.freq * 1e6
 
+        # Pin to a specific HackRF for TX by probing which one we get.
+        # This prevents device bouncing when multiple HackRFs are attached.
+        import SoapySDR as _soapy_probe
+        _probe = _soapy_probe.Device("driver=hackrf")
+        _probe_hw = dict(_probe.getHardwareInfo())
+        tx_serial = _probe_hw.get("serial", "")
+        del _probe
+        tx_device_str = (f"driver=hackrf,serial={tx_serial}"
+                         if tx_serial else "driver=hackrf")
+        print(f"call: pinned to HackRF {tx_serial.lstrip('0')[:16]} for TX")
+
         # Build the hail — retain ephemeral key for ACK decode
         caller_eph = sc.Ephemeral()
         caller_eph_priv = caller_eph.peek()  # retain for ACK decode
@@ -1326,17 +1338,17 @@ def main() -> int:
                 tx_vga_db=args.tx_vga,
                 tx_amp_on=args.tx_amp,
                 repeats=tx_repeats,
+                device_str=tx_device_str,
             )
             print(" done. Listening for ACK...", flush=True)
 
-            # RX phase — capture one block and try ACK decode
+            # RX phase — use the SAME pinned HackRF (half-duplex switch)
             import SoapySDR as _soapy
             from SoapySDR import SOAPY_SDR_RX as _RX, SOAPY_SDR_CF32 as _CF32
-            rx_samp_hz = active_samps_per_chip * chip_rate_hz
-            rx_samp_hz = max(2_000_000, min(DEVICES["hackrf"].samp_hz,
-                                             rx_samp_hz))
             rx_info = DEVICES[args.device]
-            rx_dev = _soapy.Device(rx_info.driver)
+            rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
+                                             chip_rate_hz * 2))
+            rx_dev = _soapy.Device(tx_device_str)
             rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
                                              chip_rate_hz * 2))
             rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
