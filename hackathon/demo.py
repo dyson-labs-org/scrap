@@ -1234,12 +1234,16 @@ def main() -> int:
                 print(f"RX error: {stats.get('error')}", file=sys.stderr)
                 return 2
 
-        # Phase 2: TX ACK (repeat 3× for reliability, T_respond=3s)
+        # Phase 2: TX ACK continuously so the caller's RX window catches it.
+        # The caller cycles TX 5s / RX 2s (period 7s). With coprime
+        # timing, worst-case overlap is 21s. TX for 30s to be safe.
         responder_eph = sc.Ephemeral()
         ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
         ack_chips = sf.tx_bits_to_chips(ack_bits)
         ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
-        ack_repeats = 5  # ~7.6 seconds at 1 Mcps
+        ack_duration_s = 30.0
+        ack_repeats = max(1, int(
+            ack_duration_s * chip_rate_hz / len(ack_chips)))
         print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits × "
               f"{ack_repeats} repeats → "
               f"{len(ack_chips) * ack_repeats / chip_rate_hz:.1f}s on air")
@@ -1250,9 +1254,10 @@ def main() -> int:
             tx_amp_on=args.tx_amp,
             repeats=ack_repeats,
         )
-        print(f"\033[32m  ACK TRANSMITTED — handshake complete\033[0m")
-        # Session keys available on responder side already (encode_ack
-        # computed all three DH terms). Print confirmation.
+        print()
+        print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
+        print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
+        print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
         print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
         return 0
 
@@ -1356,11 +1361,13 @@ def main() -> int:
                 foff = ack_result.get("freq_offset_hz", 0)
                 if s == "decrypt_ok":
                     da = ack_result["decoded_ack"]
-                    print(f"\n\033[32m  ACK RECEIVED — "
-                          f"status={da.body.status} "
-                          f"nonce_echo={da.body.nonce_echo.hex()} "
-                          f"Δf={foff:+.0f}Hz\033[0m")
-                    print(f"  SESSION ESTABLISHED")
+                    print()
+                    print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
+                    print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
+                    print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+                    print(f"  status:        {da.body.status}")
+                    print(f"  nonce echo:    {da.body.nonce_echo.hex()}")
+                    print(f"  Δf:            {foff:+.0f} Hz")
                     return 0
                 elif s in ("decrypt_fail", "track_lost"):
                     print(f"    ({s} Δf={foff:+.0f}Hz)")
