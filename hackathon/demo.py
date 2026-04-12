@@ -505,8 +505,16 @@ class _AgcPpmState:
 
     def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
         sample_p99 = float(np.percentile(np.abs(block_data), 99))
-        if sample_p99 > 0.5 and self._current_vga > self._vga_min:
-            reduce_db = max(3.0, 20.0 * np.log10(sample_p99 / 0.3))
+        # Only reduce gain when genuinely near clipping (p99 > 0.9).
+        # The old 0.5 threshold fired on strong-but-clean signals that
+        # were decrypting fine, causing 3-5 blocks of unnecessary gain
+        # reduction before stabilizing. The FFT-squared frequency
+        # estimator is robust to mild distortion, so we only need to
+        # act when samples actually approach the ±1 ADC rail.
+        # Cap the step at 6 dB to avoid overcorrection.
+        if sample_p99 > 0.9 and self._current_vga > self._vga_min:
+            reduce_db = min(6.0, max(3.0,
+                            20.0 * np.log10(sample_p99 / 0.5)))
             self._current_vga = max(
                 self._vga_min, self._current_vga - reduce_db)
             self._set_rx_vga(self._current_vga)
