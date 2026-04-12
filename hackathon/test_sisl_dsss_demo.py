@@ -198,18 +198,14 @@ def test_build_demo_hail_round_trip():
 # ── Full tx → file → offline_decode_hail pipeline ──────────────────────────
 
 def test_offline_decode_hail_correct_key():
-    """tx_to_file(build_demo_hail()) → offline_decode_hail decrypts OK."""
+    """FEC block → offline_decode_hail decrypts OK."""
     with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
         path = f.name
     try:
-        frame = dd.build_demo_hail()
-        dd.tx_to_file(frame, path, prefix_ms=3.0)
-
+        block, _ = _make_block_with_hail(prefix_samples=50_000)
+        block.tofile(path)
         result = dd.offline_decode_hail(path)
-        assert result["offset"] is not None
-        assert result["frame"] is not None
-        assert result["frame"]["frame_type"] == "hail"
-        assert result["decrypted"] is True
+        assert result["decrypted"] is True, result
         assert result["decoded_hail"] is not None
         assert result["decoded_hail"].body.center_freq_offset == 100
     finally:
@@ -221,15 +217,9 @@ def test_offline_decode_hail_wrong_key_fails():
     with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
         path = f.name
     try:
-        frame = dd.build_demo_hail()
-        dd.tx_to_file(frame, path, prefix_ms=3.0)
-
-        result = dd.offline_decode_hail(
-            path, responder_static=dd.demo_other_key()
-        )
-        # The frame IS detected (ASM + msg_type), but decrypt fails
-        assert result["frame"] is not None
-        assert result["frame"]["frame_type"] == "hail"
+        block, _ = _make_block_with_hail(prefix_samples=50_000)
+        block.tofile(path)
+        result = dd.offline_decode_hail(path, responder_static=dd.demo_other_key())
         assert result["decrypted"] is False
         assert result["decoded_hail"] is None
     finally:
@@ -240,20 +230,23 @@ def test_offline_decode_hail_wrong_key_fails():
 
 def _make_block_with_hail(prefix_samples: int = 50_000,
                           suffix_samples: int = 50_000,
-                          phase_offset: int = 0) -> tuple[np.ndarray, bytes]:
-    """Synthesize a baseband block containing one demo hail.
+                          phase_offset: int = 0,
+                          repeats: int = 2) -> tuple[np.ndarray, bytes]:
+    """Synthesize a baseband block containing FEC-encoded demo hails.
 
+    `repeats`: how many back-to-back copies (default 2 to give the
+    tracker enough search margin for the 2× window).
     `phase_offset`: shift the signal start by N samples so the chip grid
-    doesn't align at sample 0. Exercises the sub-chip phase search in
-    _decode_one_hail_in_block.
+    doesn't align at sample 0.
     """
-    frame = dd.build_demo_hail()
-    chips = dd.build_tx_chips(frame)
+    chips, diag_frame = dd.build_demo_hail_fec_chips()
+    if repeats > 1:
+        chips = np.tile(chips, repeats)
     signal = dd.upsample_chips_to_samples(chips)
     prefix = np.zeros(prefix_samples + phase_offset, dtype=np.complex64)
     suffix = np.zeros(suffix_samples, dtype=np.complex64)
     block = np.concatenate([prefix, signal, suffix])
-    return block, frame
+    return block, diag_frame
 
 
 def test_decode_one_hail_in_block_correct_key():
@@ -265,61 +258,37 @@ def test_decode_one_hail_in_block_correct_key():
 
 
 def test_decode_one_hail_in_block_populates_llrs_on_clean_decrypt():
-    """A5: clean decrypts must surface llrs / c_frame / phase_rms / asm_errs
-    so the LLR accumulator can chase-combine across blocks regardless of
-    whether each individual block decrypted on its own."""
+    """A5: clean decrypts must surface fec_llrs / c_frame / phase_rms / asm_errs
+    so the LLR accumulator can chase-combine across blocks."""
     block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
     assert result["status"] == "decrypt_ok", result
-    for key in ("llrs", "c_frame",
+    for key in ("fec_llrs", "c_frame",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
         assert key in result, (key, sorted(result.keys()))
         assert result[key] is not None, key
-    assert result["llrs"].shape == (sc.HAIL_FRAME_LEN * 8,)
-    assert result["llrs"].dtype == np.float32
-    assert len(result["c_frame"]) == sc.HAIL_FRAME_LEN
+    assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
+    assert result["fec_llrs"].dtype == np.float32
 
 
 def test_decode_one_hail_in_block_populates_fec_llrs():
-    """When the chip stream is long enough to provide ≥HAIL_FEC_TOTAL_BITS
-    peaks (e.g., two consecutive hails on the air), the production
-    decoder must surface a 2096-bit fec_llrs vector on clean decrypt so
-    the FEC accumulator can chase-combine."""
-    # Build a block with two back-to-back hails so the tracker can
-    # extract enough peaks for the longer FEC channel layout.
-    frame = dd.build_demo_hail()
-    chips_one = dd.build_tx_chips(frame)
-    chips_two = np.concatenate([chips_one, chips_one])
-    signal = dd.upsample_chips_to_samples(chips_two)
-    prefix = np.zeros(50_000, dtype=np.complex64)
-    suffix = np.zeros(50_000, dtype=np.complex64)
-    block = np.concatenate([prefix, signal, suffix])
-
+    """FEC decoder must surface a 2096-bit fec_llrs vector on clean decrypt."""
+    block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
     assert result["status"] == "decrypt_ok", result
     assert "fec_llrs" in result, sorted(result.keys())
-    assert result["fec_llrs"] is not None, (
-        "fec_llrs should be populated when peak_values has enough entries; "
-        "if this fails the producer-side wiring is broken")
+    assert result["fec_llrs"] is not None
     assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
     assert result["fec_llrs"].dtype == np.float32
-    # llrs (1064-bit) and fec_llrs (2096-bit) come from DIFFERENT
-    # decoders now: llrs is the legacy coherent_decode_from_pilot output
-    # (pilot-fit Δθ), while fec_llrs is the dbpsk_decode_from_pilot
-    # output (V-V drift + differential body decode). They no longer
-    # share the first 1064 entries — they encode different things in
-    # different bases. Just verify both are present and well-shaped.
-    assert result["llrs"] is not None
-    assert result["llrs"].shape == (sc.HAIL_FRAME_LEN * 8,)
 
 
 def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
-    """A5: decrypt_fail must also surface llrs so the accumulator can
+    """A5: decrypt_fail must also surface fec_llrs so the accumulator can
     keep combining marginal blocks across the wrong-key boundary case."""
     block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
     assert result["status"] == "decrypt_fail", result
-    for key in ("llrs", "c_frame",
+    for key in ("fec_llrs", "c_frame",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
         assert key in result, (key, sorted(result.keys()))
         assert result[key] is not None, key
@@ -359,12 +328,12 @@ def test_decode_one_hail_in_block_sub_chip_phase_offset():
 
 
 def test_offline_decode_hail_repeats():
-    """Multiple hail copies in the capture still decode the first."""
+    """Multiple hail copies in the capture still decode."""
     with tempfile.NamedTemporaryFile(suffix=".cfile", delete=False) as f:
         path = f.name
     try:
-        frame = dd.build_demo_hail()
-        dd.tx_to_file(frame, path, prefix_ms=2.0, repeats=3)
+        block, _ = _make_block_with_hail(prefix_samples=50_000, repeats=3)
+        block.tofile(path)
         result = dd.offline_decode_hail(path)
         assert result["decrypted"] is True
         assert result["decoded_hail"].body.mode == 0x01
@@ -422,166 +391,10 @@ def test_find_sisl_frame_soft_topk_empty_on_short():
     assert dd.find_sisl_frame_soft_topk([1+0j]*10) == []
 
 
-def test_chase_decrypt_body_recovers_single_bit_error():
-    """Chase-II must find a 1-bit body error in a demo hail frame."""
-    frame = dd.build_demo_hail()
-    # Flip a single body bit (not the ASM)
-    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
-    target_bit = 200  # somewhere in the body
-    bits[target_bit] ^= 1
-    corrupted = np.packbits(bits).tobytes()
-    # All soft values large except the corrupted bit (weakest)
-    soft = np.full(len(bits), 10.0, dtype=np.float32)
-    soft[target_bit] = 0.01
-    result = dd._chase_decrypt_body(
-        corrupted, soft, dd.demo_responder_key(), k=6,
-    )
-    assert result is not None
-    decoded, nflips = result
-    assert nflips == 1
-    assert decoded.body.center_freq_offset == 100
-
-
-def test_chase_decrypt_body_recovers_triple_bit_error():
-    """Chase-II finds 3 bit errors when all are in the top-k weakest."""
-    frame = dd.build_demo_hail()
-    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
-    target_bits = [150, 300, 500]
-    for b in target_bits:
-        bits[b] ^= 1
-    corrupted = np.packbits(bits).tobytes()
-    soft = np.full(len(bits), 10.0, dtype=np.float32)
-    for b in target_bits:
-        soft[b] = 0.01
-    result = dd._chase_decrypt_body(
-        corrupted, soft, dd.demo_responder_key(), k=6,
-    )
-    assert result is not None
-    decoded, nflips = result
-    assert nflips == 3
-
-
-def test_chase_decrypt_body_returns_none_on_unfixable():
-    """Chase-II returns None when errors exceed k or not in weakest subset."""
-    frame = dd.build_demo_hail()
-    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).copy()
-    # Flip 4 bits at high-confidence positions (not weakest)
-    for b in [100, 200, 300, 400]:
-        bits[b] ^= 1
-    corrupted = np.packbits(bits).tobytes()
-    # All soft values equally large (no ranking signal)
-    soft = np.full(len(bits), 10.0, dtype=np.float32)
-    result = dd._chase_decrypt_body(
-        corrupted, soft, dd.demo_responder_key(), k=6,
-    )
-    # With k=6 and 4 bit errors at random positions, unlikely to find
-    assert result is None
-
-
-def test_chase_decrypt_body_zero_flips_on_clean_frame():
-    """Unmodified frame should return flip_count=0."""
-    frame = dd.build_demo_hail()
-    soft = np.full(len(frame) * 8, 10.0, dtype=np.float32)
-    result = dd._chase_decrypt_body(
-        frame, soft, dd.demo_responder_key(), k=6,
-    )
-    assert result is not None
-    _, nflips = result
-    assert nflips == 0
-
-
-def test_llr_accumulator_single_copy_passthrough():
-    """One noisy copy that already decrypts should be passed through."""
-    frame = dd.build_demo_hail()
-    n_bits = len(frame) * 8
-    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8))
-    # High-confidence soft values with correct sign
-    soft = np.where(bits == 0, 5.0, -5.0).astype(np.float32)
-    fake_result = {
-        "llrs": soft,
-        "c_frame": frame,
-        "phase_rms_residual_rad": 0.05,    # clean
-        "asm_errs_in_coherent": 0,
-    }
-    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
-    assert acc.try_add(fake_result) is True
-    result = acc.try_decrypt(dd.demo_responder_key())
-    assert result is not None
-    decoded, label, flips = result
-    assert label == "acc"
-    assert flips == 0
-
-
-def test_llr_accumulator_rejects_bad_fit():
-    """Results with phase_rms > pass_rms or nonzero asm_errs are ignored."""
-    frame = dd.build_demo_hail()
-    n_bits = len(frame) * 8
-    soft = np.ones(n_bits, dtype=np.float32)
-    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
-    # Bad phase_rms
-    assert acc.try_add({
-        "llrs": soft, "c_frame": frame,
-        "phase_rms_residual_rad": 1.0, "asm_errs_in_coherent": 0,
-    }) is False
-    # Bad asm_errs
-    assert acc.try_add({
-        "llrs": soft, "c_frame": frame,
-        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 5,
-    }) is False
-    # Missing llrs
-    assert acc.try_add({
-        "llrs": None, "c_frame": frame,
-        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
-    }) is False
-    assert acc.n_copies == 0
-
-
-def test_llr_accumulator_two_noisy_copies_sum_cleanly():
-    """Two copies of the same frame with half-strength noise should sum."""
-    frame = dd.build_demo_hail()
-    n_bits = len(frame) * 8
-    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8))
-    truth = np.where(bits == 0, 1.0, -1.0).astype(np.float32)
-    rng = np.random.default_rng(seed=55)
-    # Two copies each at SNR where single-copy decryption fails:
-    # correct sign on 90% of bits, random on the rest. Summed:
-    # ~99% agreement, which Poly1305 should be unable to fix without
-    # Chase — but with k=12 Chase-II it can.
-    noise_std = 0.9
-    soft1 = truth + rng.normal(0, noise_std, n_bits).astype(np.float32)
-    soft2 = truth + rng.normal(0, noise_std, n_bits).astype(np.float32)
-    # Slightly corrupt the single-copy hard decisions so neither can
-    # decrypt solo.
-    frame1_bits = (soft1 < 0).astype(np.uint8)
-    frame1 = np.packbits(frame1_bits).tobytes()
-    frame2_bits = (soft2 < 0).astype(np.uint8)
-    frame2 = np.packbits(frame2_bits).tobytes()
-
-    acc = dd.LlrAccumulator(n_bits=n_bits, pass_rms=0.3)
-    # These are synthetic — force them past the gate
-    ok1 = acc.try_add({
-        "llrs": soft1, "c_frame": frame1,
-        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
-    })
-    ok2 = acc.try_add({
-        "llrs": soft2, "c_frame": frame2,
-        "phase_rms_residual_rad": 0.1, "asm_errs_in_coherent": 0,
-    })
-    assert ok1 and ok2
-    assert acc.n_copies == 2
-    # The accumulated LLRs point to the right bits
-    acc_bits = (acc.accumulated < 0).astype(np.uint8)
-    ber = float(np.mean(acc_bits != bits))
-    # Must be strictly better than either single copy
-    ber1 = float(np.mean(frame1_bits != bits))
-    ber2 = float(np.mean(frame2_bits != bits))
-    assert ber < min(ber1, ber2) + 1e-9
-
-
 def _build_fec_result(responder_static, magnitude: float = 10.0,
                       noise_std: float = 0.0, seed: int = 0) -> dict:
     """Synthesize a result dict containing FEC channel LLRs for one
-    demo hail. Returns a dict with the keys LlrAccumulator(fec=True)
+    demo hail. Returns a dict with the keys LlrAccumulator
     expects: llrs (length HAIL_FEC_TOTAL_BITS), c_frame, phase_rms,
     asm_errs."""
     body = sc.HailBody(
@@ -615,16 +428,15 @@ def _build_fec_result(responder_static, magnitude: float = 10.0,
 
 
 def test_llr_accumulator_fec_constructor_validates_n_bits():
-    # FEC mode requires n_bits == HAIL_FEC_TOTAL_BITS
+    # Requires n_bits == HAIL_FEC_TOTAL_BITS
     try:
-        dd.LlrAccumulator(n_bits=1064, fec=True)
+        dd.LlrAccumulator(n_bits=1064)
         raise AssertionError("expected AssertionError on wrong n_bits")
     except AssertionError as e:
-        if "FEC mode" not in str(e):
+        if "n_bits must be" not in str(e) and "HAIL_FEC_TOTAL_BITS" not in str(e):
             raise
     # Correct construction works and allocates body-sized accumulator
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
-    assert acc.fec is True
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.accumulated.shape == (sc.HAIL_FEC_BODY_CODED_BITS,)
     assert acc._header_bits == sc.HAIL_FEC_HEADER_BITS
 
@@ -633,7 +445,7 @@ def test_llr_accumulator_fec_single_copy_decrypt():
     """One clean FEC copy should admit and decrypt via the Viterbi path."""
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     assert acc.n_copies == 1
     decrypt = acc.try_decrypt(responder_static)
@@ -649,7 +461,7 @@ def test_llr_accumulator_fec_wrong_responder_returns_none():
     target = dd.demo_responder_key()
     other = dd.demo_other_key()
     result = _build_fec_result(target, magnitude=10.0)
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     assert acc.try_decrypt(other) is None
 
@@ -682,14 +494,14 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
     base = {"phase_rms_residual_rad": 0.05, "asm_errs_in_coherent": 0,
             "c_frame": b"\x00" * sc.HAIL_FRAME_LEN, "llrs": None}
 
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add({**base, "fec_llrs": noisy1}) is True
     assert acc.try_add({**base, "fec_llrs": noisy2}) is True
     assert acc.n_copies == 2
 
     # Body LLR magnitude after 2 copies should be ~2× single-copy
     body_l1_2 = float(np.mean(np.abs(acc.accumulated)))
-    acc_single = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc_single = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc_single.try_add({**base, "fec_llrs": noisy1}) is True
     body_l1_1 = float(np.mean(np.abs(acc_single.accumulated)))
     assert body_l1_2 > 1.5 * body_l1_1, (body_l1_1, body_l1_2)
@@ -711,7 +523,7 @@ def test_llr_accumulator_fec_polarity_inversion_normalized():
     inverted = dict(result)
     inverted["fec_llrs"] = -result["fec_llrs"].copy()
 
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     assert acc.try_add(inverted) is True
     assert acc.n_copies == 2
@@ -724,7 +536,7 @@ def test_llr_accumulator_fec_short_input_rejected():
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
     result["fec_llrs"] = result["fec_llrs"][: sc.HAIL_FEC_TOTAL_BITS // 2]
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS, fec=True)
+    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is False
     assert acc.n_copies == 0
 

@@ -376,8 +376,7 @@ if _HAVE_GR:
                      tx_amp_on: bool = HACKRF_TX_AMP_ON,
                      center_hz: float = CENTER_FREQ_HZ,
                      hackrf_device: str = "hackrf=0",
-                     preamble_only: bool = False,
-                     fec: bool = False):
+                     preamble_only: bool = False):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
@@ -385,36 +384,19 @@ if _HAVE_GR:
             self.tx_amp_on = tx_amp_on
             self.center_hz = center_hz
             self.preamble_only = preamble_only
-            self.fec = fec
 
             if mode == "tx":
                 if preamble_only:
                     # Diagnostic mode: transmit only the 4-byte ASM on
                     # repeat. No body, no crypto, no per-call variation.
-                    # At RX, the soft correlator should fire EVERY 32 bits
-                    # (every 32 ms at 1 ksym/s), giving a dense, highly
-                    # verifiable reference signal. Used to debug the RF
-                    # path independent of frame structure.
                     frame = _ASM_BYTES
                     self.hail_frame = frame
                     chips = build_tx_chips(frame)
-                elif fec:
+                else:
                     # FEC TX path: encode_hail_fec produces a 2096-bit
                     # channel array (48 uncoded header + 2048 FEC body).
-                    # Each bit becomes CHIPS_PER_SYMBOL chips. The on-air
-                    # waveform is twice as long per hail, but the FEC
-                    # body lets the RX accumulator decode at ~5 dB lower
-                    # chip SNR than the uncoded path.
                     chips, frame = build_demo_hail_fec_chips()
                     self.hail_frame = frame
-                else:
-                    # Always TX a fresh SISL v3 hail targeting demo-responder.
-                    # The frame contains a random per-call body_nonce and a
-                    # fresh caller ephemeral, so the RX sees cryptographically
-                    # distinct hails even though the target key is constant.
-                    frame = build_demo_hail()
-                    self.hail_frame = frame
-                    chips = build_tx_chips(frame)
                 # Repeat the hail indefinitely so the RX can lock at any time
                 samples = upsample_chips_to_samples(chips)
                 self._src = blocks.vector_source_c(
@@ -462,8 +444,7 @@ if _HAVE_GR:
 
 def tx_to_file(message: bytes, path: str,
                prefix_ms: float = 0.0,
-               repeats: int = 1,
-               fec: bool = False) -> int:
+               repeats: int = 1) -> int:
     """Synthesize a TX capture from `message` and write it as complex64.
 
     Bypasses GNU Radio and HackRF entirely. Useful for smoke-testing the
@@ -474,14 +455,8 @@ def tx_to_file(message: bytes, path: str,
     find_frame_start acquisition). Rounded to a whole-chip boundary so
     integer decimation at RX stays aligned.
     `repeats`: how many copies of the message to concatenate.
-    `fec`: when True, ignore `message` and synthesize a fresh FEC-encoded
-    demo hail via build_demo_hail_fec_chips. The on-air signal is twice
-    as long per hail (2096 channel symbols vs 1064).
     """
-    if fec:
-        chips, _diag_frame = build_demo_hail_fec_chips()
-    else:
-        chips = build_tx_chips(message)
+    chips = build_tx_chips(message)
     samples = upsample_chips_to_samples(chips)
     if repeats > 1:
         samples = np.tile(samples, repeats)
@@ -576,6 +551,31 @@ def offline_despread(cfile_path: str,
 # ── SISL frame auto-detection ──────────────────────────────────────────────
 
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
+
+
+# ── Polarity mask constants ───────────────────────────────────────────────
+#
+# The BPSK demodulator has a 180° phase ambiguity: the decoded frame may
+# be the true bits or any of several XOR transformations thereof. These
+# six masks cover the possible polarities the receiver can land on. Each
+# entry is (label_suffix, even_byte_mask, odd_byte_mask).
+
+_POLARITY_MASKS = [
+    ("",      0x00, 0x00),       # identity
+    ("-inv",  0xFF, 0xFF),       # full inversion
+    ("-alt",  0xAA, 0xAA),       # alternating bits
+    ("-alt2", 0x55, 0x55),       # alternating bits, opposite phase
+    ("-alt-inv",  0x55, 0xAA),   # alternating bytes
+    ("-alt2-inv", 0xAA, 0x55),   # alternating bytes, opposite phase
+]
+
+
+def _apply_polarity(frame_bytes: bytes, even_mask: int, odd_mask: int) -> bytes:
+    """XOR each byte of `frame_bytes` with a per-parity mask."""
+    out = bytearray(len(frame_bytes))
+    for i, x in enumerate(frame_bytes):
+        out[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
+    return bytes(out)
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
 # bytes_to_bits / rx_chips_to_bytes conventions.
 _ASM_BITS = np.unpackbits(
@@ -593,156 +593,34 @@ _PILOT_BITS = np.unpackbits(
 ).astype(np.uint8)
 
 
-def _chase_decrypt_body(
-    frame_bytes: bytes,
-    soft_bits: np.ndarray,
-    responder_static,
-    k: int = 12,
-) -> Optional[tuple[object, int]]:
-    """Chase-II soft-decision decoding on the body of a coherent-decoded frame.
-
-    After the coherent decoder produces a candidate frame + per-bit soft
-    values, if Poly1305 verification fails, try flipping small subsets
-    of the least-confident body bits and re-verifying.
-
-    Rank body-bit positions (bit 32 onwards — after the ASM) by |soft|
-    in ascending order, take the k weakest, enumerate all 2^k subsets,
-    flip those bits in the candidate frame, and trial-decrypt each
-    mutation.
-
-    k=12 → 4096 trials, ~40 ms per call with Poly1305 at ~10 μs/verify.
-    Catches up to 12 body-bit errors, though in practice only the few
-    highest-likelihood combinations matter because soft ranking pushes
-    true errors to the top.
-
-    Returns (decoded_hail, flip_count) on success, None on failure.
-    """
-    # First: verify the original frame (mask=0 case).
-    decoded = sc.decode_hail(frame_bytes, responder_static)
-    if decoded is not None:
-        return decoded, 0
-
-    n_bits = len(frame_bytes) * 8
-    if len(soft_bits) < n_bits:
-        # Coherent decoder truncated: can't chase bits we don't have soft values for
-        return None
-
-    body_start_bit = 32    # after the 4-byte ASM
-    # Rank body bits by |soft| ascending — weakest first
-    body_soft = np.abs(soft_bits[body_start_bit:n_bits])
-    order = np.argsort(body_soft)
-    if len(order) < k:
-        k = len(order)
-    weakest = (order[:k] + body_start_bit).astype(np.int64)
-
-    # Unpack frame to bit array (MSB-first to match np.packbits convention)
-    frame_bits = np.unpackbits(np.frombuffer(frame_bytes, dtype=np.uint8))
-
-    # Enumerate all 2^k non-zero flip masks
-    total = 1 << k
-    for mask in range(1, total):
-        mutated = frame_bits.copy()
-        m = mask
-        j = 0
-        while m:
-            if m & 1:
-                idx = weakest[j]
-                mutated[idx] ^= 1
-            m >>= 1
-            j += 1
-        candidate = np.packbits(mutated).tobytes()
-        decoded = sc.decode_hail(candidate, responder_static)
-        if decoded is not None:
-            flip_count = bin(mask).count("1")
-            return decoded, flip_count
-    return None
-
-
 class LlrAccumulator:
-    """Multi-copy LLR chase-combiner for uncoded SISL hails.
+    """Multi-copy FEC LLR accumulator for SISL hails.
 
-    The TX loops the same hail frame repeatedly. Each clean per-block
-    detection yields a per-bit soft-value vector aligned to the frame's
-    32-bit ASM. If we add these vectors element-wise across copies, the
-    effective SNR grows by +3 dB per doubling (coherent addition of
-    independent AWGN observations of the same bit sign).
+    The TX loops the same FEC-encoded hail frame repeatedly. Each clean
+    per-block detection yields a per-bit soft-value vector. Adding these
+    vectors element-wise across copies gives +3 dB effective SNR per
+    doubling (coherent addition of independent AWGN observations).
 
-    This is a direct prototype of the KSP-WCC accumulator architecture
-    using the existing uncoded pipeline — no FEC, no keystream. If the
-    expected √N gain manifests on real bench data, the whole chase-
-    combining approach is validated before any polar work.
+    The accumulator stores only the FEC body LLRs (2048 coded bits);
+    the 48-bit uncoded header is used for polarity vote and ASM
+    cheap-reject but is not summed. try_decrypt runs sisl_fec.decode
+    (soft Viterbi) on the accumulated body LLRs.
 
-    Alignment rules:
-    - Only accept copies with phase_rms_residual_rad ≤ pass_rms
-      (clean coherent fit).
-    - Only accept copies with asm_errs_in_coherent == 0 (structural
-      match to _ASM_BITS at the start of the decoded frame).
-    - Same polarity (normal vs inverted): we normalize to the stored
-      vector's polarity by flipping signs on mismatch.
-    - Because the coherent decoder already aligns the first bit to the
-      ASM boundary, bit-index 0 of the soft vector is canonical across
-      all copies — no per-copy alignment math needed.
-
-    After each addition, the accumulated LLRs are hard-decided to bytes
-    and passed through the same 6-XOR + Chase-II decrypt pipeline used
-    for single-copy decode.
-
-    Admission gates (v2 — tuned against bench_llr_accumulator.py):
-    - pass_rms = 0.6 (was 0.3). The single-copy "CLEAN" threshold is
-      appropriate for reporting a confirmed decrypt, but too tight
-      for accumulator admission. At the waterfall where combining is
-      most useful, clean copies have rms ≈ 0.3–0.5; we want to admit
-      them even when individually they couldn't decrypt alone.
-    - asm_errs ≤ 2 (was == 0). Strictly structural: with 32 ASM bits,
-      up to 2 errors still leaves an unambiguous match while letting
-      marginal-SNR copies contribute their body bits.
-
-    Polarity anchor (v2): the sign of llrs[0] is noise-fragile. We now
-    use the dot product of llrs[:32] with the signed ASM pattern as a
-    32-dimensional polarity vote. Positive → matches ASM normal;
-    negative → inverted. At any plausible SNR this 32-bit coherent
-    vote is effectively noise-free.
-
-    `max_copies` is the cap before the oldest copies are decayed by
-    halving (exponential forgetting). Set to a large number in
-    simulation to get unbounded accumulation.
+    `max_copies` is the cap before exponential forgetting (halving).
     """
 
     def __init__(self, n_bits: int, pass_rms: float = 0.6,
-                 max_copies: int = 64, max_asm_errs: int = 2,
-                 fec: bool = False):
-        """If `fec` is True the accumulator runs in FEC mode:
-
-        - `n_bits` is interpreted as the number of CHANNEL bits expected
-          per copy (HAIL_FEC_TOTAL_BITS = 2096), not payload bits.
-        - The internal accumulator vector stores only the body LLRs
-          (HAIL_FEC_BODY_CODED_BITS = 2048); the 48-bit uncoded header
-          at the front of each copy is used for polarity vote and ASM
-          cheap-reject but is not summed into the accumulator.
-        - try_decrypt runs sisl_fec.decode on the accumulated body LLRs
-          and reconstructs the standard 133-byte hail frame for the
-          existing decode_hail pipeline. Chase-II is bypassed in FEC
-          mode — the convolutional code does the soft-decision work.
-
-        If `fec` is False (default) the accumulator behaves exactly as
-        before: stores `n_bits` payload LLRs, hard-decides into bytes
-        for the 6-XOR + Chase-II decrypt pipeline.
-        """
+                 max_copies: int = 64, max_asm_errs: int = 2):
+        assert n_bits == sc.HAIL_FEC_TOTAL_BITS, (
+            f"n_bits must be HAIL_FEC_TOTAL_BITS "
+            f"({sc.HAIL_FEC_TOTAL_BITS}); got {n_bits}"
+        )
         self.n_bits = n_bits
         self.pass_rms = pass_rms
         self.max_copies = max_copies
         self.max_asm_errs = max_asm_errs
-        self.fec = fec
-        if fec:
-            assert n_bits == sc.HAIL_FEC_TOTAL_BITS, (
-                f"FEC mode requires n_bits == HAIL_FEC_TOTAL_BITS "
-                f"({sc.HAIL_FEC_TOTAL_BITS}); got {n_bits}"
-            )
-            self._header_bits = sc.HAIL_FEC_HEADER_BITS
-            self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
-        else:
-            self._header_bits = 0
-            self._accum_size = n_bits
+        self._header_bits = sc.HAIL_FEC_HEADER_BITS
+        self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
         self.accumulated = np.zeros(self._accum_size, dtype=np.float64)
         self.n_copies = 0
         self._asm_signs = np.where(_ASM_BITS == 0, 1.0, -1.0).astype(np.float64)
@@ -755,132 +633,47 @@ class LlrAccumulator:
         """Try to add a block-decode result to the accumulator.
 
         Returns True if the result was accepted and added, False otherwise.
-        Accept conditions:
-        - result contains 'llrs' (or 'fec_llrs' in FEC mode)
-        - phase_rms_residual_rad ≤ pass_rms
-        - asm_errs_in_coherent ≤ max_asm_errs (≤2 by default)
         """
-        # In FEC mode the producer publishes 2096 channel LLRs in 'fec_llrs';
-        # in normal mode 1064 frame LLRs in 'llrs'. They are different
-        # representations of the same coherent decode call.
-        llrs_key = "fec_llrs" if self.fec else "llrs"
-        llrs = result.get(llrs_key)
-        rms = result.get("phase_rms_residual_rad")
-        asm_errs = result.get("asm_errs_in_coherent")
+        llrs = result.get("fec_llrs")
         if llrs is None:
             return False
         if len(llrs) < self.n_bits:
             return False
-        # Quality gates are different by mode:
-        # - Non-FEC: hard-decision combining is fragile, so reject copies
-        #   with bad pilot fit (phase_rms) or wrong ASM bits (asm_errs).
-        # - FEC: the soft-Viterbi + Poly1305 gate at try_decrypt is the
-        #   real quality oracle. The hard-decision asm_errs at low chip
-        #   SNR can exceed max_asm_errs even when the Viterbi will
-        #   correct the body, and the pilot fit's rms is also noisy at
-        #   the operating point. Skip both gates in FEC mode and let
-        #   the FEC + crypto layer reject bad copies after combining.
-        if not self.fec:
-            if rms is None or rms > self.pass_rms:
-                return False
-            if asm_errs is None or asm_errs > self.max_asm_errs:
-                return False
-
-        # Polarity vote: correlate this copy's first-32 LLRs against the
-        # signed ASM pattern. Positive → matches normal; negative →
-        # matches inverted. 32-dimensional coherent vote is effectively
-        # noise-free at any SNR the decoder can reach. In FEC mode the
-        # first 32 channel LLRs are still the uncoded ASM, so the same
-        # polarity logic applies regardless of mode.
+        # The soft-Viterbi + Poly1305 gate at try_decrypt is the real
+        # quality oracle. Skip phase_rms and asm_errs gates — the FEC +
+        # crypto layer rejects bad copies after combining.
         llrs_f64 = llrs[:self.n_bits].astype(np.float64)
         polarity_vote = float(np.dot(llrs_f64[:32], self._asm_signs))
         sign = 1.0 if polarity_vote >= 0 else -1.0
-        # In FEC mode, drop the uncoded header and accumulate only the
-        # coded body LLRs. In normal mode, accumulate the entire frame.
-        if self.fec:
-            body_llrs = llrs_f64[self._header_bits:]
-            self.accumulated += sign * body_llrs
-        else:
-            self.accumulated += sign * llrs_f64
+        body_llrs = llrs_f64[self._header_bits:]
+        self.accumulated += sign * body_llrs
         self.n_copies += 1
         if self.n_copies >= self.max_copies:
-            # Exponential forgetting: halve the accumulator when full.
-            # Only reachable with very long-running accumulation; in the
-            # default config of 64 this is effectively never hit.
             self.accumulated *= 0.5
             self.n_copies //= 2
         return True
-
-    def current_frame(self) -> Optional[bytes]:
-        """Hard-decide the accumulated LLRs into HAIL_FRAME_LEN bytes."""
-        if self.n_copies == 0:
-            return None
-        bits = (self.accumulated < 0).astype(np.uint8)
-        return np.packbits(bits).tobytes()
 
     def try_decrypt(
         self,
         responder_static,
     ) -> Optional[tuple[object, str, int]]:
-        """Attempt to decrypt the accumulated frame.
-
-        In FEC mode: soft-Viterbi-decode the accumulated body LLRs into
-        payload bits, reconstruct the standard 133-byte hail frame using
-        the known uncoded header, and run the existing decode_hail
-        pipeline. The convolutional code does the soft-decision work, so
-        Chase-II is not needed.
-
-        In normal mode: hard-decide the accumulated LLRs, then run the
-        existing 6-XOR + Chase-II decrypt pipeline used for single
-        copies.
+        """Soft-Viterbi-decode accumulated body LLRs and trial-decrypt.
 
         Returns (decoded_hail, polarity_label, chase_flips) or None.
         """
         if self.n_copies == 0:
             return None
-
-        if self.fec:
-            body_llrs_f32 = self.accumulated.astype(np.float32)
-            body_bits = sisl_fec.decode(
-                body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,
-            )
-            body_bytes = np.packbits(body_bits).tobytes()
-            assert len(body_bytes) == sc.HAIL_BODY_PAYLOAD_LEN
-            header = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
-            frame = header + body_bytes
-            decoded = sc.decode_hail(frame, responder_static)
-            if decoded is not None:
-                return decoded, "fec-acc", 0
-            return None
-
-        frame = self.current_frame()
-        if frame is None:
-            return None
-        def _xor_alt(b: bytes, even_mask: int, odd_mask: int) -> bytes:
-            o = bytearray(len(b))
-            for i, x in enumerate(b):
-                o[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
-            return bytes(o)
-        candidates = [
-            ("acc", frame),
-            ("acc-inv", bytes(x ^ 0xFF for x in frame)),
-            ("acc-alt", bytes(x ^ 0xAA for x in frame)),
-            ("acc-alt2", bytes(x ^ 0x55 for x in frame)),
-            ("acc-alt-inv", _xor_alt(frame, 0x55, 0xAA)),
-            ("acc-alt2-inv", _xor_alt(frame, 0xAA, 0x55)),
-        ]
-        for label, candidate in candidates:
-            decoded = sc.decode_hail(candidate, responder_static)
-            if decoded is not None:
-                return decoded, label, 0
-        # Chase-II on accumulated soft values
-        soft_sym = self.accumulated.astype(np.float32)
-        chase = _chase_decrypt_body(
-            frame, soft_sym, responder_static, k=12,
+        body_llrs_f32 = self.accumulated.astype(np.float32)
+        body_bits = sisl_fec.decode(
+            body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,
         )
-        if chase is not None:
-            decoded, n_flips = chase
-            return decoded, f"acc-chase{n_flips}", n_flips
+        body_bytes = np.packbits(body_bits).tobytes()
+        assert len(body_bytes) == sc.HAIL_BODY_PAYLOAD_LEN
+        header = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
+        frame = header + body_bytes
+        decoded = sc.decode_hail(frame, responder_static)
+        if decoded is not None:
+            return decoded, "fec-acc", 0
         return None
 
 
@@ -1004,125 +797,6 @@ def find_sisl_frame_soft_topk(
     return results
 
 
-def find_sisl_frame_best_match(
-    decoded_bytes: bytes,
-    frame_len: int = sc.HAIL_FRAME_LEN,
-) -> Optional[tuple[int, bytes, int]]:
-    """Find the lowest-Hamming-distance ASM match in a decoded bit stream.
-
-    Unlike `find_sisl_frame_bitwise_fuzzy`, this always returns the BEST
-    match regardless of distance threshold. The caller decides whether
-    the distance is acceptable. Useful for diagnostic reporting: even
-    when the ASM can't be found within decode tolerance, we want to
-    know how close we are.
-
-    Returns (bit_offset, frame_bytes, asm_distance). frame_bytes is
-    frame_len bytes extracted starting at the best-match bit offset.
-    """
-    n_frame_bits = frame_len * 8
-    if len(decoded_bytes) * 8 < n_frame_bits + 32:
-        return None
-
-    bits = np.unpackbits(np.frombuffer(decoded_bytes, dtype=np.uint8))
-    max_bit_offset = len(bits) - n_frame_bits
-    if max_bit_offset <= 0:
-        return None
-
-    asm_len = len(_ASM_BITS)
-    best_distance = asm_len + 1
-    best_offset = -1
-
-    for bit_start in range(max_bit_offset + 1):
-        window = bits[bit_start:bit_start + asm_len]
-        distance = int(np.sum(window ^ _ASM_BITS))
-        if distance < best_distance:
-            best_distance = distance
-            best_offset = bit_start
-            if distance == 0:
-                break
-
-    if best_offset < 0:
-        return None
-
-    frame_bits = bits[best_offset:best_offset + n_frame_bits]
-    frame_bytes = np.packbits(frame_bits).tobytes()
-    return best_offset, frame_bytes, best_distance
-
-
-def find_sisl_frame_bitwise_fuzzy(
-    decoded_bytes: bytes,
-    frame_len: int = sc.HAIL_FRAME_LEN,
-    max_errors: int = 5,
-) -> Optional[tuple[int, bytes, int]]:
-    """Fuzzy ASM search with a max-errors threshold.
-
-    Scans every bit offset, computes the Hamming distance to the 32-bit
-    ASM, and returns the best match only if within `max_errors`.
-
-    False positive rates (per offset, vs random 32-bit):
-      ≤ 3 errors → ≈ 5489 / 2³² ≈ 1.3 × 10⁻⁶
-      ≤ 4 errors → ≈ 41449 / 2³² ≈ 9.6 × 10⁻⁶
-      ≤ 5 errors → ≈ 242825 / 2³² ≈ 5.7 × 10⁻⁵
-    Over ~2000 bit offsets per block, tolerance 5 gives ~11 % block
-    FP rate — but the periodicity pre-filter already rejects noise
-    blocks, so the effective pipeline FP is <0.5 %.
-
-    Default tolerance bumped from 3 to 5 to catch frames with higher
-    bit error rates. Real frames at marginal SNR commonly sit at
-    4-6 Hamming distance from the true ASM.
-
-    Returns (bit_offset, frame_bytes, asm_distance) or None.
-    """
-    best = find_sisl_frame_best_match(decoded_bytes, frame_len)
-    if best is None:
-        return None
-    bit_offset, frame_bytes, best_distance = best
-    if best_distance > max_errors:
-        return None
-    return bit_offset, frame_bytes, best_distance
-
-
-def find_sisl_frame_bitwise(
-    decoded_bytes: bytes,
-    frame_len: int = sc.HAIL_FRAME_LEN,
-) -> Optional[tuple[int, bytes]]:
-    """Search the decoded bit stream for a SISL ASM at any bit offset.
-
-    The live decoder reconstructs bits in TX order but has no way of
-    knowing where the TX's byte boundaries fall — it picks up mid-frame
-    from wherever the matched filter first locks. So the decoded bytes
-    may be shifted by 1-7 bits relative to the TX frame structure, and
-    a byte-level ASM search will miss the frame entirely.
-
-    This function unpacks the decoded bytes into a bit array and slides
-    the 32-bit ASM pattern one bit at a time until it finds a match.
-    When found, it re-packs `frame_len` consecutive bytes starting from
-    that exact bit offset, yielding the correctly-aligned frame bytes.
-
-    Returns (bit_offset, frame_bytes) or None if not found. bit_offset
-    is the position within the input bit stream where the ASM starts.
-
-    False positive rate: ~2^-32 per bit offset × (N - 32) offsets.
-    For N = 2k bits, that's ~5e-7 — negligible.
-    """
-    n_frame_bits = frame_len * 8
-    if len(decoded_bytes) * 8 < n_frame_bits + 32:
-        return None
-
-    bits = np.unpackbits(np.frombuffer(decoded_bytes, dtype=np.uint8))
-    max_bit_offset = len(bits) - n_frame_bits
-    if max_bit_offset <= 0:
-        return None
-
-    asm_len = len(_ASM_BITS)
-    # Vectorized sliding comparison: convolve bits with a one-hot pattern
-    for bit_start in range(max_bit_offset + 1):
-        if np.array_equal(bits[bit_start:bit_start + asm_len], _ASM_BITS):
-            frame_bits = bits[bit_start:bit_start + n_frame_bits]
-            frame_bytes = np.packbits(frame_bits).tobytes()
-            return bit_start, frame_bytes
-    return None
-
 # ── Live RX: stream samples and decode hails in real time ─────────────────
 
 # Initial signal-presence prefilter — a cheap peak/median ratio test
@@ -1203,165 +877,26 @@ def _extract_llrs_at_position(
     return out
 
 
-def _try_coherent_decrypt_at_position(
-    peak_values: list,
-    soft_offset: int,
-    responder_static: ec.EllipticCurvePrivateKey,
-) -> Optional[dict]:
-    """Run the coherent decode + 6 XOR candidates + Chase-II at one ASM position.
-
-    Returns a dict with keys (decoded_hail, polarity, theta0, delta,
-    phase_rms, asm_errs, c_frame, c_soft, chase_flips) on decrypt success,
-    or a dict with decoded_hail=None and the diagnostic fields on failure.
-    """
-    aligned_peaks = peak_values[soft_offset:]
-    n_frame_bits = sc.HAIL_FRAME_LEN * 8
-    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
-    n_pilot_bits = len(_PILOT_BITS)     # 48: ASM + ver + type
-    out = {
-        "decoded_hail": None,
-        "polarity": None,
-        "theta0_rad": None,
-        "delta_theta_per_sym": None,
-        "phase_rms_residual_rad": None,
-        "asm_errs_in_coherent": None,
-        "c_frame": None,
-        "c_soft": None,
-        "fec_llrs": None,
-        "chase_flips": None,
-    }
-    if len(aligned_peaks) < n_pilot_bits:
-        # Not even enough peaks for the extended pilot fit.
-        return out
-
-    # Always run the 48-bit pilot fit first — it's fast and gives us
-    # phase_rms regardless of whether a full frame decode is possible.
-    fit_diag = sf.fit_phase_from_known_bits(
-        aligned_peaks, 0, _PILOT_BITS)
-    if fit_diag is not None:
-        out["theta0_rad"] = fit_diag[0]
-        out["delta_theta_per_sym"] = fit_diag[1]
-        out["phase_rms_residual_rad"] = fit_diag[2]
-
-    if len(aligned_peaks) < n_frame_bits:
-        # Truncated: can't decode a full frame. The pilot-fit diagnostics
-        # are still useful (phase_rms tells us if the ASM lock is real
-        # or spurious).
-        return out
-
-    # Decode at the FEC channel length when peaks allow, so we can
-    # populate both the legacy 'c_soft' (1064 frame LLRs) and the
-    # longer 'fec_llrs' (2096 channel LLRs) from one call.
-    decode_len = n_fec_bits if len(aligned_peaks) >= n_fec_bits else n_frame_bits
-    coherent = sf.coherent_decode_from_pilot(
-        aligned_peaks, 0, _PILOT_BITS, decode_len,
-    )
-    if coherent is None:
-        return out
-    c_frame_full, c_soft_full, c_theta0, c_delta, c_rms = coherent
-    c_frame = c_frame_full[: sc.HAIL_FRAME_LEN]
-    c_soft = c_soft_full[: n_frame_bits]
-    out["c_frame"] = c_frame
-    out["c_soft"] = c_soft
-    if decode_len >= n_fec_bits:
-        out["fec_llrs"] = c_soft_full[: n_fec_bits]
-    out["theta0_rad"] = c_theta0
-    out["delta_theta_per_sym"] = c_delta
-    out["phase_rms_residual_rad"] = c_rms
-
-    # How many of the first 32 decoded bits match the ASM? >8 wrong means
-    # the linear fit hit the ±π/symbol boundary in the (now-ML) search
-    # and landed on a secondary peak. Primary peak should give 0 errors.
-    c_bits_first32 = np.unpackbits(
-        np.frombuffer(c_frame[:4], dtype=np.uint8))
-    c_asm_errs = int(np.sum(c_bits_first32 != _ASM_BITS))
-    out["asm_errs_in_coherent"] = c_asm_errs
-
-    def _xor_alt(b: bytes, even_mask: int, odd_mask: int) -> bytes:
-        o = bytearray(len(b))
-        for i, x in enumerate(b):
-            o[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
-        return bytes(o)
-    candidates = [
-        ("coherent", c_frame),
-        ("coherent-inv", bytes(x ^ 0xFF for x in c_frame)),
-        ("coherent-alt", bytes(x ^ 0xAA for x in c_frame)),
-        ("coherent-alt2", bytes(x ^ 0x55 for x in c_frame)),
-        ("coherent-alt-inv", _xor_alt(c_frame, 0x55, 0xAA)),
-        ("coherent-alt2-inv", _xor_alt(c_frame, 0xAA, 0x55)),
-    ]
-    for label, candidate in candidates:
-        decoded_hail = sc.decode_hail(candidate, responder_static)
-        if decoded_hail is not None:
-            out["decoded_hail"] = decoded_hail
-            out["polarity"] = label
-            return out
-
-    # Chase-II on the base coherent frame if the fit is clean.
-    if c_asm_errs <= 2 and c_soft is not None:
-        chase = _chase_decrypt_body(
-            c_frame, c_soft, responder_static, k=12,
-        )
-        if chase is not None:
-            decoded_hail, n_flips = chase
-            out["decoded_hail"] = decoded_hail
-            out["polarity"] = f"coherent-chase{n_flips}"
-            out["chase_flips"] = n_flips
-    return out
-
-
-def _decode_one_hail_in_block(
+def _acquire_and_track(
     samples: np.ndarray,
-    responder_static: ec.EllipticCurvePrivateKey,
-    samps_per_chip: int = SAMPS_PER_CHIP,
-    samp_hz: float = SAMP_RATE_HZ,
-    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
-    top_k_soft: int = 5,
-    fec: bool = False,
+    samps_per_chip: int,
+    samp_hz: float,
+    signal_threshold: float,
 ) -> dict:
-    """Process one block of baseband samples, try to decode one SISL hail.
+    """Frequency estimation, correction, matched filter, periodicity test,
+    and per-symbol tracking decode.
 
-    Pipeline:
-      1. Estimate carrier frequency offset via R[1] autocorrelation.
-      2. Apply frequency correction.
-      3. Run a COMPLEX sample-rate matched filter on the corrected signal.
-      4. Check peak/median ratio — this is the actual signal-presence test.
-         Without frequency correction the matched filter does not peak
-         sharply at symbol boundaries when TX and RX clocks differ by
-         more than a few hundred Hz, which is always the case between
-         independent SDRs. Only after correction does peak/median become
-         a reliable detection statistic.
-      5. If detected, run per-symbol tracking decode (reusing the
-         precomputed freq offset so we don't re-estimate).
-      6. Try both bit polarities (BPSK 180° ambiguity) when looking
-         for the SISL ASM.
-
-    Statuses:
-      short_block   — fewer than one code-period of samples
-      no_signal     — CORRECTED peak/median below threshold
-      track_lost    — tracker lost lock partway through the frame
-      no_hail       — decoded bytes contain no SISL ASM in either polarity
-      decrypt_fail  — hail frame found but Poly1305 tag mismatch
-      decrypt_ok    — hail decoded and decrypted under responder_static
+    Returns a dict with peak_values, positions, freq_hz, peak_mag,
+    median_mag, rad_per_sample on success, or a status dict on failure.
     """
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
         return {"status": "short_block"}
 
-    # ── 0. Remove DC offset ───────────────────────────────────────────
-    # RTL-SDR (and any direct-conversion receiver) has significant LO
-    # feedthrough — a large spike at the tuned frequency that sits right
-    # on top of our signal. Subtract the block mean before doing any
-    # DSP; our signal is mean-zero BPSK so this preserves the signal.
     samples = (samples - samples.mean()).astype(np.complex64)
-
-    # ── 1. Carrier offset estimation ──────────────────────────────────
     rad_per_sample = sf.estimate_freq_offset_rad_per_sample(samples)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
-
-    # ── 2. Apply correction ─────────────────────────────────────────────
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
-    # ── 3. Complex matched filter ──────────────────────────────────────
     corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
     if len(corr_c) == 0:
         return {"status": "short_block"}
@@ -1369,7 +904,6 @@ def _decode_one_hail_in_block(
     peak_mag = float(mag.max())
     median_mag = float(np.median(mag))
 
-    # ── 4. Signal presence test (post-correction) ─────────────────────
     if median_mag == 0.0 or peak_mag < signal_threshold * median_mag:
         return {
             "status": "no_signal",
@@ -1379,24 +913,12 @@ def _decode_one_hail_in_block(
             "freq_offset_hz": freq_hz,
         }
 
-    # ── 4b. Periodic structure test ────────────────────────────────────
-    # A single strong noise spike can exceed the peak/median ratio
-    # threshold. Verify the matched filter has PERIODIC peaks at the
-    # expected symbol-spacing interval: a real DSSS signal produces
-    # ~1000 peaks per frame all of similar magnitude, while noise
-    # produces only 1-2 outlier peaks and noise floor elsewhere.
-    #
-    # Starting at the global max position, sample the matched filter
-    # magnitude at 16 symbol-spaced positions. The MEDIAN of those
-    # samples should be at least 30% of the global max for a real
-    # periodic signal. Pure noise with a spurious spike will have a
-    # tiny median (the rest are noise-floor values).
+    # Periodic structure test
     first_peak_pos = int(np.argmax(mag))
     samples_per_symbol = sf.CHIPS_PER_SYMBOL * samps_per_chip
-    n_test_symbols = 16
     search_half = samples_per_symbol // 4
     test_peaks: list[float] = []
-    for k in range(n_test_symbols):
+    for k in range(16):
         pos_k = first_peak_pos + k * samples_per_symbol
         if pos_k + search_half >= len(mag):
             break
@@ -1405,14 +927,9 @@ def _decode_one_hail_in_block(
         test_peaks.append(float(mag[lo:hi].max()))
 
     if len(test_peaks) < 4:
-        return {
-            "status": "short_block",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-        }
+        return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
 
-    median_test_peak = float(np.median(test_peaks))
-    periodic_ratio = median_test_peak / peak_mag if peak_mag > 0 else 0.0
+    periodic_ratio = float(np.median(test_peaks)) / peak_mag if peak_mag > 0 else 0.0
     if periodic_ratio < 0.3:
         return {
             "status": "no_signal",
@@ -1424,27 +941,8 @@ def _decode_one_hail_in_block(
             "note": "spurious spike, no periodic structure",
         }
 
-    # ── 5. Tracking decode (reuses precomputed freq offset) ───────────
-    # In FEC mode we need enough peak_values to cover BOTH a full FEC
-    # frame (HAIL_FEC_TOTAL_BITS = 2096) AND a search window of at
-    # least one frame's worth, since the soft-correlator's strongest
-    # ASM hit may land near the end of the first frame in the stream.
-    # Without the search margin we'd find an ASM at offset ~1500 with
-    # only ~600 peaks left after it — far less than the FEC frame
-    # length — and the FEC fast path would discard the candidate.
-    #
-    # Target the largest symbol count that fits in the input block.
-    # samples_per_symbol = CHIPS_PER_SYMBOL * samps_per_chip. We
-    # subtract a small safety margin to leave room for the per-symbol
-    # tracker's per-step bracket search.
-    if fec:
-        # The soft correlator needs to find the ASM anywhere within the
-        # first 2096 tracked peaks AND still have 2096 peaks remaining
-        # after the offset. That requires 2 × HAIL_FEC_TOTAL_BITS =
-        # 4192 bits = 524 bytes of tracked symbols minimum.
-        target_bytes = (2 * sc.HAIL_FEC_TOTAL_BITS + 7) // 8   # 524
-    else:
-        target_bytes = 2 * sc.HAIL_FRAME_LEN
+    # Tracking decode — need 2× FEC frame for search margin
+    target_bytes = (2 * sc.HAIL_FEC_TOTAL_BITS + 7) // 8
     track_result = sf.decode_with_freq_tracking(
         samples,
         samps_per_chip=samps_per_chip,
@@ -1452,14 +950,7 @@ def _decode_one_hail_in_block(
         freq_offset_rad_per_sample=rad_per_sample,
     )
     if track_result is None:
-        # Fall back to a smaller window. In FEC mode try the minimum
-        # FEC frame length; in non-FEC mode try the legacy 1-frame
-        # length.
-        fallback_bytes = (
-            (sc.HAIL_FEC_TOTAL_BITS + 7) // 8
-            if fec
-            else sc.HAIL_FRAME_LEN
-        )
+        fallback_bytes = (sc.HAIL_FEC_TOTAL_BITS + 7) // 8
         track_result = sf.decode_with_freq_tracking(
             samples,
             samps_per_chip=samps_per_chip,
@@ -1474,411 +965,162 @@ def _decode_one_hail_in_block(
                 "rad_per_sample": rad_per_sample,
                 "freq_offset_hz": freq_hz,
             }
-    decoded = track_result["bytes"]
-    positions = track_result["positions"]
-    peak_values = track_result.get("peak_values", [])
 
-    # ── 5b. FEC fast path ─────────────────────────────────────────────
-    # In FEC mode the on-air frame is 2096 channel bits, not 1064. The
-    # tracker's peak_values[0] is the global argmax of the matched
-    # filter — typically NOT the start of an ASM frame. We must find
-    # the actual ASM offset first via the soft-correlator search, then
-    # call dbpsk_decode_from_pilot at that offset. Without this step,
-    # the pilot fit interprets random body bits as the known pilot and
-    # produces garbage LLRs.
-    if fec:
-        if not peak_values or len(peak_values) < sc.HAIL_FEC_TOTAL_BITS:
-            return {
-                "status": "track_lost",
-                "peak_mag": peak_mag,
-                "median_mag": median_mag,
-                "rad_per_sample": rad_per_sample,
-                "freq_offset_hz": freq_hz,
-                "note": "fec mode: peak_values too short for HAIL_FEC_TOTAL_BITS",
-            }
-
-        # Soft-correlator search for the ASM offset. The same function
-        # the non-FEC path uses, just with the longer FEC frame length.
-        topk = find_sisl_frame_soft_topk(
-            peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
-        )
-
-        best_attempt: Optional[dict] = None
-        best_offset = -1
-        best_score = 0.0
-        best_pts_ratio = 0.0
-        decoded_hail: Optional[sc.DecodedHail] = None
-        polarity_label = "fec"
-
-        for cand_offset, cand_score, _cand_frame, cand_pts in topk:
-            if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
-                continue
-            if abs(cand_score) <= 10.0 or cand_pts < 3.0:
-                continue
-
-            llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
-            fec_llrs_arr = llr_diag.get("fec_llrs")
-            if fec_llrs_arr is None:
-                continue
-
-            attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
-            if attempt is None:
-                attempt = sc.decode_hail_fec_from_llrs(
-                    -fec_llrs_arr, responder_static,
-                )
-                if attempt is not None:
-                    polarity_label = "fec-inv"
-            else:
-                polarity_label = "fec"
-
-            if attempt is not None:
-                decoded_hail = attempt
-                best_offset = int(cand_offset)
-                best_score = float(cand_score)
-                best_pts_ratio = float(cand_pts)
-                best_attempt = {
-                    "llr_diag": llr_diag,
-                    "fec_llrs": fec_llrs_arr,
-                }
-                break
-
-            # Track the highest-|score| failed attempt for diagnostics.
-            # Don't break — try the next candidate. The real ASM may
-            # be at a lower-scoring position while a false-positive
-            # body match took the top score.
-            if best_attempt is None or abs(cand_score) > abs(best_score):
-                best_attempt = {
-                    "llr_diag": llr_diag,
-                    "fec_llrs": fec_llrs_arr,
-                }
-                best_offset = int(cand_offset)
-                best_score = float(cand_score)
-                best_pts_ratio = float(cand_pts)
-
-        if best_attempt is None:
-            return {
-                "status": "track_lost",
-                "peak_mag": peak_mag,
-                "median_mag": median_mag,
-                "rad_per_sample": rad_per_sample,
-                "freq_offset_hz": freq_hz,
-                "note": "fec mode: no soft-correlator candidate cleared the gate",
-            }
-
-        llr_diag = best_attempt["llr_diag"]
-        fec_llrs_arr = best_attempt["fec_llrs"]
-        base = {
-            "start_sample": positions[0] if positions else 0,
-            "asm_at_byte": f"soft-bit{best_offset}",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "soft_score": best_score,
-            "pts_ratio": best_pts_ratio,
-            "llrs": llr_diag["llrs"],
-            "fec_llrs": fec_llrs_arr,
-            "c_frame": llr_diag["c_frame"],
-            "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
-            "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
-        }
-        if decoded_hail is None:
-            return {
-                "status": "decrypt_fail",
-                "polarity": "fec",
-                **base,
-            }
-        return {
-            "status": "decrypt_ok",
-            "polarity": polarity_label,
-            "body": decoded_hail.body,
-            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-            **base,
-        }
-
-    # ── 3. Try both bit polarities (BPSK phase ambiguity) ────────────────
-    decoded_inv = bytes(b ^ 0xFF for b in decoded)
-    # Track the best fuzzy match across both polarities so we can at least
-    # REPORT the ASM hamming distance even if exact/fuzzy decrypt fails.
-    best_fuzzy = None        # (polarity, bit_offset, frame_bytes, distance)
-    for variant_label, variant in (("normal", decoded), ("inverted", decoded_inv)):
-        # ── First: byte-aligned ASM search (fast, common case) ─────
-        info = identify_sisl_frame(variant)
-        frame_bytes = None
-        asm_location = None
-        peak_offset: Optional[int] = None
-        if info is not None and info["frame_type"] == "hail" and info["frame_bytes"] is not None:
-            frame_bytes = info["frame_bytes"]
-            asm_location = f"byte{info['asm_offset']}"
-            peak_offset = int(info["asm_offset"]) * 8
-
-        # ── Fallback 1: bit-level exact sliding ASM search ─────────
-        if frame_bytes is None:
-            bitwise = find_sisl_frame_bitwise(variant, sc.HAIL_FRAME_LEN)
-            if bitwise is not None:
-                bit_offset, frame_bytes = bitwise
-                asm_location = f"bit{bit_offset}"
-                peak_offset = int(bit_offset)
-
-        # ── Fallback 2: fuzzy bit-level ASM search ─────────────────
-        if frame_bytes is None:
-            fuzzy = find_sisl_frame_bitwise_fuzzy(
-                variant, sc.HAIL_FRAME_LEN, max_errors=5,
-            )
-            if fuzzy is not None:
-                bit_offset, fuzzy_bytes, asm_distance = fuzzy
-                if best_fuzzy is None or asm_distance < best_fuzzy[3]:
-                    best_fuzzy = (variant_label, bit_offset, fuzzy_bytes,
-                                   asm_distance)
-
-        if frame_bytes is None:
-            continue
-
-        # Always extract LLRs at the discovered ASM offset so the
-        # accumulator can chase-combine across blocks regardless of the
-        # current block's decrypt outcome (A5).
-        llr_diag = (
-            _extract_llrs_at_position(peak_values, peak_offset)
-            if peak_offset is not None and peak_values
-            else {"llrs": None, "fec_llrs": None, "c_frame": None,
-                  "phase_rms_residual_rad": None, "asm_errs_in_coherent": None}
-        )
-
-        decoded_hail = sc.decode_hail(frame_bytes, responder_static)
-        if decoded_hail is None:
-            return {
-                "status": "decrypt_fail",
-                "start_sample": positions[0] if positions else 0,
-                "asm_at_byte": asm_location,
-                "peak_mag": peak_mag,
-                "median_mag": median_mag,
-                "polarity": variant_label,
-                "rad_per_sample": rad_per_sample,
-                "freq_offset_hz": freq_hz,
-                "llrs": llr_diag["llrs"],
-                "fec_llrs": llr_diag["fec_llrs"],
-                "c_frame": llr_diag["c_frame"],
-                "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
-                "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
-            }
-        return {
-            "status": "decrypt_ok",
-            "start_sample": positions[0] if positions else 0,
-            "asm_at_byte": asm_location,
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "polarity": variant_label,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "body": decoded_hail.body,
-            "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-            "llrs": llr_diag["llrs"],
-            "fec_llrs": llr_diag["fec_llrs"],
-            "c_frame": llr_diag["c_frame"],
-            "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
-            "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
-        }
-
-    # ── Fallback 3: top-K soft-decision ASM search ───────────────
-    # Per Gallager's panel feedback: hard-decision decoding throws away
-    # 10-15 dB of effective SNR. Run the soft correlator directly on
-    # the complex peak values and inspect the top-K candidate ASM
-    # positions, not just the argmax. At marginal SNR the true ASM may
-    # be at the 2nd or 3rd strongest position while noise wins the top.
-    soft_result = None
-    best_attempt = None          # dict returned by _try_coherent_decrypt_at_position
-    best_soft_score = 0.0
-    best_soft_offset = -1
-    best_soft_frame = None
-    best_pts_ratio = None
-    if peak_values and len(peak_values) >= 33 and top_k_soft > 0:
-        topk = find_sisl_frame_soft_topk(
-            peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
-        )
-        if topk:
-            soft_offset, soft_score, soft_frame, pts_ratio = topk[0]
-            soft_result = (soft_offset, soft_score, soft_frame)
-            best_soft_score = soft_score
-            best_soft_offset = soft_offset
-            best_soft_frame = soft_frame
-            best_pts_ratio = pts_ratio
-
-            # Walk top-K candidates in order of |score|.
-            for cand_offset, cand_score, cand_frame, cand_pts in topk:
-                # Two-stage gate:
-                #   (a) absolute soft-score threshold  — rejects small peaks
-                #   (b) peak-to-sidelobe ratio         — rejects
-                #       candidates whose score isn't clearly above the
-                #       noise floor of all other positions.
-                # Clean signal: pts_ratio > 5. Noise: ~2–3. Require ≥ 3.
-                if abs(cand_score) <= 10.0 or cand_pts < 3.0:
-                    continue   # below threshold, don't waste coherent decode
-                # First try the differential soft frame directly.
-                decoded_hail = sc.decode_hail(cand_frame, responder_static)
-                if decoded_hail is not None:
-                    # Extract LLRs at this offset for chase combining (A5).
-                    llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
-                    return {
-                        "status": "decrypt_ok",
-                        "start_sample": positions[0] if positions else 0,
-                        "asm_at_byte": f"soft-bit{cand_offset}",
-                        "peak_mag": peak_mag,
-                        "median_mag": median_mag,
-                        "polarity": "soft" if cand_score >= 0 else "soft-inv",
-                        "rad_per_sample": rad_per_sample,
-                        "freq_offset_hz": freq_hz,
-                        "soft_score": cand_score,
-                        "pts_ratio": cand_pts,
-                        "body": decoded_hail.body,
-                        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-                        "llrs": llr_diag["llrs"],
-                        "fec_llrs": llr_diag["fec_llrs"],
-                        "c_frame": llr_diag["c_frame"],
-                        "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
-                        "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
-                    }
-                # Then try the coherent + chase pipeline.
-                attempt = _try_coherent_decrypt_at_position(
-                    peak_values, cand_offset, responder_static,
-                )
-                if attempt["decoded_hail"] is not None:
-                    decoded_hail = attempt["decoded_hail"]
-                    return {
-                        "status": "decrypt_ok",
-                        "start_sample": positions[0] if positions else 0,
-                        "asm_at_byte": f"{attempt['polarity']}-bit{cand_offset}",
-                        "peak_mag": peak_mag,
-                        "median_mag": median_mag,
-                        "polarity": attempt["polarity"],
-                        "rad_per_sample": rad_per_sample,
-                        "freq_offset_hz": freq_hz,
-                        "soft_score": cand_score,
-                        "pts_ratio": cand_pts,
-                        "theta0_rad": attempt["theta0_rad"],
-                        "delta_theta_per_sym": attempt["delta_theta_per_sym"],
-                        "phase_rms_residual_rad": attempt["phase_rms_residual_rad"],
-                        "asm_errs_in_coherent": attempt["asm_errs_in_coherent"],
-                        "chase_flips": attempt["chase_flips"],
-                        "body": decoded_hail.body,
-                        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-                        # A5: surface LLRs from the coherent attempt so the
-                        # accumulator can chase-combine across blocks even
-                        # when the current block decrypted successfully.
-                        "llrs": attempt["c_soft"],
-                        "fec_llrs": attempt["fec_llrs"],
-                        "c_frame": attempt["c_frame"],
-                    }
-                # Remember the best (highest |score|) failed attempt for
-                # the frame_soft / noise_lock diagnostic below. The first
-                # candidate is always the highest |score|, so only take
-                # the first failed one.
-                if best_attempt is None:
-                    best_attempt = attempt
-                    best_soft_score = cand_score
-                    best_soft_offset = cand_offset
-                    best_soft_frame = cand_frame
-                    best_pts_ratio = cand_pts
-
-    if best_attempt is not None:
-        # None of the top-K candidates decrypted. Use the best failed
-        # attempt (highest |soft_score|) for the diagnostic report.
-        c_rms = best_attempt["phase_rms_residual_rad"]
-        c_asm_errs = best_attempt["asm_errs_in_coherent"]
-        c_frame = best_attempt["c_frame"]
-        c_soft_llrs = best_attempt["c_soft"]
-        coherent_hex = (c_frame[:16].hex()
-                         if c_frame is not None else None)
-        # Noise rejection. Two sufficient conditions for "this is
-        # spurious interference, not a SISL frame":
-        #   (a) phase_rms > 1.5 rad — the ML pilot fit could not find
-        #       a coherent phase trajectory across the 48 known bits;
-        #       essentially noise. This is a hard reject.
-        #   (b) phase_rms > 0.9 rad AND asm_errs > 4 — marginal fit
-        #       and wrong bits in the decoded ASM region; also noise.
-        # Case (b) kept for belt-and-suspenders but (a) handles the
-        # truncated-frame case where c_asm_errs is None.
-        is_noise = False
-        if c_rms is not None and c_rms > 1.5:
-            is_noise = True
-        elif (c_rms is not None and c_rms > 0.9
-              and c_asm_errs is not None and c_asm_errs > 4):
-            is_noise = True
-        status = "noise_lock" if is_noise else "frame_soft"
-        return {
-            "status": status,
-            "start_sample": positions[0] if positions else 0,
-            "asm_at_bit": best_soft_offset,
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "polarity": "soft" if best_soft_score >= 0 else "soft-inv",
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "soft_score": best_soft_score,
-            "pts_ratio": best_pts_ratio,
-            "first_16_bytes_hex": (best_soft_frame[:16].hex()
-                                    if best_soft_frame is not None else ""),
-            "coherent_16_bytes_hex": coherent_hex,
-            "asm_errs_in_coherent": c_asm_errs,
-            "drift_per_symbol_rad": track_result.get(
-                "drift_per_symbol_rad", 0.0),
-            "theta0_rad": best_attempt["theta0_rad"],
-            "delta_theta_per_sym": best_attempt["delta_theta_per_sym"],
-            "phase_rms_residual_rad": c_rms,
-            # D1: LLRs surfaced for accumulator / downstream decoders.
-            # For frame_soft and noise_lock, we still publish the soft
-            # values so callers can chase-combine across blocks. Shape is
-            # (HAIL_FRAME_LEN*8,) float32, positive → bit 0, negative → bit 1.
-            "llrs": c_soft_llrs,
-            "c_frame": best_attempt["c_frame"],
-        }
-
-    # ── Neither polarity has an exact ASM, but we may have a fuzzy match
-    # If so, return a diagnostic status showing the decoder found the
-    # frame with some bit errors. This proves the demodulator is
-    # working even when we can't fully decrypt.
-    if best_fuzzy is not None:
-        polarity_label, fuzzy_bit_offset, fuzzy_frame, fuzzy_dist = best_fuzzy
-        return {
-            "status": "frame_fuzzy",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "start_sample": positions[0] if positions else 0,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "polarity": polarity_label,
-            "asm_distance": fuzzy_dist,
-            "asm_at_byte": f"bit{fuzzy_bit_offset}",
-            "first_16_bytes_hex": fuzzy_frame[:16].hex(),
-            "drift_per_symbol_rad": track_result.get("drift_per_symbol_rad", 0.0),
-        }
-
-    # Neither polarity contains a SISL ASM — either interference or
-    # drift/noise corrupted the bits beyond recognition.
-    # Report the BEST hamming distance found across both polarities,
-    # even though it's above our fuzzy tolerance. This is a direct
-    # measure of how close we are to a successful decode.
-    best_normal = find_sisl_frame_best_match(decoded, sc.HAIL_FRAME_LEN)
-    best_inverted = find_sisl_frame_best_match(decoded_inv, sc.HAIL_FRAME_LEN)
-    min_hamming_normal = best_normal[2] if best_normal else None
-    min_hamming_inverted = best_inverted[2] if best_inverted else None
-    soft_score_val = soft_result[1] if soft_result else None
     return {
-        "status": "no_hail",
+        "status": "acquired",
+        "peak_values": track_result.get("peak_values", []),
+        "positions": track_result["positions"],
+        "freq_hz": freq_hz,
         "peak_mag": peak_mag,
         "median_mag": median_mag,
-        "start_sample": positions[0] if positions else 0,
         "rad_per_sample": rad_per_sample,
-        "freq_offset_hz": freq_hz,
-        "first_16_bytes_hex": decoded[:16].hex(),
-        "first_16_inv_hex": decoded_inv[:16].hex(),
-        "drift_per_symbol_rad": track_result.get("drift_per_symbol_rad", 0.0),
-        "first_peak_magnitudes": track_result.get("first_peak_magnitudes", []),
-        "first_peak_angles_rad": track_result.get("first_peak_angles_rad", []),
-        "min_asm_hamming_normal": min_hamming_normal,
-        "min_asm_hamming_inverted": min_hamming_inverted,
-        "soft_score": soft_score_val,
     }
 
+
+def _try_fec_decrypt(
+    peak_values: list,
+    positions: list,
+    responder_static: ec.EllipticCurvePrivateKey,
+    top_k_soft: int,
+    freq_hz: float,
+    peak_mag: float,
+    median_mag: float,
+    rad_per_sample: float,
+) -> dict:
+    """FEC fast path: soft correlator search, DBPSK decode, Viterbi, decrypt.
+
+    Returns a result dict with status decrypt_ok, decrypt_fail, or track_lost.
+    """
+    if not peak_values or len(peak_values) < sc.HAIL_FEC_TOTAL_BITS:
+        return {
+            "status": "track_lost",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "note": "peak_values too short for HAIL_FEC_TOTAL_BITS",
+        }
+
+    topk = find_sisl_frame_soft_topk(
+        peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
+    )
+
+    best_attempt: Optional[dict] = None
+    best_offset = -1
+    best_score = 0.0
+    best_pts_ratio = 0.0
+    decoded_hail: Optional[sc.DecodedHail] = None
+    polarity_label = "fec"
+
+    for cand_offset, cand_score, _cand_frame, cand_pts in topk:
+        if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
+            continue
+        if abs(cand_score) <= 10.0 or cand_pts < 3.0:
+            continue
+
+        llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
+        fec_llrs_arr = llr_diag.get("fec_llrs")
+        if fec_llrs_arr is None:
+            continue
+
+        attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
+        if attempt is None:
+            attempt = sc.decode_hail_fec_from_llrs(
+                -fec_llrs_arr, responder_static,
+            )
+            if attempt is not None:
+                polarity_label = "fec-inv"
+        else:
+            polarity_label = "fec"
+
+        if attempt is not None:
+            decoded_hail = attempt
+            best_offset = int(cand_offset)
+            best_score = float(cand_score)
+            best_pts_ratio = float(cand_pts)
+            best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
+            break
+
+        if best_attempt is None or abs(cand_score) > abs(best_score):
+            best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
+            best_offset = int(cand_offset)
+            best_score = float(cand_score)
+            best_pts_ratio = float(cand_pts)
+
+    if best_attempt is None:
+        return {
+            "status": "track_lost",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+            "note": "no soft-correlator candidate cleared the gate",
+        }
+
+    llr_diag = best_attempt["llr_diag"]
+    fec_llrs_arr = best_attempt["fec_llrs"]
+    base = {
+        "start_sample": positions[0] if positions else 0,
+        "asm_at_byte": f"soft-bit{best_offset}",
+        "peak_mag": peak_mag,
+        "median_mag": median_mag,
+        "rad_per_sample": rad_per_sample,
+        "freq_offset_hz": freq_hz,
+        "soft_score": best_score,
+        "pts_ratio": best_pts_ratio,
+        "llrs": llr_diag["llrs"],
+        "fec_llrs": fec_llrs_arr,
+        "c_frame": llr_diag["c_frame"],
+        "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
+        "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
+    }
+    if decoded_hail is None:
+        return {"status": "decrypt_fail", "polarity": "fec", **base}
+    return {
+        "status": "decrypt_ok",
+        "polarity": polarity_label,
+        "body": decoded_hail.body,
+        "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+        **base,
+    }
+
+
+def _decode_one_hail_in_block(
+    samples: np.ndarray,
+    responder_static: ec.EllipticCurvePrivateKey,
+    samps_per_chip: int = SAMPS_PER_CHIP,
+    samp_hz: float = SAMP_RATE_HZ,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
+) -> dict:
+    """Process one block of baseband samples, try to decode one FEC hail.
+
+    Thin dispatcher: calls _acquire_and_track, then _try_fec_decrypt.
+
+    Statuses:
+      short_block   — fewer than one code-period of samples
+      no_signal     — CORRECTED peak/median below threshold
+      track_lost    — tracker lost lock partway through the frame
+      decrypt_fail  — hail frame found but Poly1305 tag mismatch
+      decrypt_ok    — hail decoded and decrypted under responder_static
+    """
+    acq = _acquire_and_track(samples, samps_per_chip, samp_hz, signal_threshold)
+    if acq["status"] != "acquired":
+        return acq
+
+    return _try_fec_decrypt(
+        peak_values=acq["peak_values"],
+        positions=acq["positions"],
+        responder_static=responder_static,
+        top_k_soft=top_k_soft,
+        freq_hz=acq["freq_hz"],
+        peak_mag=acq["peak_mag"],
+        median_mag=acq["median_mag"],
+        rad_per_sample=acq["rad_per_sample"],
+    )
+
+
+# ── Live event formatting (presentation, not decode logic) ────────────────
 
 def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
     """Print one line describing a block's processing result.
@@ -2033,7 +1275,6 @@ def live_rx_decode(
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     combine_copies: int = 0,
-    fec: bool = False,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -2142,18 +1383,10 @@ def live_rx_decode(
     # when combine_copies > 0; otherwise does nothing.
     accumulator = None
     if combine_copies > 0:
-        if fec:
-            accumulator = LlrAccumulator(
-                n_bits=sc.HAIL_FEC_TOTAL_BITS,
-                max_copies=combine_copies,
-                fec=True,
-            )
-        else:
-            accumulator = LlrAccumulator(
-                n_bits=sc.HAIL_FRAME_LEN * 8,
-                pass_rms=0.3,           # only clean coherent fits
-                max_copies=combine_copies,
-            )
+        accumulator = LlrAccumulator(
+            n_bits=sc.HAIL_FEC_TOTAL_BITS,
+            max_copies=combine_copies,
+        )
 
     try:
         while time.time() - t_start < duration_s:
@@ -2193,7 +1426,6 @@ def live_rx_decode(
                 samp_hz=samp_hz,
                 signal_threshold=signal_threshold,
                 top_k_soft=top_k_soft,
-                fec=fec,
             )
             _print_live_event(stats["blocks_processed"], result)
 
@@ -2245,71 +1477,39 @@ def live_rx_decode(
 def offline_decode_hail(
     cfile_path: str,
     responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
-    max_search_chips: Optional[int] = None,
-    fec: bool = False,
 ) -> dict:
-    """Full pipeline: capture → despread → detect hail → trial decrypt.
+    """Full pipeline: capture → FEC decode → trial decrypt.
 
     Returns a dict with:
-        offset            — acquisition chip offset (None if no lock)
-        decoded_bytes     — raw despread bytes
-        frame             — identify_sisl_frame() result or None
+        offset            — None (FEC path doesn't use chip-level offset)
+        decoded_bytes     — empty (FEC path uses LLRs, not hard bytes)
         decoded_hail      — sisl_crypto.DecodedHail or None
         decrypted         — True iff the hail was for `responder_static`
-        responder_label   — diagnostic string ("demo-responder", etc.)
-
-    `fec`: when True, route the entire capture through
-    _decode_one_hail_in_block(fec=True), which extracts 2096 channel
-    LLRs and runs sisl_fec.decode + decode_hail_fec_from_llrs.
+        fec_status        — status from _decode_one_hail_in_block
+        fec_polarity      — polarity label
     """
     if responder_static is None:
         responder_static = demo_responder_key()
 
-    if fec:
-        raw = np.fromfile(cfile_path, dtype=np.complex64)
-        decode_result = _decode_one_hail_in_block(
-            raw, responder_static, fec=True,
-        )
-        out: dict = {
-            "offset": None,
-            "decoded_bytes": b"",
-            "frame": None,
-            "decoded_hail": None,
-            "decrypted": False,
-            "fec_status": decode_result.get("status"),
-            "fec_polarity": decode_result.get("polarity"),
-        }
-        if decode_result.get("status") == "decrypt_ok":
-            out["decoded_hail"] = type("X", (), {  # tiny duck-type for callers
-                "body": decode_result["body"],
-                "caller_eph_pub_canonical":
-                    decode_result["caller_eph_pub_canonical"],
-            })()
-            out["decrypted"] = True
-        return out
-
-    data, offset = offline_despread(
-        cfile_path, max_search_chips=max_search_chips
-    )
-
-    result: dict = {
-        "offset": offset,
-        "decoded_bytes": data,
+    raw = np.fromfile(cfile_path, dtype=np.complex64)
+    decode_result = _decode_one_hail_in_block(raw, responder_static)
+    out: dict = {
+        "offset": None,
+        "decoded_bytes": b"",
         "frame": None,
         "decoded_hail": None,
         "decrypted": False,
+        "fec_status": decode_result.get("status"),
+        "fec_polarity": decode_result.get("polarity"),
     }
-
-    info = identify_sisl_frame(data)
-    result["frame"] = info
-    if info is None or info["frame_type"] != "hail" or info["frame_bytes"] is None:
-        return result
-
-    decoded = sc.decode_hail(info["frame_bytes"], responder_static)
-    if decoded is not None:
-        result["decoded_hail"] = decoded
-        result["decrypted"] = True
-    return result
+    if decode_result.get("status") == "decrypt_ok":
+        out["decoded_hail"] = type("X", (), {
+            "body": decode_result["body"],
+            "caller_eph_pub_canonical":
+                decode_result["caller_eph_pub_canonical"],
+        })()
+        out["decrypted"] = True
+    return out
 
 
 def identify_sisl_frame(data: bytes) -> Optional[dict]:
@@ -2378,8 +1578,6 @@ def main() -> int:
                         help="tx-to-file: leading silence in ms")
     parser.add_argument("--repeats", type=int, default=1,
                         help="tx-to-file: hail repetitions")
-    parser.add_argument("--max-search-chips", type=int, default=None,
-                        help="offline: bound the acquisition search window")
     parser.add_argument("--as", dest="as_key",
                         choices=("responder", "other"), default="responder",
                         help="offline/rx: which demo key to trial-decrypt as. "
@@ -2465,25 +1663,12 @@ def main() -> int:
                              "at 2 Msps with a single tuner gain; "
                              "useful as a second observer on sub-GHz "
                              "bands. tx mode is always HackRF.")
-    parser.add_argument("--fec", action="store_true",
-                        help="use the FEC-encoded hail variant. TX side "
-                             "emits a 2096-bit channel waveform "
-                             "(48 uncoded header + 2048 FEC body, ~2x "
-                             "the air time of an uncoded hail). RX side "
-                             "extracts 2096 channel LLRs, runs the soft "
-                             "Viterbi over the FEC body, and decrypts "
-                             "via decode_hail_fec_from_llrs. Combine "
-                             "with --combine N to chase-combine FEC "
-                             "frames across copies for the full ~5 dB "
-                             "(N=1) to ~13 dB (N=10) deeper-into-noise "
-                             "operating point.")
     args = parser.parse_args()
 
     if args.mode == "tx-to-file":
         frame = build_demo_hail()
         n = tx_to_file(frame, args.capture,
-                       prefix_ms=args.prefix_ms, repeats=args.repeats,
-                       fec=args.fec)
+                       prefix_ms=args.prefix_ms, repeats=args.repeats)
         print(f"wrote {n} complex64 samples ({n * 8} bytes) to {args.capture}")
         print(f"  hail frame:    {len(frame)} bytes")
         print(f"  asm:           {frame[0:4].hex()}")
@@ -2502,81 +1687,23 @@ def main() -> int:
             responder = demo_other_key()
             label = "demo-other (WRONG key — should fail)"
 
-        result = offline_decode_hail(
-            args.capture,
-            responder_static=responder,
-            max_search_chips=args.max_search_chips,
-            fec=args.fec,
-        )
+        result = offline_decode_hail(args.capture, responder_static=responder)
 
-        if args.fec:
-            print(f"FEC decode:    status={result.get('fec_status')!r}, "
-                  f"polarity={result.get('fec_polarity')!r}")
-            decoded_hail = result["decoded_hail"]
-            if decoded_hail is None:
-                print("TRIAL DECRYPT: FAILED (FEC body decoded but Poly1305 "
-                      "rejected — likely phase-drift wrap in the back half "
-                      "of the 2096-bit codeword; needs DBPSK in production)")
-                return 1
-            body = decoded_hail.body
-            print("TRIAL DECRYPT: OK (this hail was for us)")
-            print(f"  center_freq_offset: +{body.center_freq_offset} MHz")
-            print(f"  bandwidth_code:     0x{body.bandwidth_code:02x}")
-            print(f"  mode:               0x{body.mode:02x}")
-            print(f"  body_nonce:         {body.body_nonce.hex()}")
-            return 0
-
-        offset = result["offset"]
-        data = result["decoded_bytes"]
-        frame = result["frame"]
+        print(f"FEC decode:    status={result.get('fec_status')!r}, "
+              f"polarity={result.get('fec_polarity')!r}")
         decoded_hail = result["decoded_hail"]
-
-        lock_state = "locked" if offset is not None else "NO LOCK — fallback to chip 0"
-        print(f"acquisition:   {lock_state}")
-        if offset is not None:
-            print(f"  offset:      {offset} chips "
-                  f"({offset / CHIP_RATE_HZ * 1000:.1f} ms into capture)")
-        print(f"decoded:       {len(data)} bytes of despread data")
-        print(f"attempting as: {label}")
-        print()
-
-        if frame is None:
-            print("SISL frame:    NO ASM FOUND in despread bytes")
-            print(f"  first 64:    {data[:64]!r}")
-            return 2
-        print("SISL frame:    detected")
-        print(f"  asm offset:  byte {frame['asm_offset']}")
-        print(f"  version:     0x{frame['version']:02x}")
-        print(f"  msg type:    0x{frame['msg_type']:02x} ({frame['frame_type']})")
-        if frame["frame_type"] != "hail":
-            print("  (not a hail — stopping)")
-            return 3
-        print(f"  frame hex:   {frame['frame_bytes'].hex()}")
-        print()
-
         if decoded_hail is None:
-            print("TRIAL DECRYPT: FAILED")
-            print("  Poly1305 tag mismatch — this hail was not addressed to the")
-            print(f"  key we tried ({label}).")
-            print("  This is the v3 identity oracle: wrong key ⇒ silent drop.")
+            print(f"TRIAL DECRYPT: FAILED as {label}")
             return 1
-
         body = decoded_hail.body
         print("TRIAL DECRYPT: OK (this hail was for us)")
         print(f"  center_freq_offset: +{body.center_freq_offset} MHz")
         print(f"  bandwidth_code:     0x{body.bandwidth_code:02x}")
         print(f"  mode:               0x{body.mode:02x}")
-        print(f"  chip_rate_code:     0x{body.chip_rate_code:02x}")
         print(f"  body_nonce:         {body.body_nonce.hex()}")
-        print(f"  flags:              0x{body.flags:02x}")
-        print(f"  caller eph (canon): "
-              f"{decoded_hail.caller_eph_pub_canonical.hex()}")
         return 0
 
     if args.mode == "rx":
-        # Live RX: stream from HackRF, decode hails in real time.
-        # Uses SoapySDR directly (not GR) so the processing thread can do
-        # numpy DSP synchronously without a GR flowgraph wrapper.
         responder = (demo_responder_key() if args.as_key == "responder"
                      else demo_other_key())
         label = ("demo-responder (correct target)"
@@ -2587,11 +1714,7 @@ def main() -> int:
         if save is not None:
             print(f"  also saving raw samples → {save}")
         block_sec = args.block_seconds
-        if args.fec and block_sec < 5.0:
-            print(f"  WARNING: --fec requires --block-seconds >= 5.0 "
-                  f"(FEC frame is 2096 symbols at ~1 ksym/s = 2.1s; "
-                  f"tracker needs 2× for search = 4.2s + margin). "
-                  f"Overriding {block_sec}s → 6.0s.")
+        if block_sec < 5.0:
             block_sec = 6.0
         stats = live_rx_decode(
             duration_s=args.duration,
@@ -2606,7 +1729,6 @@ def main() -> int:
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
             combine_copies=args.combine,
-            fec=args.fec,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -2617,23 +1739,13 @@ def main() -> int:
         print(f"  elapsed:         {stats['elapsed_s']:.1f} s")
         print(f"  blocks:          {stats['blocks_processed']}")
         print(f"  overflows:       {stats.get('overflows', 0)}")
-        print(f"  interference:    {stats.get('interference', 0)} "
-              "(strong signal, non-SISL)")
-        print(f"  noise locks:     {stats.get('noise_locks', 0)} "
-              "(spurious soft-correlator triggers, rejected)")
-        print(f"  soft detected:   {stats.get('frames_soft', 0)} "
-              "(soft correlator found ASM, body noisy)")
-        print(f"  fuzzy matches:   {stats.get('frames_fuzzy', 0)} "
-              "(ASM found with 1-3 bit errors, too noisy to decrypt)")
         print(f"  hails detected:  {stats['hails_detected']} "
               "(SISL frame parsed)")
         print(f"  hails decrypted: {stats['hails_decrypted']} "
               "(Poly1305 verified)")
         if stats.get("combined_copies", 0) or stats.get("combined_decrypts", 0):
-            print(f"  combined copies: {stats.get('combined_copies', 0)} "
-                  "(clean-fit copies fed into LLR accumulator)")
-            print(f"  combined decrypt:{stats.get('combined_decrypts', 0)} "
-                  "(rescued by chase-combining)")
+            print(f"  combined copies: {stats.get('combined_copies', 0)}")
+            print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
     # mode == "tx"
@@ -2649,7 +1761,6 @@ def main() -> int:
         tx_amp_on=args.tx_amp,
         center_hz=args.freq * 1e6,
         preamble_only=args.tx_preamble,
-        fec=args.fec,
     )
     frame = tb.hail_frame
     if args.tx_preamble:
@@ -2660,15 +1771,11 @@ def main() -> int:
         print(f"  note:          no body, no crypto — expect frame_soft "
               f"with score ~31 at the RX, not decrypt_ok")
     else:
-        if args.fec:
-            print(f"tx: transmitting FEC demo hail to {args.freq:.1f} MHz "
-                  f"for {args.duration:.1f} s")
-            print(f"  on-air:        {sc.HAIL_FEC_TOTAL_BITS} channel bits "
-                  f"(48 uncoded header + 2048 FEC body)")
-            print(f"  underlying:    {len(frame)}-byte hail frame, FEC-encoded")
-        else:
-            print(f"tx: transmitting demo hail ({len(frame)} bytes) "
-                  f"to {args.freq:.1f} MHz for {args.duration:.1f} s")
+        print(f"tx: transmitting FEC demo hail to {args.freq:.1f} MHz "
+              f"for {args.duration:.1f} s")
+        print(f"  on-air:        {sc.HAIL_FEC_TOTAL_BITS} channel bits "
+              f"(48 uncoded header + 2048 FEC body)")
+        print(f"  underlying:    {len(frame)}-byte hail frame, FEC-encoded")
         print(f"  asm:           {frame[0:4].hex()}")
         print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
         print(f"  target key:    demo-responder (deterministic)")

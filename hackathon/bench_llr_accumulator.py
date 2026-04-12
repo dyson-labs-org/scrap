@@ -315,7 +315,6 @@ def _run_one_trial_fec(
     accumulator = dd.LlrAccumulator(
         n_bits=sc.HAIL_FEC_TOTAL_BITS,
         max_copies=max_n * 2 + 1,
-        fec=True,
     )
     single_copy = np.zeros(max_n, dtype=bool)
     admissions = np.zeros(max_n, dtype=bool)
@@ -380,8 +379,8 @@ def _run_one_trial(
     rng: np.random.Generator,
 ) -> dict:
     accumulator = dd.LlrAccumulator(
-        n_bits=sc.HAIL_FRAME_LEN * 8,
-        max_copies=max_n * 2 + 1,   # never hit the halving decay in sim
+        n_bits=sc.HAIL_FEC_TOTAL_BITS,
+        max_copies=max_n * 2 + 1,
     )
     single_copy = np.zeros(max_n, dtype=bool)
     admissions = np.zeros(max_n, dtype=bool)
@@ -530,11 +529,11 @@ def _check_clean_path_production_admission(
     rng = np.random.default_rng(seed)
     responder_static = dd.demo_responder_key()
     accumulator = dd.LlrAccumulator(
-        n_bits=sc.HAIL_FRAME_LEN * 8, max_copies=n_copies * 2 + 1,
+        n_bits=sc.HAIL_FEC_TOTAL_BITS, max_copies=n_copies * 2 + 1,
     )
     admitted = 0
     decrypted_solo = 0
-    keys_required = ("llrs", "c_frame",
+    keys_required = ("fec_llrs", "c_frame",
                      "phase_rms_residual_rad", "asm_errs_in_coherent")
     cumulative_l1: list[float] = []
     for i in range(n_copies):
@@ -615,21 +614,19 @@ def _check_clean_path_production_admission(
 
 def _make_clean_block(prefix_samples: int, suffix_samples: int,
                        rng: np.random.Generator) -> tuple[np.ndarray, bytes]:
-    """Build a clean (noise-free) baseband block containing one demo hail.
+    """Build a clean (noise-free) baseband block containing two FEC demo hails.
 
-    Mirrors test_sisl_dsss_demo._make_block_with_hail but lives here so
-    the bench has no test-file dependency. `rng` is reserved for future
-    randomized prefixes; current build is deterministic given the prefix
-    sample counts.
+    Two copies provide the search margin the tracker needs. `rng` is
+    reserved for future randomized prefixes.
     """
     _ = rng   # reserved
-    frame = dd.build_demo_hail()
-    chips = dd.build_tx_chips(frame)
+    chips, diag_frame = dd.build_demo_hail_fec_chips()
+    chips = np.tile(chips, 2)
     signal = dd.upsample_chips_to_samples(chips)
     prefix = np.zeros(prefix_samples, dtype=np.complex64)
     suffix = np.zeros(suffix_samples, dtype=np.complex64)
     block = np.concatenate([prefix, signal, suffix])
-    return block, frame
+    return block, diag_frame
 
 
 def main() -> int:
@@ -646,13 +643,6 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-clean-path-check", action="store_true",
                    help="skip the A5 production-path admission check")
-    p.add_argument("--fec", action="store_true",
-                   help="use the FEC-encoded TX path and FEC-mode "
-                        "LlrAccumulator instead of the uncoded chase-only "
-                        "path. The convolutional code adds ~5-6 dB of "
-                        "coding gain on top of LLR combining; the "
-                        "accumulator floor moves from ~0 dB to ~-5 dB "
-                        "Es/N0 at N=4 copies.")
     args = p.parse_args()
 
     # ── A5 regression guard: production decoder must surface LLRs ──
@@ -675,8 +665,8 @@ def main() -> int:
               f"L1 combining factor={check['combining_factor']:.2f}")
         print()
 
-    sweep_fn = _run_sweep_fec if args.fec else _run_sweep
-    label = "FEC" if args.fec else "uncoded"
+    sweep_fn = _run_sweep_fec
+    label = "FEC"
     print(f"bench_llr_accumulator [{label}]: sweep snrs={args.snr} "
           f"trials={args.trials} max_n={args.max_n}")
     t0 = time.time()
