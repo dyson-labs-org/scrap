@@ -760,13 +760,24 @@ def live_rx_decode(
             agc_ppm.on_block(result, block_data)
 
             if accumulator is not None:
-                added = accumulator.try_add(result)
-                if added:
-                    stats["combined_copies"] += 1
-                for extra_llrs in result.get("extra_fec_llrs", []):
-                    extra_result = {"fec_llrs": extra_llrs}
-                    if accumulator.try_add(extra_result):
+                # Only feed the accumulator when the frequency estimate
+                # is plausible. At low SNR (5 GHz), the FFT often locks
+                # onto spurs giving |Δf| >> 50 kHz. The body LLRs from
+                # spur-locked blocks are noise that DILUTES the real
+                # signal in the accumulator instead of building it.
+                foff = result.get("freq_offset_hz", 0)
+                freq_ok = abs(foff) < 50_000  # ±50 kHz gate
+                if freq_ok:
+                    added = accumulator.try_add(result)
+                    if added:
                         stats["combined_copies"] += 1
+                    for extra_llrs in result.get("extra_fec_llrs", []):
+                        extra_result = {"fec_llrs": extra_llrs}
+                        if accumulator.try_add(extra_result):
+                            stats["combined_copies"] += 1
+                else:
+                    stats["acc_freq_rejects"] = \
+                        stats.get("acc_freq_rejects", 0) + 1
                 if accumulator.n_copies > 0:
                     acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
                     print(f"       accumulator: {accumulator.n_copies} "
