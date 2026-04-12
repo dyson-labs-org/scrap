@@ -16,6 +16,7 @@ import numpy as np
 import sisl_crypto as sc
 import sisl_dsss_demo as dd
 import sisl_framer as sf
+from conftest import bits_to_hard_llrs, encoded_fec_bits_to_post_dbpsk, make_test_hail_body
 
 
 # ── Constants used by the tests ─────────────────────────────────────────────
@@ -88,14 +89,9 @@ def test_tx_to_file_hail_frame_end_to_end():
     caller_static = sc.generate_keypair()
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
-    body = sc.HailBody(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
-        center_freq_offset=100,
-        bandwidth_code=0x03,
-        mode=0x01,
-        chip_rate_code=0x32,
         body_nonce=b"\xDE\xAD\xBE\xEF\xCA\xFE\xBA\xBE",
-        flags=0x03,
     )
     frame = sc.encode_hail(caller_eph, responder_static.public_key(), body)
     assert len(frame) == sc.HAIL_FRAME_LEN
@@ -131,12 +127,10 @@ def test_identify_sisl_frame_finds_embedded_frame():
     caller_static = sc.generate_keypair()
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
-    body = sc.HailBody(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
-        center_freq_offset=50, bandwidth_code=0x03, mode=0x01,
-        chip_rate_code=0x32,
+        center_freq_offset=50,
         body_nonce=b"\x11\x22\x33\x44\x55\x66\x77\x88",
-        flags=0x03,
     )
     frame = sc.encode_hail(caller_eph, responder_static.public_key(), body)
 
@@ -381,24 +375,15 @@ def _build_fec_result(responder_static, magnitude: float = 10.0,
     demo hail. Returns a dict with the keys LlrAccumulator
     expects: llrs (length HAIL_FEC_TOTAL_BITS), c_frame, phase_rms,
     asm_errs."""
-    body = sc.HailBody(
-        caller_static_pub=sc.pubkey_to_compressed(
-            sc.generate_keypair().public_key()),
-        center_freq_offset=100,
-        bandwidth_code=0x03,
-        mode=0x01,
-        chip_rate_code=0x32,
-        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-        flags=0x03,
-    )
+    body = make_test_hail_body()
     eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
     # Convert to post-DBPSK basis (the FEC accumulator's try_decrypt
     # consumes LLRs in the FEC code-bit basis, which is what
     # dbpsk_decode_from_pilot produces in production after differentially
     # decoding the body region).
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=magnitude)
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = bits_to_hard_llrs(post_dbpsk_bits, magnitude=magnitude)
     if noise_std > 0:
         rng = np.random.default_rng(seed=seed)
         llrs = llrs + rng.normal(0, noise_std, len(llrs)).astype(np.float32)
@@ -456,20 +441,16 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
     # Pick magnitude/noise so single-copy decrypts (Es/N0 well above
     # the FEC waterfall). Use the same body across both copies to test
     # accumulator combining specifically.
-    body = sc.HailBody(
-        caller_static_pub=sc.pubkey_to_compressed(
-            sc.generate_keypair().public_key()),
+    body = make_test_hail_body(
         center_freq_offset=200,
         bandwidth_code=0x05,
-        mode=0x01,
-        chip_rate_code=0x32,
         body_nonce=b"\xaa\xbb\xcc\xdd\xee\xff\x00\x11",
         flags=0x07,
     )
     eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    clean = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    clean = bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
     rng = np.random.default_rng(seed=7)
     noisy1 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
     noisy2 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)

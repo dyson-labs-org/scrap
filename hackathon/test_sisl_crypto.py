@@ -19,6 +19,7 @@ import hashlib
 
 import sisl_crypto as sc
 import sisl_dsss as sd
+from conftest import bits_to_hard_llrs, encoded_fec_bits_to_post_dbpsk, make_test_hail_body
 
 
 # ── 1. DSSS code generator ──────────────────────────────────────────────────
@@ -98,24 +99,10 @@ def test_elligator_stub_rejects_wrong_length():
 
 # ── 4. Hail round-trip ─────────────────────────────────────────────────────
 
-# A valid fixed secp256k1 pubkey for tests that don't care about identity
-_FIXED_TEST_CALLER_STATIC = sc.generate_keypair()
-_FIXED_TEST_CALLER_STATIC_PUB = sc.pubkey_to_compressed(
-    _FIXED_TEST_CALLER_STATIC.public_key()
-)
-
-
-def _test_body(caller_static_pub: bytes = _FIXED_TEST_CALLER_STATIC_PUB
-               ) -> sc.HailBody:
-    return sc.HailBody(
-        caller_static_pub=caller_static_pub,
-        center_freq_offset=100,
-        bandwidth_code=0x03,
-        mode=0x01,
-        chip_rate_code=0x32,
-        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-        flags=0x03,
-    )
+def _test_body(caller_static_pub: bytes | None = None) -> sc.HailBody:
+    if caller_static_pub is not None:
+        return make_test_hail_body(caller_static_pub=caller_static_pub)
+    return make_test_hail_body()
 
 
 def test_hail_roundtrip():
@@ -209,8 +196,8 @@ def test_hail_fec_round_trip_noiseless():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), body
     )
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=10.0)
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = bits_to_hard_llrs(post_dbpsk_bits, magnitude=10.0)
     decoded = sc.decode_hail_fec_from_llrs(llrs, responder_static)
     assert decoded is not None
     assert decoded.body.center_freq_offset == body.center_freq_offset
@@ -248,8 +235,8 @@ def test_hail_fec_round_trip_with_awgn():
         bits = sc.encode_hail_fec(
             caller_eph, responder_static.public_key(), body
         )
-        post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-        clean_llrs = sc.bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
+        post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+        clean_llrs = bits_to_hard_llrs(post_dbpsk_bits, magnitude=4.0)
         noise = rng.normal(0.0, 1.0, len(clean_llrs)).astype(np.float32)
         noisy_llrs = clean_llrs + noise
         decoded = sc.decode_hail_fec_from_llrs(noisy_llrs, responder_static)
@@ -266,8 +253,8 @@ def test_hail_fec_wrong_receiver_rejected():
     bits = sc.encode_hail_fec(
         caller_eph, target_static.public_key(), _test_body()
     )
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits)
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = bits_to_hard_llrs(post_dbpsk_bits)
     assert sc.decode_hail_fec_from_llrs(llrs, target_static) is not None
     assert sc.decode_hail_fec_from_llrs(llrs, other_static) is None
 
@@ -279,8 +266,8 @@ def test_hail_fec_truncated_input_rejected():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), _test_body()
     )
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    truncated = sc.bits_to_hard_llrs(post_dbpsk_bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    truncated = bits_to_hard_llrs(post_dbpsk_bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
     assert sc.decode_hail_fec_from_llrs(truncated, responder_static) is None
 
 
@@ -295,8 +282,8 @@ def test_hail_fec_corrupted_header_still_decrypts_via_fec():
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), _test_body()
     )
-    post_dbpsk_bits = sc.encoded_fec_bits_to_post_dbpsk(bits)
-    llrs = sc.bits_to_hard_llrs(post_dbpsk_bits)
+    post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
+    llrs = bits_to_hard_llrs(post_dbpsk_bits)
     # Flip the first 32 LLRs (the ASM bits) to opposite polarity.
     llrs[:32] = -llrs[:32]
     # FEC body is clean → Poly1305 passes → decode succeeds
