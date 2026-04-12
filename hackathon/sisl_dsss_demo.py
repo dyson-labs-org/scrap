@@ -893,7 +893,8 @@ def _acquire_and_track(
         return {"status": "short_block"}
 
     samples = (samples - samples.mean()).astype(np.complex64)
-    rad_per_sample = sf.estimate_freq_offset_rad_per_sample(samples)
+    rad_per_sample = sf.estimate_freq_offset_rad_per_sample(
+        samples, iterations=3)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
@@ -904,7 +905,8 @@ def _acquire_and_track(
     peak_mag = float(mag.max())
     median_mag = float(np.median(mag))
 
-    if median_mag == 0.0 or peak_mag < signal_threshold * median_mag:
+    prefilter_threshold = min(signal_threshold, 2.5)
+    if median_mag == 0.0 or peak_mag < prefilter_threshold * median_mag:
         return {
             "status": "no_signal",
             "peak_mag": peak_mag,
@@ -1388,6 +1390,15 @@ def live_rx_decode(
             max_copies=combine_copies,
         )
 
+    # ── Auto-PPM calibration state ──
+    RECAL_INTERVAL = 30.0
+    SETTLED_THRESHOLD_HZ = 1000.0
+    current_center_hz = float(center_hz)
+    total_correction_hz = 0.0
+    settled = False
+    last_recal_t = t_start
+    offset_history: list[float] = []
+
     try:
         while time.time() - t_start < duration_s:
             filled = 0
@@ -1444,13 +1455,39 @@ def live_rx_decode(
             elif s == "no_hail":
                 stats["interference"] += 1
 
-            # D4: LLR chase-combining. Try to fold the current block into
-            # the accumulator and re-attempt decrypt on the sum. This runs
-            # only for clean-fit blocks (accumulator has strict pass_rms).
+            # ── Auto-PPM: retune SDR to drive residual offset → 0 ──
+            foff = result.get("freq_offset_hz")
+            now = time.time()
+            if foff is not None and abs(foff) > 0:
+                offset_history.append(foff)
+                do_retune = False
+                if not settled:
+                    do_retune = len(offset_history) >= 2
+                elif now - last_recal_t >= RECAL_INTERVAL:
+                    do_retune = True
+                if do_retune and offset_history:
+                    correction = float(np.median(offset_history[-4:]))
+                    current_center_hz += correction
+                    total_correction_hz += correction
+                    device.setFrequency(SOAPY_SDR_RX, 0, current_center_hz)
+                    total_ppm = total_correction_hz / center_hz * 1e6
+                    print(f"  AUTO-PPM: retune {correction:+.0f} Hz "
+                          f"(total {total_correction_hz:+.0f} Hz / "
+                          f"{total_ppm:+.1f} ppm, "
+                          f"center {current_center_hz/1e6:.6f} MHz)")
+                    offset_history.clear()
+                    last_recal_t = now
+                    if abs(correction) < SETTLED_THRESHOLD_HZ:
+                        settled = True
+
+            # D4: LLR chase-combining.
             if accumulator is not None:
                 added = accumulator.try_add(result)
                 if added:
                     stats["combined_copies"] += 1
+                    acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
+                    print(f"       +ACC n={accumulator.n_copies}  "
+                          f"L1={acc_l1:.0f}")
                     combined = accumulator.try_decrypt(responder_static)
                     if combined is not None:
                         decoded_hail, label, n_flips = combined
