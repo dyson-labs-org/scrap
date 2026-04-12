@@ -52,9 +52,6 @@ except ImportError:
           file=sys.stderr)
     sys.exit(2)
 
-import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 from sdr_devices import DEVICES as _DEVICES_INFO, diagnose_device_open as _diagnose_device_open
 
 _DEVICES = {

@@ -20,13 +20,10 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 import time
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_fec as fec
 

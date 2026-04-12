@@ -1,0 +1,21 @@
+[project]
+name = "sisl-hackathon"
+version = "0.1.0"
+requires-python = ">=3.13"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "conftest",
+    "demo",
+    "rf_power",
+    "sdr_devices",
+    "sisl_crypto",
+    "sisl_dsss",
+    "sisl_fec",
+    "sisl_framer",
+    "sisl_rx",
+]
