@@ -45,6 +45,7 @@ import hashlib
 import os
 import sys
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -304,11 +305,6 @@ def build_demo_hail() -> bytes:
 
 # ── Pure-numpy helpers (no GR) ──────────────────────────────────────────────
 
-def build_tx_chips(message: bytes) -> np.ndarray:
-    """Produce an int8 ±1 chip stream for `message` using the public code."""
-    return sf.tx_bytes_to_chips(message)
-
-
 def build_demo_hail_fec_chips() -> tuple[np.ndarray, bytes]:
     """Produce a FEC-encoded chip stream for one fresh demo hail.
 
@@ -391,7 +387,7 @@ if _HAVE_GR:
                     # repeat. No body, no crypto, no per-call variation.
                     frame = _ASM_BYTES
                     self.hail_frame = frame
-                    chips = build_tx_chips(frame)
+                    chips = sf.tx_bytes_to_chips(frame)
                 else:
                     # FEC TX path: encode_hail_fec produces a 2096-bit
                     # channel array (48 uncoded header + 2048 FEC body).
@@ -456,7 +452,7 @@ def tx_to_file(message: bytes, path: str,
     integer decimation at RX stays aligned.
     `repeats`: how many copies of the message to concatenate.
     """
-    chips = build_tx_chips(message)
+    chips = sf.tx_bytes_to_chips(message)
     samples = upsample_chips_to_samples(chips)
     if repeats > 1:
         samples = np.tile(samples, repeats)
@@ -553,29 +549,6 @@ def offline_despread(cfile_path: str,
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 
 
-# ── Polarity mask constants ───────────────────────────────────────────────
-#
-# The BPSK demodulator has a 180° phase ambiguity: the decoded frame may
-# be the true bits or any of several XOR transformations thereof. These
-# six masks cover the possible polarities the receiver can land on. Each
-# entry is (label_suffix, even_byte_mask, odd_byte_mask).
-
-_POLARITY_MASKS = [
-    ("",      0x00, 0x00),       # identity
-    ("-inv",  0xFF, 0xFF),       # full inversion
-    ("-alt",  0xAA, 0xAA),       # alternating bits
-    ("-alt2", 0x55, 0x55),       # alternating bits, opposite phase
-    ("-alt-inv",  0x55, 0xAA),   # alternating bytes
-    ("-alt2-inv", 0xAA, 0x55),   # alternating bytes, opposite phase
-]
-
-
-def _apply_polarity(frame_bytes: bytes, even_mask: int, odd_mask: int) -> bytes:
-    """XOR each byte of `frame_bytes` with a per-parity mask."""
-    out = bytearray(len(frame_bytes))
-    for i, x in enumerate(frame_bytes):
-        out[i] = x ^ (even_mask if i % 2 == 0 else odd_mask)
-    return bytes(out)
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
 # bytes_to_bits / rx_chips_to_bytes conventions.
 _ASM_BITS = np.unpackbits(
@@ -1512,11 +1485,10 @@ def offline_decode_hail(
         "fec_polarity": decode_result.get("polarity"),
     }
     if decode_result.get("status") == "decrypt_ok":
-        out["decoded_hail"] = type("X", (), {
-            "body": decode_result["body"],
-            "caller_eph_pub_canonical":
-                decode_result["caller_eph_pub_canonical"],
-        })()
+        out["decoded_hail"] = SimpleNamespace(
+            body=decode_result["body"],
+            caller_eph_pub_canonical=decode_result["caller_eph_pub_canonical"],
+        )
         out["decrypted"] = True
     return out
 

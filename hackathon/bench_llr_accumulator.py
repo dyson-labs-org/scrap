@@ -17,7 +17,7 @@ level signal threshold in `_decode_one_hail_in_block`. Those stages
 have their own (separate) failure modes at low SNR that hide the
 accumulator's behavior. The test isolates the accumulator by:
 
-  1. TX: build_demo_hail → build_tx_chips → upsample_chips_to_samples
+  1. TX: build_demo_hail → tx_bytes_to_chips → upsample_chips_to_samples
   2. AWGN noise at the sample level at known symbol SNR
   3. Run the real matched filter (sisl_framer.matched_filter_complex_sample_rate)
   4. Extract peak_values at deterministic symbol boundaries (we know
@@ -416,7 +416,7 @@ def _run_sweep(snr_db: float, trials: int, max_n: int,
                seed: int) -> dict:
     responder_static = dd.demo_responder_key()
     frame = dd.build_demo_hail()
-    chips = dd.build_tx_chips(frame)
+    chips = sf.tx_bytes_to_chips(frame)
     tx_samples = dd.upsample_chips_to_samples(chips, SAMPS_PER_CHIP)
 
     master = np.random.default_rng(seed)
