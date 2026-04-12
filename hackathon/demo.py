@@ -851,7 +851,7 @@ def main() -> int:
                              "per-block decode compute. Set to 1 to match "
                              "old behavior, or 10 for very low SNR / "
                              "noisy environments.")
-    parser.add_argument("--combine", type=int, default=0,
+    parser.add_argument("--combine", type=int, default=20,
                         help="rx: multi-copy LLR chase combining. When N>0, "
                              "accumulate per-bit soft values from up to N "
                              "consecutive clean-fit blocks (phase_rms ≤ 0.3) "

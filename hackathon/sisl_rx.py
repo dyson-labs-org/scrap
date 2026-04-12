@@ -258,6 +258,15 @@ def _acquire_and_track(
         return {"status": "short_block"}
 
     samples = (samples - samples.mean()).astype(np.complex64)
+    # Two-stage frequency estimation:
+    # 1. R[1] coarse (± tens of kHz — often wrong at low wideband SNR,
+    #    but centers the FFT search window)
+    # 2. FFT-squared with sub-bin parabolic interpolation (~0.1 Hz).
+    #    Squaring removes BPSK/code modulation, exposing a spectral
+    #    line at 2× carrier offset. Works at any wideband SNR where
+    #    the signal is detectable in the MF output.
+    # NOTE: R[1] polish after FFT is NOT used — at -17 dB per-sample
+    # SNR, R[1] gives garbage even after the signal is centered.
     coarse_rad = sf.estimate_freq_offset_rad_per_sample(samples, iterations=3)
     rad_per_sample = sf._estimate_freq_fft_squared(samples, coarse_rad)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)

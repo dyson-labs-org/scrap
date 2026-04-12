@@ -239,11 +239,26 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     # The spectral line is at 2*residual_freq (after coarse correction).
     # Search the full spectrum for the peak.
     peak_bin = int(np.argmax(mag))
+
+    # Parabolic interpolation for sub-bin accuracy. Fits a parabola
+    # through the peak and its two neighbours to find the fractional
+    # bin offset. Improves frequency resolution from fs/nfft (~2 Hz)
+    # to ~0.1 Hz, which matters for long symbols (1023 chips).
+    left = (peak_bin - 1) % nfft
+    right = (peak_bin + 1) % nfft
+    y0, y1, y2 = float(mag[left]), float(mag[peak_bin]), float(mag[right])
+    denom = y0 - 2 * y1 + y2
+    if abs(denom) > 1e-12:
+        frac = 0.5 * (y0 - y2) / denom  # in [-0.5, +0.5]
+    else:
+        frac = 0.0
+    refined_bin = peak_bin + frac
+
     # Convert bin to frequency
-    if peak_bin > nfft // 2:
-        peak_bin -= nfft
+    if refined_bin > nfft / 2:
+        refined_bin -= nfft
     freq_per_bin = 2 * np.pi / nfft  # rad/sample per bin
-    delta_2x = peak_bin * freq_per_bin
+    delta_2x = refined_bin * freq_per_bin
     # The squared signal has frequency 2*offset, so divide by 2
     fine_rad = delta_2x / 2.0
 
