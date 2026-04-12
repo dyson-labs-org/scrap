@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 
+import numpy as np
 import sisl_crypto as sc
 import sisl_dsss as sd
 from conftest import bits_to_hard_llrs, encoded_fec_bits_to_post_dbpsk, make_test_hail_body
@@ -34,22 +35,22 @@ def test_dsss_hail_code_matches_spec_vector():
     seed = sd.hail_code_seed()
     code = sd.generate_dsss_code(seed, length=1023)
     assert len(code) == 1023
-    assert all(c in (1, -1) for c in code)
+    assert np.all((code == 1) | (code == -1))
     # Regenerate must match (deterministic)
     code2 = sd.generate_dsss_code(seed, length=1023)
-    assert code == code2
+    assert np.array_equal(code, code2)
 
 
 def test_dsss_different_seeds_give_different_codes():
     code_a = sd.generate_dsss_code(hashlib.sha256(b"seedA").digest())
     code_b = sd.generate_dsss_code(hashlib.sha256(b"seedB").digest())
-    assert code_a != code_b
+    assert not np.array_equal(code_a, code_b)
 
 
 def test_fhss_sequence_in_range():
     seq = sd.generate_fhss_sequence(b"\x00" * 32, num_channels=16, num_hops=100)
     assert len(seq) == 100
-    assert all(0 <= x < 16 for x in seq)
+    assert np.all((seq >= 0) & (seq < 16))
 
 
 # ── 2. HKDF key / IV derivation ─────────────────────────────────────────────

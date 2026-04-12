@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 
+import numpy as np
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
 
@@ -34,24 +35,25 @@ def _chacha20_stream(seed: bytes, nonce_input: bytes, n_bytes: int) -> bytes:
     return enc.update(b"\x00" * n_bytes)
 
 
-def generate_dsss_code(seed: bytes, length: int = DEFAULT_CODE_LENGTH) -> list[int]:
-    """Generate a bipolar ±1 DSSS spreading code of `length` chips."""
+def generate_dsss_code(seed: bytes, length: int = DEFAULT_CODE_LENGTH) -> np.ndarray:
+    """Generate a bipolar ±1 DSSS spreading code of `length` chips.
+
+    Returns an int8 ndarray of shape ``(length,)``.
+    """
     n_bytes = (length + 7) // 8
     random_bytes = _chacha20_stream(seed, DSSS_NONCE_INPUT, n_bytes)
-    code = []
-    for i in range(length):
-        bit = (random_bytes[i // 8] >> (i % 8)) & 1
-        code.append(1 if bit else -1)
-    return code
+    bits = np.unpackbits(np.frombuffer(random_bytes, dtype=np.uint8),
+                         bitorder="little")[:length]
+    return (bits.astype(np.int8) * 2 - 1)
 
 
 def generate_fhss_sequence(seed: bytes, num_channels: int,
-                           num_hops: int) -> list[int]:
-    """Generate a frequency-hopping sequence of `num_hops` channel indices."""
+                           num_hops: int) -> np.ndarray:
+    """Generate a frequency-hopping sequence of `num_hops` channel indices.
+
+    Returns an int32 ndarray of shape ``(num_hops,)``.
+    """
     n_bytes = num_hops * 2
     random_bytes = _chacha20_stream(seed, FHSS_NONCE_INPUT, n_bytes)
-    sequence = []
-    for i in range(num_hops):
-        val = int.from_bytes(random_bytes[i * 2:(i + 1) * 2], "big")
-        sequence.append(val % num_channels)
-    return sequence
+    vals = np.frombuffer(random_bytes, dtype=">u2")
+    return (vals % num_channels).astype(np.int32)
