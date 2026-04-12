@@ -1,7 +1,7 @@
-"""SISL DSSS / FHSS code generation — unchanged between v2 and v3.
+"""SISL DSSS spreading code generation.
 
-Ported from spec/SISL.md §4.5 and §21.6. Uses ChaCha20 as a cryptographically
-secure PRNG with domain-separated nonces for DSSS and FHSS.
+Uses ChaCha20 as a cryptographically secure PRNG with a domain-separated
+nonce. Ported from spec/SISL.md §4.5 and §21.6.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
 
 DSSS_NONCE_INPUT = b"SISL-dsss-nonce"
-FHSS_NONCE_INPUT = b"SISL-fhss-nonce"
 
 HAIL_CODE_SEED_INPUT = b"SISL-public-hailing-code-v3"
 
@@ -47,13 +46,3 @@ def generate_dsss_code(seed: bytes, length: int = DEFAULT_CODE_LENGTH) -> np.nda
     return (bits.astype(np.int8) * 2 - 1)
 
 
-def generate_fhss_sequence(seed: bytes, num_channels: int,
-                           num_hops: int) -> np.ndarray:
-    """Generate a frequency-hopping sequence of `num_hops` channel indices.
-
-    Returns an int32 ndarray of shape ``(num_hops,)``.
-    """
-    n_bytes = num_hops * 2
-    random_bytes = _chacha20_stream(seed, FHSS_NONCE_INPUT, n_bytes)
-    vals = np.frombuffer(random_bytes, dtype=">u2")
-    return (vals % num_channels).astype(np.int32)

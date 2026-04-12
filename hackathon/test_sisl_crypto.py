@@ -47,12 +47,6 @@ def test_dsss_different_seeds_give_different_codes():
     assert not np.array_equal(code_a, code_b)
 
 
-def test_fhss_sequence_in_range():
-    seq = sd.generate_fhss_sequence(b"\x00" * 32, num_channels=16, num_hops=100)
-    assert len(seq) == 100
-    assert np.all((seq >= 0) & (seq < 16))
-
-
 # ── 2. HKDF key / IV derivation ─────────────────────────────────────────────
 
 def test_hail_key_iv_symmetric():
