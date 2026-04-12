@@ -1371,8 +1371,8 @@ def main() -> int:
                 )
 
             ack_stats = live_rx_decode(
-                duration_s=RX_DURATION,
-                block_seconds=RX_DURATION,
+                duration_s=RX_DURATION + 10,  # extra margin for block fill
+                block_seconds=3.0,  # short blocks for ACK (1.52s frame)
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
                 amp_on=args.rx_amp,
