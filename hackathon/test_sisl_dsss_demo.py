@@ -1,9 +1,6 @@
-"""Round-trip tests for sisl_dsss_demo.py (pure-numpy, no HackRF).
+"""Tests for sisl_dsss_demo.py (pure-numpy, no HackRF).
 
-Validates that tx_to_file → offline_despread recovers the original bytes
-at several prefix sizes, exercising the find_frame_start acquisition path.
-
-Run: python hackathon/test_sisl_dsss_demo.py
+Run: python -m pytest hackathon/test_sisl_dsss_demo.py
 """
 
 from __future__ import annotations

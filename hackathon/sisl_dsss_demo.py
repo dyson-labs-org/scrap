@@ -469,83 +469,6 @@ def tx_to_file(message: bytes, path: str,
     return out.size
 
 
-# ── Offline despread utility ────────────────────────────────────────────────
-
-def _decimate_to_chips(samples: np.ndarray,
-                       samps_per_chip: int = SAMPS_PER_CHIP) -> np.ndarray:
-    """Mean-of-window decimation: samples → chip-rate float32.
-
-    Averages each contiguous block of `samps_per_chip` samples. Preserves
-    amplitude information needed by matched-filter acquisition — unlike
-    the previous `np.sign` approach which discarded magnitude entirely.
-
-    Only the real (I) component is used; the demo TX is BPSK with zero Q.
-    """
-    i = np.asarray(samples, dtype=np.complex64).real.astype(np.float32)
-    n_full = (len(i) // samps_per_chip) * samps_per_chip
-    if n_full == 0:
-        return np.zeros(0, dtype=np.float32)
-    return i[:n_full].reshape(-1, samps_per_chip).mean(axis=1)
-
-
-def offline_despread(cfile_path: str,
-                     samps_per_chip: int = SAMPS_PER_CHIP,
-                     max_search_chips: Optional[int] = None,
-                     max_bytes: Optional[int] = None
-                     ) -> tuple[bytes, Optional[int]]:
-    """Read a complex64 capture, find frame start, despread all bytes.
-
-    Returns `(recovered_bytes, frame_offset_chips)`:
-        recovered_bytes   — every byte the despreader could recover from
-                            the located acquisition point to end of stream
-                            (or `max_bytes` if specified)
-        frame_offset_chips — chip offset where the matched filter locked,
-                            or None if no peak was above threshold (in
-                            which case decoding falls back to chip 0 and
-                            will likely return noise)
-
-    The length is determined by the capture, not by any expected message.
-    Callers inspect the returned bytes to find their payload: Phase 1 raw
-    text can be located via substring search, Phase 2 SISL frames via ASM
-    (0x1ACFFC1D) + version + msg_type parsing.
-
-    `max_search_chips`: bound the acquisition search window. None scans
-    the full capture.
-    `max_bytes`: optional upper bound on how many bytes to decode (useful
-    for very large captures where you only care about the first frame).
-    """
-    raw = np.fromfile(cfile_path, dtype=np.complex64)
-    chip_stream = _decimate_to_chips(raw, samps_per_chip=samps_per_chip)
-
-    if len(chip_stream) < sf.CHIPS_PER_SYMBOL:
-        have_samples = len(raw)
-        have_ms = have_samples / SAMP_RATE_HZ * 1000
-        raise ValueError(
-            f"capture has no decodable content:\n"
-            f"  file:     {cfile_path}\n"
-            f"  have:     {have_samples} samples "
-            f"({len(chip_stream)} chips, {have_ms:.1f} ms)\n"
-            f"  minimum:  {sf.CHIPS_PER_SYMBOL} chips (one bit)\n"
-            f"Re-capture with a longer --duration or verify RX was "
-            f"actually receiving signal."
-        )
-
-    offset = sf.find_frame_start(chip_stream, max_search=max_search_chips)
-    start = offset if offset is not None else 0
-    avail_chips = len(chip_stream) - start
-    n_bytes = avail_chips // (8 * sf.CHIPS_PER_SYMBOL)
-    if max_bytes is not None:
-        n_bytes = min(n_bytes, max_bytes)
-    if n_bytes == 0:
-        return b"", offset
-
-    needed = n_bytes * 8 * sf.CHIPS_PER_SYMBOL
-    recovered = sf.rx_chips_to_bytes(chip_stream[start:start + needed], n_bytes)
-    return recovered, offset
-
-
-# ── SISL frame auto-detection ──────────────────────────────────────────────
-
 _ASM_BYTES = b"\x1A\xCF\xFC\x1D"
 
 
@@ -856,13 +779,15 @@ def _acquire_and_track(
             "note": "spurious spike, no periodic structure",
         }
 
-    # Tracking decode — need 2× FEC frame for search margin
+    # Tracking decode — pass the precomputed MF output so the tracker
+    # doesn't re-run it (saves ~1s per block on 12M-sample inputs).
     target_bytes = (2 * sc.HAIL_FEC_TOTAL_BITS + 7) // 8
     track_result = sf.decode_with_freq_tracking(
         samples,
         samps_per_chip=samps_per_chip,
         n_bytes=target_bytes,
         freq_offset_rad_per_sample=rad_per_sample,
+        precomputed_corr=corr_c,
     )
     if track_result is None:
         fallback_bytes = (sc.HAIL_FEC_TOTAL_BITS + 7) // 8
@@ -871,6 +796,7 @@ def _acquire_and_track(
             samps_per_chip=samps_per_chip,
             n_bytes=fallback_bytes,
             freq_offset_rad_per_sample=rad_per_sample,
+            precomputed_corr=corr_c,
         )
         if track_result is None:
             return {
@@ -1045,11 +971,6 @@ def _decode_one_hail_in_block(
 # ── Live event formatting (presentation, not decode logic) ────────────────
 
 def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
-    """Print one line describing a block's processing result.
-
-    `quiet=True` suppresses the "no signal" and "interference" output so
-    the operator only sees genuine SISL events (decrypt ok / fail).
-    """
     s = result["status"]
     foff = result.get("freq_offset_hz", 0.0)
     if s == "decrypt_ok":
@@ -1069,48 +990,6 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"Δf={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
               f"— DECRYPT FAILED (not addressed to this key)")
-    elif s == "frame_fuzzy":
-        d = result.get("asm_distance", -1)
-        print(f"[{block_num:4d}] FRAME FUZZY  "
-              f"asm@{result['asm_at_byte']}  "
-              f"ASM hamming={d}/32  "
-              f"peak={result['peak_mag']:.3g}  "
-              f"Δf={foff:+.0f}Hz  pol={result.get('polarity', '?')}  "
-              f"— frame detected with {d} bit errors, "
-              f"too noisy to decrypt")
-        print(f"       first 16 bytes: {result.get('first_16_bytes_hex','')}")
-    elif s == "frame_soft":
-        ss = result.get("soft_score", 0.0)
-        drift = result.get("drift_per_symbol_rad", 0.0)
-        drift_deg = drift * 180.0 / 3.14159265
-        rms = result.get("phase_rms_residual_rad")
-        rms_str = f"{rms:.2f}" if rms is not None else "n/a"
-        # Quality hint: <0.3 → clean lock, 0.3-0.9 → marginal, >0.9 → noise
-        if rms is None:
-            qual = ""
-        elif rms < 0.3:
-            qual = " CLEAN"
-        elif rms < 0.9:
-            qual = " MARGINAL"
-        else:
-            qual = " NOISE"
-        print(f"[{block_num:4d}] FRAME SOFT-DETECTED  "
-              f"asm@bit{result['asm_at_bit']}  "
-              f"soft={ss:+.1f}/31  "
-              f"peak={result['peak_mag']:.3g}  "
-              f"Δf={foff:+.0f}Hz  "
-              f"drift={drift_deg:+.1f}°/sym  "
-              f"pol={result.get('polarity', '?')}  "
-              f"phase_rms={rms_str} rad{qual}  "
-              f"— SISL frame detected via soft correlator, body bit "
-              f"errors prevent Poly1305 verification")
-        print(f"       diff 16 bytes: {result.get('first_16_bytes_hex', '')}")
-        coh = result.get("coherent_16_bytes_hex")
-        asm_errs = result.get("asm_errs_in_coherent")
-        if coh is not None:
-            err_str = (f"(ASM errs in coherent first 32 bits: {asm_errs}/32)"
-                       if asm_errs is not None else "")
-            print(f"       coh  16 bytes: {coh}  {err_str}")
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
@@ -1118,54 +997,8 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         print(f"[{block_num:4d}] TRACK LOST: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
               f"Δf={foff:+.0f}Hz")
-    elif s == "noise_lock" and not quiet:
-        # Suppress in quiet mode: these are spurious soft-correlator
-        # triggers on interference (phase_rms > 0.9 AND asm_errs > 4).
-        # In verbose mode, show a short one-liner so operators can see
-        # the rejection activity but not confuse it with frame events.
-        ss = result.get("soft_score", 0.0)
-        rms = result.get("phase_rms_residual_rad")
-        rms_str = f"{rms:.2f}" if rms is not None else "n/a"
-        asm_errs = result.get("asm_errs_in_coherent")
-        errs_str = f"{asm_errs}/32" if asm_errs is not None else "n/a"
-        print(f"[{block_num:4d}] noise-lock  "
-              f"soft={ss:+.1f}/31  "
-              f"phase_rms={rms_str}  asm_errs={errs_str}  "
-              f"Δf={foff:+.0f}Hz  (rejected)")
     elif quiet:
         return
-    elif s == "no_hail":
-        p = result.get("peak_mag", 0)
-        m = result.get("median_mag", 0)
-        r = p / m if m > 0 else float("inf")
-        drift = result.get("drift_per_symbol_rad", 0.0)
-        drift_deg = drift * 180.0 / 3.14159265
-        hn = result.get("min_asm_hamming_normal")
-        hi = result.get("min_asm_hamming_inverted")
-        best_h = None
-        if hn is not None and hi is not None:
-            best_h = min(hn, hi)
-        elif hn is not None:
-            best_h = hn
-        elif hi is not None:
-            best_h = hi
-        best_str = f", best ASM hamming={best_h}/32" if best_h is not None else ""
-        ss = result.get("soft_score")
-        soft_str = f", soft={ss:+.1f}/31" if ss is not None else ""
-        print(f"[{block_num:4d}] interference: "
-              f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"Δf={foff:+.0f}Hz, drift={drift_deg:+.1f}°/sym{best_str}{soft_str}")
-        print(f"       first 16 bytes (normal):   "
-              f"{result.get('first_16_bytes_hex', '')}")
-        print(f"       first 16 bytes (inverted): "
-              f"{result.get('first_16_inv_hex', '')}")
-        mags = result.get('first_peak_magnitudes', [])
-        angs = result.get('first_peak_angles_rad', [])
-        if mags and angs:
-            mag_str = " ".join(f"{m_i:.0f}" for m_i in mags[:8])
-            ang_str = " ".join(f"{a_i*180/3.14159:+4.0f}" for a_i in angs[:8])
-            print(f"       first 8 peak |c|:   {mag_str}")
-            print(f"       first 8 peak ∠c:    {ang_str} (degrees)")
     elif s == "no_signal":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
@@ -1209,7 +1042,7 @@ def live_rx_decode(
     `center_hz` against the selected device's range before opening it.
 
     Returns a stats dict: blocks_processed, hails_detected, hails_decrypted,
-    interference, overflows, elapsed_s, ok, error.
+    overflows, elapsed_s, ok, error.
     """
     try:
         import SoapySDR
@@ -1292,9 +1125,6 @@ def live_rx_decode(
         "blocks_processed": 0,
         "hails_detected": 0,     # frame header parsed (decrypt ok OR fail)
         "hails_decrypted": 0,    # decrypt_ok only
-        "frames_soft": 0,        # soft correlator detected frame (|score|>10)
-        "frames_fuzzy": 0,       # ASM found with 1-3 bit errors
-        "interference": 0,       # signal crossed threshold but no SISL ASM
         "overflows": 0,
         "combined_copies": 0,    # copies fed into LLR accumulator
         "combined_decrypts": 0,  # decrypts from the accumulator
@@ -1347,14 +1177,15 @@ def live_rx_decode(
     import threading
     import queue as _queue
 
-    _devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    _saved_stdout_fd = os.dup(1)
     block_queue: _queue.Queue[Optional[np.ndarray]] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
     overflow_count_at_last_check = 0
 
     def _reader_thread():
-        os.dup2(_devnull_fd, 1)  # suppress "O" in this thread
+        # NOTE: we do NOT redirect stdout here — os.dup2 affects the
+        # whole process (threads share file descriptors). The bare "O"
+        # from SoapySDR is an acceptable cosmetic issue; silencing it
+        # would silence ALL output including the main thread's prints.
         local_buf = np.empty(block_samples, dtype=np.complex64)
         while not reader_stop.is_set():
             filled = 0
@@ -1397,6 +1228,14 @@ def live_rx_decode(
 
             stats["blocks_processed"] += 1
 
+            # Report any overflows that occurred during this block
+            current_overflows = stats["overflows"]
+            if current_overflows > overflow_count_at_last_check:
+                n_new = current_overflows - overflow_count_at_last_check
+                overflow_count_at_last_check = current_overflows
+                print(f"  [{n_new} overflow(s) during block, "
+                      f"total {current_overflows}]")
+
             if save_file is not None:
                 block_data.tofile(save_file)
 
@@ -1415,14 +1254,6 @@ def live_rx_decode(
                 stats["hails_decrypted"] += 1
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
-            elif s == "frame_soft":
-                stats["frames_soft"] = stats.get("frames_soft", 0) + 1
-            elif s == "frame_fuzzy":
-                stats["frames_fuzzy"] += 1
-            elif s == "noise_lock":
-                stats["noise_locks"] = stats.get("noise_locks", 0) + 1
-            elif s == "no_hail":
-                stats["interference"] += 1
 
             # ── Auto-PPM: retune SDR to drive residual offset → 0 ──
             foff = result.get("freq_offset_hz")
@@ -1502,9 +1333,6 @@ def live_rx_decode(
         device.closeStream(stream)
         if save_file is not None:
             save_file.close()
-        os.dup2(_saved_stdout_fd, 1)
-        os.close(_saved_stdout_fd)
-        os.close(_devnull_fd)
 
     stats["elapsed_s"] = time.time() - t_start
     return stats
@@ -1545,53 +1373,6 @@ def offline_decode_hail(
         )
         out["decrypted"] = True
     return out
-
-
-def identify_sisl_frame(data: bytes) -> Optional[dict]:
-    """Scan `data` for a SISL v3 frame header and report what was found.
-
-    Returns a dict describing the frame, or None if no ASM+version+type
-    combination matches. Does NOT attempt decryption — that's the caller's
-    job (via sisl_crypto.decode_hail / decode_ack).
-    """
-    idx = data.find(_ASM_BYTES)
-    if idx < 0 or idx + 6 > len(data):
-        return None
-    version = data[idx + 4]
-    msg_type = data[idx + 5]
-    if version != 0x03:
-        return {
-            "asm_offset": idx,
-            "version": version,
-            "msg_type": msg_type,
-            "frame_type": "unknown-version",
-            "frame_bytes": None,
-        }
-    if msg_type == 0x01:                          # hail
-        end = idx + sc.HAIL_FRAME_LEN
-        return {
-            "asm_offset": idx,
-            "version": version,
-            "msg_type": msg_type,
-            "frame_type": "hail",
-            "frame_bytes": data[idx:end] if end <= len(data) else None,
-        }
-    if msg_type == 0x02:                          # ack
-        end = idx + sc.ACK_FRAME_LEN
-        return {
-            "asm_offset": idx,
-            "version": version,
-            "msg_type": msg_type,
-            "frame_type": "ack",
-            "frame_bytes": data[idx:end] if end <= len(data) else None,
-        }
-    return {
-        "asm_offset": idx,
-        "version": version,
-        "msg_type": msg_type,
-        "frame_type": f"unknown-msg-type-0x{msg_type:02x}",
-        "frame_bytes": None,
-    }
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
