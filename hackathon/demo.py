@@ -1324,6 +1324,7 @@ def main() -> int:
         # RX must be ≥ 1 ACK frame (1.52s) + device overhead + FFT time.
         # 4s gives ~2.5 complete ACK frames for reliable decode.
         # gcd(9, T_respond) = 1 for most T_respond values.
+        INITIAL_TX_DURATION = 30.0  # continuous TX before alternating
         TX_DURATION = 5.0
         RX_DURATION = 12.0  # 5s block + AGC warmup + reader startup
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
@@ -1335,7 +1336,9 @@ def main() -> int:
 
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
-        print(f"  duty cycle:    TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
+        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s "
+              f"(continuous, no RX)")
+        print(f"  phase 2:       TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
               f"(period {TX_DURATION+RX_DURATION:.0f}s)")
         print(f"  max rounds:    {MAX_ROUNDS}")
 
@@ -1350,6 +1353,28 @@ def main() -> int:
                 samps_per_chip=active_samps_per_chip,
                 samp_hz=chip_rate_hz * 2,
             )
+
+        # Phase 1: TX hail continuously for INITIAL_TX_DURATION seconds.
+        # This gives the responder enough uninterrupted signal to converge
+        # AGC and decrypt the hail. Without this, the 5s TX / 12s RX
+        # duty cycle only provides signal 29% of the time, delaying the
+        # responder's AGC convergence to ~74 seconds.
+        initial_repeats = max(1, int(
+            INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
+        print(f"\n  phase 1: \033[33mTX hail\033[0m "
+              f"({initial_repeats} repeats, "
+              f"{INITIAL_TX_DURATION:.0f}s continuous)...",
+              end="", flush=True)
+        soapy_tx_burst(
+            hail_samples, center_hz,
+            samp_hz=SAMP_RATE_HZ,
+            tx_vga_db=args.tx_vga,
+            tx_amp_on=args.tx_amp,
+            repeats=initial_repeats,
+            device_str=tx_device_str,
+        )
+        print(" done")
+        print(f"  phase 2: alternating TX/RX")
 
         for round_num in range(1, MAX_ROUNDS + 1):
             # TX phase
