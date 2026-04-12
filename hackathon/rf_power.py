@@ -52,18 +52,7 @@ except ImportError:
           file=sys.stderr)
     sys.exit(2)
 
-from sdr_devices import DEVICES as _DEVICES_INFO, diagnose_device_open as _diagnose_device_open
-
-_DEVICES = {
-    name: {
-        "driver": info.driver,
-        "default_rate_msps": info.samp_hz / 1e6,
-        "freq_min_mhz": info.freq_min_hz / 1e6,
-        "freq_max_mhz": info.freq_max_hz / 1e6,
-        "gain_stages": info.gain_stages,
-    }
-    for name, info in _DEVICES_INFO.items()
-}
+from sdr_devices import DEVICES, format_device_open_error
 
 
 def watch(
@@ -77,23 +66,22 @@ def watch(
     period_s: float,
     device_name: str = "hackrf",
 ) -> int:
-    if device_name not in _DEVICES:
+    if device_name not in DEVICES:
         print(f"unknown device {device_name!r}", file=sys.stderr)
         return 2
-    info = _DEVICES[device_name]
-    if (center_hz / 1e6 < info["freq_min_mhz"]
-            or center_hz / 1e6 > info["freq_max_mhz"]):
+    info = DEVICES[device_name]
+    if (center_hz < info.freq_min_hz or center_hz > info.freq_max_hz):
         print(
             f"{device_name} cannot tune to {center_hz/1e6:.1f} MHz; "
-            f"range {info['freq_min_mhz']}..{info['freq_max_mhz']} MHz",
+            f"range {info.freq_min_hz/1e6:.0f}..{info.freq_max_hz/1e6:.0f} MHz",
             file=sys.stderr,
         )
         return 2
 
     try:
-        dev = SoapySDR.Device(info["driver"])
+        dev = SoapySDR.Device(info.driver)
     except RuntimeError as e:
-        _diagnose_device_open(device_name, info["driver"], e)
+        print(format_device_open_error(SoapySDR, info, e), file=sys.stderr)
         return 3
     dev.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     dev.setFrequency(SOAPY_SDR_RX, 0, center_hz)
@@ -211,7 +199,7 @@ def main() -> int:
                    help="samples per measurement (default 262144)")
     p.add_argument("--period", type=float, default=0.5,
                    help="seconds between measurements (default 0.5)")
-    p.add_argument("--device", choices=list(_DEVICES.keys()),
+    p.add_argument("--device", choices=list(DEVICES.keys()),
                    default="hackrf",
                    help="which SDR to use: 'hackrf' (1 MHz – 6 GHz, "
                         "3 gain stages) or 'rtlsdr' (NESDR / generic "
@@ -223,7 +211,7 @@ def main() -> int:
     # Default sample rate depends on device
     rate = args.rate
     if rate is None:
-        rate = _DEVICES[args.device]["default_rate_msps"]
+        rate = DEVICES[args.device].samp_hz / 1e6
 
     return watch(
         duration_s=args.duration,
