@@ -178,7 +178,7 @@ def rx_chips_to_bits(chips: np.ndarray, n_bits: int,
     return (corr < 0).astype(np.uint8)
 
 
-# ── Sliding-correlator acquisition (Phase 2/3, optional) ────────────────────
+# ── Sliding-correlator acquisition ─────────────────────────────────────────
 
 def _remove_dc(samples: np.ndarray) -> np.ndarray:
     """Subtract block-mean DC from a complex sample stream."""
@@ -341,14 +341,7 @@ def matched_filter_complex_sample_rate(
     samps_per_chip: int,
     code: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Complex sample-rate matched filter.
-
-    Returns a COMPLEX correlator output. |corr| at a symbol boundary is
-    the symbol energy; angle(corr) is the (residual) carrier phase at
-    that symbol. Use this when the input may have a non-trivial carrier
-    phase offset — taking only `.real` (as in the simpler helpers above)
-    loses up to half the signal energy when the phase is near π/2.
-    """
+    """Complex sample-rate matched filter; preserves carrier phase information."""
     if code is None:
         code = DEFAULT_PUBLIC_CODE
     code_upsampled = np.repeat(
@@ -420,25 +413,9 @@ def decode_with_freq_tracking(
     hi = min(len(mag), first_candidate + search_half_samples + 1)
     local_idx = int(np.argmax(mag[lo:hi]))
     pos = lo + local_idx
-    # Bootstrap a conservative initial lock floor from the single
-    # argmax peak. This is biased HIGH (argmax always wins the tail
-    # of the peak distribution), so for long codewords we soften it
-    # further; after BOOTSTRAP successful peaks we re-anchor on the
-    # running median of the first block of peaks, which is outlier-
-    # resistant and reflects the actual per-symbol energy.
     initial_peak = float(mag[pos])
-    # Lock floor anchored to the GLOBAL noise floor (median of |MF|),
-    # not just a fixed fraction of one possibly-lucky peak. The pure
-    # `lock_threshold_frac * initial_peak` form fails on long codewords
-    # because (a) the initial peak can be a noise-driven argmax, in
-    # which case subsequent real peaks fall below the floor, and
-    # (b) a single per-symbol noise dip can push local_peak under the
-    # floor, aborting the entire tracker. Two combined gates here:
-    #   1. peak must be >= 2× median(|MF|) — i.e. clearly above the
-    #      noise floor, regardless of how the initial peak was chosen
-    #   2. peak must be >= lock_threshold_frac * initial_peak softened
-    #      by sqrt(n_bits / 256), so longer codewords get a more
-    #      permissive threshold (more chances to hit a noise dip)
+    # Lock floor: max(2× median noise, softened fraction of initial peak).
+    # Re-anchored on median of first BOOTSTRAP peaks below.
     median_mag = float(np.median(mag))
     length_softening = max(1.0, float(np.sqrt(n_bits / 256.0)))
     lock_floor = max(
@@ -448,23 +425,12 @@ def decode_with_freq_tracking(
 
     ref_angle = float(np.angle(corr_c[pos]))
 
-    # ── 4. Per-symbol tracking loop with sub-sample peak refinement ───
-    # At 2 samples/chip the MF mainlobe is only 2-3 samples wide, so a
-    # bare argmax can lock on the wrong sample and put us on the sinc
-    # sidelobe (wrong phase). Refine each peak via parabolic
-    # interpolation of the magnitude and take a linearly interpolated
-    # correlator value at the refined sample index.
+    # ── 4. Per-symbol tracking loop with parabolic peak refinement ────
     peak_values: list[complex] = []
     positions: list[int] = []
 
     def _refine_peak(lo: int, hi: int) -> tuple[float | None, complex | None]:
-        """Parabolic peak interpolation.
-
-        Fits y(x) = a·(x-x0)² + b·x + c to the three magnitudes around
-        the argmax. Returns (refined_pos, refined_complex_value). The
-        complex value is linearly interpolated between the two bracket
-        samples at the refined position.
-        """
+        """Parabolic interpolation around argmax; returns (pos, complex_value)."""
         if hi - lo < 3:
             idx = int(np.argmax(mag[lo:hi]))
             actual = lo + idx
@@ -495,13 +461,6 @@ def decode_with_freq_tracking(
         return float(refined), complex(c_refined)
 
     BOOTSTRAP = 8
-    # Maximum CONSECUTIVE peaks below lock_floor before aborting. The
-    # original logic aborted on the first dip, which is too brittle for
-    # long codewords (FEC mode walks 4× HAIL_FEC_TOTAL_BITS ≈ 8000+
-    # symbols and even at high SNR there are isolated dips below the
-    # 2×median floor). Allow up to ~3% of the walk in consecutive
-    # misses; abort if a sustained run of misses suggests the tracker
-    # really has fallen off the signal.
     max_consecutive_misses = max(8, n_bits // 32)
     consecutive_misses = 0
     for bit_idx in range(n_bits):
@@ -517,10 +476,7 @@ def decode_with_freq_tracking(
             consecutive_misses += 1
             if consecutive_misses > max_consecutive_misses:
                 return None
-            # Use the refined peak anyway — downstream consumers (FEC
-            # decoder, soft correlator) will handle the noisy sample
-            # statistically. Step the position forward by the nominal
-            # symbol period rather than the noise-driven refined_pos.
+            # Keep noisy sample; step by nominal symbol period.
             peak_values.append(refined_c)
             positions.append(int(round(refined_pos)))
             pos = pos + samples_per_symbol
@@ -531,13 +487,7 @@ def decode_with_freq_tracking(
         positions.append(int(round(refined_pos)))
         pos = refined_pos + samples_per_symbol
 
-        # After BOOTSTRAP successful peaks, re-anchor the lock floor on
-        # the median of the first BOOTSTRAP peak magnitudes. The median
-        # is outlier-resistant and gives a much better estimate of the
-        # typical per-symbol energy than the argmax-biased initial_peak.
-        # This is the key fix for the long-codeword low-SNR tracker
-        # failure: otherwise a single transient dip past bit_idx = 7
-        # aborts the decode before FEC / accumulator can use the LLRs.
+        # Re-anchor lock floor on median of first BOOTSTRAP peaks.
         if bit_idx == BOOTSTRAP - 1:
             bootstrap_mags = np.abs(
                 np.asarray(peak_values, dtype=np.complex128)
@@ -546,19 +496,8 @@ def decode_with_freq_tracking(
                 lock_threshold_frac * float(np.median(bootstrap_mags))
             )
 
-    # ── 5. Carrier phase drift estimation + differential decoding ─────
-    # With 2 samples/chip and bench-grade SDRs, residual frequency offset
-    # after R[1] correction can be 50-500 Hz — right in the range where
-    # per-symbol phase drift approaches or crosses ±π/2. We now track
-    # the per-symbol phase drift and remove it before making each
-    # differential decision.
-    #
-    # Drift is estimated via the Viterbi-Viterbi squared estimator: if
-    # each peak value c_k has phase θ_0 + k·Δθ + b_k·π (where b_k is
-    # the BPSK bit), then (c_k)² has phase 2·(θ_0 + k·Δθ) (the b_k·π
-    # term vanishes because 2π ≡ 0). Squaring removes the BPSK ambiguity
-    # and lets us estimate Δθ from the mean phase advance of squared
-    # values.
+    # ── 5. V-V drift estimation + differential decoding ────────────────
+    # (c_k)² has phase 2·(θ₀+k·Δθ); squaring removes BPSK ambiguity.
     if len(peak_values) >= 4:
         squared = np.array(peak_values, dtype=np.complex128) ** 2
         # Phase difference between consecutive squared values = 2·Δθ
@@ -718,18 +657,9 @@ def refine_freq_from_pilot(
     pilot_bits: np.ndarray,
     symbol_rate_hz: float,
 ) -> tuple[float, float, float | None]:
-    """Pilot-aided ML refinement of residual frequency offset.
+    """Convert pilot phase slope Δθ to residual freq offset in Hz.
 
-    Wraps fit_phase_from_known_bits and converts the per-symbol phase
-    slope Δθ to a frequency offset in Hz via
-        f_residual = (Δθ · symbol_rate_hz) / (2π)
-
-    Useful as a fine-refinement stage AFTER a coarse Doppler search
-    (e.g., a 2-D time × frequency grid) has located a candidate peak.
-    The coarse search pins the freq to ±bin_width/2; the pilot fit then
-    reduces the residual by a factor ~N (pilot length in bits) because
-    ML slope estimation has 1/N precision when the SNR is high enough.
-
+    f_residual = (Δθ · symbol_rate_hz) / (2π).
     Returns (f_residual_hz, theta0, rms_residual_rad) or None on failure.
     """
     fit = fit_phase_from_known_bits(
@@ -748,26 +678,11 @@ def coherent_decode_from_pilot(
     pilot_bits: np.ndarray,
     n_data_bits: int,
 ) -> tuple[bytes, np.ndarray, float, float, float | None]:
-    """Coherent BPSK decode using a known pilot for absolute phase recovery.
+    """Coherent BPSK decode using pilot-fitted θ₀ + k·Δθ phase model.
 
-    1. Fit θ₀, Δθ, residual from the pilot bits (pilot_bits_offset = where
-       the known pilot starts within peak_values, pilot_bits = the values).
-    2. For each data-bit position k ∈ [0, n_data_bits), compute the
-       expected phase θ₀+k·Δθ and derotate the corresponding peak.
-    3. The sign of the real part of the derotated peak is the coherent
-       BPSK decision; its magnitude is the soft LLR.
-
-    Decodes bits starting at peak index 0 in peak_values (not at the
-    pilot position — the caller is responsible for aligning peak_values
-    so that bit 0 is the frame start). Typically called with
-    pilot_bit_offset = 0 when the ASM begins at the start of the frame.
-
-    Returns (frame_bytes, soft_bits, theta0, delta_theta, rms_residual)
-    where soft_bits is a float array of signed correlator outputs
-    (positive for bit 0, negative for bit 1) — caller can use these
-    for FEC decoding or fuzzy frame search.
-
-    Returns None on fit failure or insufficient peaks.
+    Derotates each peak by the expected phase; sign of real part is the
+    hard decision, magnitude is the soft LLR. Returns
+    (frame_bytes, soft_bits, theta0, delta_theta, rms_residual) or None.
     """
     fit = fit_phase_from_known_bits(
         peak_values, pilot_bit_offset, pilot_bits,
@@ -912,14 +827,7 @@ def dbpsk_decode_from_pilot(
     # ── 4. Pilot-region LLRs (coherent) ──
     pilot_llrs = fully_derotated[:n_pilot].real.astype(np.float32)
 
-    # ── 5. Body-region LLRs (differential) ──
-    # Use RAW (un-derotated) peaks for the differential product. DBPSK
-    # is inherently drift-immune: Re(peak[k] * conj(peak[k-1])) cancels
-    # any constant per-symbol phase drift. Derotating first requires an
-    # accurate Δθ estimate, which fails at low SNR and DESTROYS the
-    # otherwise-good differential LLRs (the derotation introduces a
-    # spurious constant phase offset exp(-j*Δθ_error) into every
-    # differential product, rotating them off the real axis).
+    # ── 5. Body-region LLRs (differential, on raw peaks for drift immunity) ──
     raw_body = peaks_arr[n_pilot:]
     n_body = n_data_bits - n_pilot
     if n_body > 0:
