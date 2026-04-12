@@ -1356,8 +1356,11 @@ def main() -> int:
             rx_dev = _soapy.Device(tx_device_str)
             rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
                                              chip_rate_hz * 2))
+            # Apply PPM correction for the ACK RX frequency
+            rx_ppm = _get_device_ppm(tx_serial)
+            rx_center = center_hz + center_hz * rx_ppm / 1e6
             rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
-            rx_dev.setFrequency(_RX, 0, center_hz)
+            rx_dev.setFrequency(_RX, 0, rx_center)
             if args.device == "hackrf":
                 rx_dev.setGain(_RX, 0, "AMP",
                                14.0 if args.rx_amp else 0.0)
