@@ -1399,6 +1399,21 @@ def live_rx_decode(
     last_recal_t = t_start
     offset_history: list[float] = []
 
+    # ── Auto-gain (AGC) state ──
+    # Target: peak matched-filter magnitude in [AGC_LOW, AGC_HIGH].
+    # Below AGC_LOW the signal is too weak for FEC. Above AGC_HIGH
+    # the ADC may be compressing. Adjust the variable-gain stage
+    # (HackRF VGA or RTL-SDR TUNER) by AGC_STEP_DB per block.
+    AGC_LOW = 80.0
+    AGC_HIGH = 500.0
+    AGC_STEP_DB = 2.0
+    if device_name == "hackrf":
+        current_vga = float(vga_db)
+        vga_min, vga_max = 0.0, 62.0
+    else:
+        current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
+        vga_min, vga_max = 0.0, 49.0
+
     try:
         while time.time() - t_start < duration_s:
             filled = 0
@@ -1479,6 +1494,28 @@ def live_rx_decode(
                     last_recal_t = now
                     if abs(correction) < SETTLED_THRESHOLD_HZ:
                         settled = True
+
+            # ── Auto-gain (AGC): adjust RX gain to keep peak_mag in range ──
+            pk = result.get("peak_mag")
+            if pk is not None and pk > 0:
+                if pk < AGC_LOW and current_vga < vga_max:
+                    new_vga = min(vga_max, current_vga + AGC_STEP_DB)
+                    current_vga = new_vga
+                    if device_name == "hackrf":
+                        device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
+                    else:
+                        device.setGain(SOAPY_SDR_RX, 0, current_vga)
+                    print(f"  AGC: peak={pk:.0f} < {AGC_LOW:.0f}, "
+                          f"gain → {current_vga:.0f} dB")
+                elif pk > AGC_HIGH and current_vga > vga_min:
+                    new_vga = max(vga_min, current_vga - AGC_STEP_DB)
+                    current_vga = new_vga
+                    if device_name == "hackrf":
+                        device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
+                    else:
+                        device.setGain(SOAPY_SDR_RX, 0, current_vga)
+                    print(f"  AGC: peak={pk:.0f} > {AGC_HIGH:.0f}, "
+                          f"gain → {current_vga:.0f} dB")
 
             # D4: LLR chase-combining.
             if accumulator is not None:
