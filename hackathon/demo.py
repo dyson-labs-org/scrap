@@ -41,8 +41,10 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import collections
 import hashlib
 import os
+import platform
 import sys
 import time
 from types import SimpleNamespace
@@ -69,6 +71,8 @@ except ImportError:
 
 import sisl_framer as sf
 
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 # ── Demo parameters ─────────────────────────────────────────────────────────
 
@@ -376,7 +380,6 @@ def tx_to_file(message: bytes, path: str,
 
 
 
-import platform
 import queue as _queue
 import threading
 
@@ -396,7 +399,7 @@ def _usb_reader_thread(
     is dropped rather than blocking the reader (a blocked reader causes
     USB overflows and corrupted samples).
     """
-    _is_windows = platform.system() == "Windows"
+    _is_windows = _IS_WINDOWS
     read_chunk = 32768 if _is_windows else 0
 
     local_buf = np.empty(block_samples, dtype=np.complex64)
@@ -427,8 +430,7 @@ def _usb_reader_thread(
                 except _queue.Full:
                     try:
                         block_queue.get_nowait()
-                        stats["dropped_blocks"] = \
-                            stats.get("dropped_blocks", 0) + 1
+                        stats["dropped_blocks"] += 1
                     except _queue.Empty:
                         break
             local_buf = np.empty(block_samples, dtype=np.complex64)
@@ -445,7 +447,7 @@ class _AgcPpmState:
     AGC_MAX_PEAK = 400.0
 
     def __init__(self, device_name: str, device, center_hz: float,
-                 vga_db: float, lna_db: float, amp_on: bool):
+                 vga_db: float, lna_db: float):
         self._device_name = device_name
         self._device = device
         self._center_hz = float(center_hz)
@@ -453,7 +455,7 @@ class _AgcPpmState:
         self._total_correction_hz = 0.0
         self._settled = False
         self._last_recal_t = time.time()
-        self._offset_history: list[float] = []
+        self._offset_history: collections.deque[float] = collections.deque(maxlen=8)
 
         if device_name == "hackrf":
             self._current_vga = float(vga_db)
@@ -471,12 +473,10 @@ class _AgcPpmState:
 
     def on_block(self, result: dict, block_data: np.ndarray) -> None:
         """Run AGC and PPM updates after decoding one block."""
-        from SoapySDR import SOAPY_SDR_RX
         self._update_ppm(result)
         self._update_agc(result, block_data)
 
     def _update_ppm(self, result: dict) -> None:
-        from SoapySDR import SOAPY_SDR_RX
         foff = result.get("freq_offset_hz")
         now = time.time()
         if foff is not None and abs(foff) > 0:
@@ -505,13 +505,7 @@ class _AgcPpmState:
 
     def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
         sample_p99 = float(np.percentile(np.abs(block_data), 99))
-        # Only reduce gain when genuinely near clipping (p99 > 0.9).
-        # The old 0.5 threshold fired on strong-but-clean signals that
-        # were decrypting fine, causing 3-5 blocks of unnecessary gain
-        # reduction before stabilizing. The FFT-squared frequency
-        # estimator is robust to mild distortion, so we only need to
-        # act when samples actually approach the ±1 ADC rail.
-        # Cap the step at 6 dB to avoid overcorrection.
+        # Reduce gain only near ADC clipping (p99 > 0.9). Cap step at 6 dB.
         if sample_p99 > 0.9 and self._current_vga > self._vga_min:
             reduce_db = min(6.0, max(3.0,
                             20.0 * np.log10(sample_p99 / 0.5)))
@@ -548,7 +542,7 @@ def live_rx_decode(
     signal_threshold: float = sisl_rx._SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     combine_copies: int = 0,
-    samps_per_chip_override: int | None = None,
+    samps_per_chip: int | None = None,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -595,9 +589,8 @@ def live_rx_decode(
         responder_static = demo_responder_key()
 
     samp_hz = info.samp_hz
-    samps_per_chip = (samps_per_chip_override
-                      if samps_per_chip_override is not None
-                      else info.samps_per_chip)
+    if samps_per_chip is None:
+        samps_per_chip = info.samps_per_chip
 
     print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
           f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
@@ -636,7 +629,7 @@ def live_rx_decode(
         SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], stream_args)
     device.activateStream(stream)
 
-    _is_windows = platform.system() == "Windows"
+    _is_windows = _IS_WINDOWS
     _win_timer_set = False
     if _is_windows:
         try:
@@ -655,6 +648,7 @@ def live_rx_decode(
         "hails_detected": 0,
         "hails_decrypted": 0,
         "overflows": 0,
+        "dropped_blocks": 0,
         "combined_copies": 0,
         "combined_decrypts": 0,
     }
@@ -668,7 +662,7 @@ def live_rx_decode(
         )
 
     agc_ppm = _AgcPpmState(device_name, device, center_hz,
-                           vga_db, lna_db, amp_on)
+                           vga_db, lna_db)
 
     block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
@@ -1006,7 +1000,7 @@ def main() -> int:
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
             combine_copies=args.combine,
-            samps_per_chip_override=active_samps_per_chip,
+            samps_per_chip=active_samps_per_chip,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",

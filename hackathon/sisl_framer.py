@@ -247,11 +247,7 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     left = (peak_bin - 1) % nfft
     right = (peak_bin + 1) % nfft
     y0, y1, y2 = float(mag[left]), float(mag[peak_bin]), float(mag[right])
-    denom = y0 - 2 * y1 + y2
-    if abs(denom) > 1e-12:
-        frac = 0.5 * (y0 - y2) / denom  # in [-0.5, +0.5]
-    else:
-        frac = 0.0
+    frac = _parabolic_frac(y0, y1, y2)
     refined_bin = peak_bin + frac
 
     # Convert bin to frequency
@@ -387,11 +383,7 @@ def _refine_peak(
     y0 = float(window[local_idx - 1])
     y1 = float(window[local_idx])
     y2 = float(window[local_idx + 1])
-    denom = (y0 - 2 * y1 + y2)
-    if abs(denom) < 1e-12:
-        actual = lo + local_idx
-        return float(actual), complex(corr_c[actual])
-    frac = 0.5 * (y0 - y2) / denom              # in [-0.5, 0.5]
+    frac = _parabolic_frac(y0, y1, y2)
     refined = lo + local_idx + frac
     i0 = int(np.floor(refined))
     i1 = i0 + 1
@@ -541,6 +533,14 @@ def decode_with_freq_tracking(
         "first_peak_magnitudes": [abs(c) for c in peak_values[:16]],
         "first_peak_angles_rad": [float(np.angle(c)) for c in peak_values[:16]],
     }
+
+
+def _parabolic_frac(y0: float, y1: float, y2: float) -> float:
+    """Fractional offset of the peak of a parabola through three samples."""
+    denom = y0 - 2 * y1 + y2
+    if abs(denom) < 1e-12:
+        return 0.0
+    return 0.5 * (y0 - y2) / denom
 
 
 def _phase_spread_rms(coherent_mag: float, incoherent_mag: float) -> float:
@@ -774,8 +774,7 @@ def dbpsk_decode_from_pilot(
     coherent_sum = complex(np.sum(aligned))
     theta0 = float(np.angle(coherent_sum))
 
-    # rms residual is Gaussian phase-jitter equivalent
-    # (Gaussian phase-jitter equivalent).
+    # rms residual: Gaussian phase-jitter equivalent
     coherent_mag = abs(coherent_sum)
     incoherent_mag = float(np.sum(np.abs(aligned)))
     rms_residual = _phase_spread_rms(coherent_mag, incoherent_mag)
