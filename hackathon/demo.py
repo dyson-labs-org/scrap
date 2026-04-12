@@ -456,6 +456,14 @@ class _AgcPpmState:
         self._settled = False
         self._last_recal_t = time.time()
         self._offset_history: collections.deque[float] = collections.deque(maxlen=8)
+        # Suppress PPM updates for the first few blocks while the AGC
+        # stabilizes. At startup the gain may be wildly wrong (too low
+        # → weak signal → FFT locks onto spurs → PPM diverges; too high
+        # → ADC clips → corrupted freq estimates → PPM diverges). Let
+        # AGC settle for AGC_WARMUP_BLOCKS before enabling auto-PPM.
+        self._agc_warmup_blocks = 3
+        self._blocks_seen = 0
+        self._agc_stable = False  # True once gain hasn't changed for 1 block
 
         if device_name == "hackrf":
             self._current_vga = float(vga_db)
@@ -463,6 +471,7 @@ class _AgcPpmState:
         else:
             self._current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
             self._vga_min, self._vga_max = 0.0, 49.0
+        self._prev_vga = self._current_vga
 
     def _set_rx_vga(self, gain: float) -> None:
         from SoapySDR import SOAPY_SDR_RX
@@ -473,8 +482,20 @@ class _AgcPpmState:
 
     def on_block(self, result: dict, block_data: np.ndarray) -> None:
         """Run AGC and PPM updates after decoding one block."""
-        self._update_ppm(result)
+        self._blocks_seen += 1
+        # AGC runs every block. PPM is suppressed until the AGC has
+        # stabilized (gain unchanged for 1 block after warmup period).
+        # This prevents the frequency estimator from chasing spurs
+        # while the signal level is still changing.
         self._update_agc(result, block_data)
+        gain_changed = (self._current_vga != self._prev_vga)
+        self._prev_vga = self._current_vga
+        if not self._agc_stable:
+            if self._blocks_seen >= self._agc_warmup_blocks and not gain_changed:
+                self._agc_stable = True
+                print("  AGC stable — enabling auto-PPM")
+        if self._agc_stable:
+            self._update_ppm(result)
 
     def _update_ppm(self, result: dict) -> None:
         from SoapySDR import SOAPY_SDR_RX
