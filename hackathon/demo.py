@@ -648,21 +648,20 @@ def live_rx_decode(
         }
 
     # Auto-load calibrated PPM correction from the device serial.
+    # getHardwareInfo()["serial"] returns the OPENED device's serial
+    # (works for HackRF). For RTL-SDR it's missing, so we fall back
+    # to the enumerate serial — but ONLY if HW info didn't provide one.
     serial = ""
     try:
         hw_info = device.getHardwareInfo()
         serial = hw_info.get("serial", "")
     except Exception:
         pass
-    # HackRF puts serial in hardware info; RTL-SDR doesn't.
-    # Fall back to enumerate() which works for both.
-    if not serial or _get_device_ppm(serial) == 0.0:
+    if not serial:
         try:
             found = SoapySDR.Device.enumerate(info.driver)
             if found:
-                enum_serial = str(dict(found[0]).get("serial", ""))
-                if enum_serial:
-                    serial = enum_serial
+                serial = str(dict(found[0]).get("serial", ""))
         except Exception:
             pass
     cal_ppm = _get_device_ppm(serial)
