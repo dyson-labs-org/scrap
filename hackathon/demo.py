@@ -1234,31 +1234,41 @@ def main() -> int:
                 print(f"RX error: {stats.get('error')}", file=sys.stderr)
                 return 2
 
-        # Phase 2: TX ACK continuously so the caller's RX window catches it.
-        # The caller cycles TX 5s / RX 2s (period 7s). With coprime
-        # timing, worst-case overlap is 21s. TX for 30s to be safe.
+        # Phase 2: TX ACK on repeat until duration expires.
+        # The caller cycles TX 5s / RX 2s. Keep retransmitting so the
+        # caller's RX window catches the ACK regardless of timing.
         responder_eph = sc.Ephemeral()
         ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
         ack_chips = sf.tx_bits_to_chips(ack_bits)
         ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
-        ack_duration_s = 30.0
-        ack_repeats = max(1, int(
-            ack_duration_s * chip_rate_hz / len(ack_chips)))
-        print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits × "
-              f"{ack_repeats} repeats → "
-              f"{len(ack_chips) * ack_repeats / chip_rate_hz:.1f}s on air")
-        soapy_tx_burst(
-            ack_samples, center_hz,
-            samp_hz=SAMP_RATE_HZ,
-            tx_vga_db=args.tx_vga,
-            tx_amp_on=args.tx_amp,
-            repeats=ack_repeats,
-        )
+        ack_frame_sec = len(ack_chips) / chip_rate_hz
+        print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits "
+              f"({ack_frame_sec:.1f}s/frame), repeating until timeout")
+        print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
+
+        ack_start = time.time()
+        ack_round = 0
+        try:
+            while time.time() - ack_start < args.duration:
+                ack_round += 1
+                # TX one burst of 10 repeats (~15s), then brief pause
+                burst_repeats = 10
+                print(f"  ACK burst {ack_round} "
+                      f"({burst_repeats} repeats)...", end="", flush=True)
+                soapy_tx_burst(
+                    ack_samples, center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=burst_repeats,
+                )
+                print(" done")
+        except KeyboardInterrupt:
+            print("  interrupted")
         print()
         print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
         print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
         print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
-        print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -1321,12 +1331,20 @@ def main() -> int:
             rx_samp_hz = active_samps_per_chip * chip_rate_hz
             rx_samp_hz = max(2_000_000, min(DEVICES["hackrf"].samp_hz,
                                              rx_samp_hz))
-            rx_dev = _soapy.Device("driver=hackrf")
+            rx_info = DEVICES[args.device]
+            rx_dev = _soapy.Device(rx_info.driver)
+            rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
+                                             chip_rate_hz * 2))
             rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
             rx_dev.setFrequency(_RX, 0, center_hz)
-            rx_dev.setGain(_RX, 0, "AMP", 14.0 if args.rx_amp else 0.0)
-            rx_dev.setGain(_RX, 0, "LNA", float(args.rx_lna))
-            rx_dev.setGain(_RX, 0, "VGA", float(args.rx_vga))
+            if args.device == "hackrf":
+                rx_dev.setGain(_RX, 0, "AMP",
+                               14.0 if args.rx_amp else 0.0)
+                rx_dev.setGain(_RX, 0, "LNA", float(args.rx_lna))
+                rx_dev.setGain(_RX, 0, "VGA", float(args.rx_vga))
+            else:
+                rx_dev.setGain(_RX, 0, min(49.0,
+                               float(args.rx_lna + args.rx_vga)))
             rx_stream = rx_dev.setupStream(_RX, _CF32)
             rx_dev.activateStream(rx_stream)
 
