@@ -52,57 +52,20 @@ except ImportError:
           file=sys.stderr)
     sys.exit(2)
 
-_PLUGIN_INSTALL_HINTS = {
-    "hackrf": "  Arch: sudo pacman -S soapyhackrf\n"
-              "  Debian: sudo apt install soapysdr-module-hackrf",
-    "rtlsdr": "  Arch: sudo pacman -S soapyrtlsdr\n"
-              "  Debian: sudo apt install soapysdr-module-rtlsdr",
-}
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from sdr_devices import DEVICES as _DEVICES_INFO, diagnose_device_open as _diagnose_device_open
 
-def _diagnose_device_open(device_name: str, driver_str: str,
-                          err: Exception) -> None:
-    """Print a helpful error message when SoapySDR can't open a device."""
-    print(f"failed to open {device_name} ({driver_str}): {err}",
-          file=sys.stderr)
-    try:
-        enumerated = SoapySDR.Device.enumerate()
-    except Exception:
-        enumerated = []
-    print("SoapySDR enumerated devices:", file=sys.stderr)
-    if enumerated:
-        for i, d in enumerate(enumerated):
-            print(f"  [{i}] {dict(d)}", file=sys.stderr)
-    else:
-        print("  (none)", file=sys.stderr)
-    found = {str(d.get("driver", "")) for d in enumerated if hasattr(d, "get")}
-    wanted = driver_str.replace("driver=", "")
-    if wanted not in found:
-        print(file=sys.stderr)
-        print(f"The '{wanted}' SoapySDR plugin is not installed.",
-              file=sys.stderr)
-        hint = _PLUGIN_INSTALL_HINTS.get(wanted,
-                                         f"  (no install hint for {wanted})")
-        print(hint, file=sys.stderr)
-        print("Verify with: SoapySDRUtil --find", file=sys.stderr)
-
-
-# Per-device driver string + sample rate + frequency range.
 _DEVICES = {
-    "hackrf": {
-        "driver": "driver=hackrf",
-        "default_rate_msps": 8.0,
-        "freq_min_mhz": 1,
-        "freq_max_mhz": 6000,
-        "gain_stages": ("AMP", "LNA", "VGA"),
-    },
-    "rtlsdr": {
-        "driver": "driver=rtlsdr",
-        "default_rate_msps": 2.0,
-        "freq_min_mhz": 24,
-        "freq_max_mhz": 1766,
-        "gain_stages": ("TUNER",),
-    },
+    name: {
+        "driver": info.driver,
+        "default_rate_msps": info.samp_hz / 1e6,
+        "freq_min_mhz": info.freq_min_hz / 1e6,
+        "freq_max_mhz": info.freq_max_hz / 1e6,
+        "gain_stages": info.gain_stages,
+    }
+    for name, info in _DEVICES_INFO.items()
 }
 
 

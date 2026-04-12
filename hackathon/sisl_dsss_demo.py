@@ -46,7 +46,6 @@ import os
 import sys
 import time
 from types import SimpleNamespace
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -90,107 +89,10 @@ HACKRF_RX_LNA_DB = 16                   # conservative
 # and frequency ranges. The TX path is HackRF-only (RTL-SDR is RX-only
 # hardware); the RX path can use either.
 
-class DeviceInfo:
-    def __init__(self, name, driver, samp_hz, samps_per_chip, freq_min_hz,
-                 freq_max_hz, notes):
-        self.name = name
-        self.driver = driver
-        self.samp_hz = samp_hz
-        self.samps_per_chip = samps_per_chip
-        self.freq_min_hz = freq_min_hz
-        self.freq_max_hz = freq_max_hz
-        self.notes = notes
-
-
-DEVICES = {
-    "hackrf": DeviceInfo(
-        name="HackRF One",
-        driver="driver=hackrf",
-        samp_hz=8_000_000,
-        samps_per_chip=8,
-        freq_min_hz=1_000_000,           # 1 MHz
-        freq_max_hz=6_000_000_000,       # 6 GHz
-        notes="TX + RX, 1 MHz – 6 GHz, 8-bit ADC, 3 gain stages",
-    ),
-    "rtlsdr": DeviceInfo(
-        name="NESDR / RTL-SDR",
-        driver="driver=rtlsdr",
-        samp_hz=2_000_000,               # 2 Msps → 2 samps/chip (Nyquist)
-        samps_per_chip=2,
-        freq_min_hz=24_000_000,          # 24 MHz (R820T2)
-        freq_max_hz=1_766_000_000,       # ~1766 MHz (R820T2 ceiling)
-        notes="RX only, 24–1766 MHz, 8-bit ADC, single tuner gain",
-    ),
-}
-
-
-# Suggest plugin install commands when a SoapySDR driver is missing
-_PLUGIN_INSTALL_HINTS = {
-    "hackrf": (
-        "  Arch:   sudo pacman -S soapyhackrf\n"
-        "  Debian: sudo apt install soapysdr-module-hackrf\n"
-        "  From source: https://github.com/pothosware/SoapyHackRF"
-    ),
-    "rtlsdr": (
-        "  Arch:   sudo pacman -S soapyrtlsdr\n"
-        "  Debian: sudo apt install soapysdr-module-rtlsdr\n"
-        "  From source: https://github.com/pothosware/SoapyRTLSDR"
-    ),
-}
-
-
-def _format_device_open_error(soapy_module, info: "DeviceInfo",
-                               err: Exception) -> str:
-    """Produce a human-readable explanation for SoapySDR device-open
-    failures that tells the user exactly which plugin is missing.
-    """
-    try:
-        enumerated = soapy_module.Device.enumerate()
-    except Exception:
-        enumerated = []
-
-    # SoapySDR.Device.enumerate() returns a list of dicts (or Kwargs objects
-    # that behave dict-like). Extract the driver field for human display.
-    found_drivers = []
-    for d in enumerated:
-        try:
-            drv = d.get("driver", "?") if hasattr(d, "get") else "?"
-        except Exception:
-            drv = "?"
-        found_drivers.append(str(drv))
-
-    lines = [
-        f"failed to open {info.name} with '{info.driver}': {err}",
-        "",
-        "SoapySDR enumerated the following devices:",
-    ]
-    if enumerated:
-        for i, d in enumerate(enumerated):
-            try:
-                lines.append(f"  [{i}] {dict(d)}")
-            except Exception:
-                lines.append(f"  [{i}] {d}")
-    else:
-        lines.append("  (none — no SoapySDR plugins found matching any device)")
-
-    driver_key = info.driver.replace("driver=", "")
-    if driver_key not in found_drivers:
-        lines.append("")
-        lines.append(
-            f"The '{driver_key}' driver is NOT among SoapySDR's loaded plugins."
-        )
-        lines.append(
-            f"Install the Soapy{driver_key.upper()} plugin and retry:"
-        )
-        hint = _PLUGIN_INSTALL_HINTS.get(driver_key,
-                                         f"  (no install hint for {driver_key})")
-        lines.append(hint)
-        lines.append("")
-        lines.append(
-            "After installing, verify with:  SoapySDRUtil --find"
-        )
-
-    return "\n".join(lines)
+from sdr_devices import (
+    DeviceInfo, DEVICES, PLUGIN_INSTALL_HINTS as _PLUGIN_INSTALL_HINTS,
+    format_device_open_error as _format_device_open_error,
+)
 
 
 # ── Suggested quieter frequencies ──────────────────────────────────────────
@@ -555,7 +457,7 @@ class LlrAccumulator:
     def try_decrypt(
         self,
         responder_static,
-    ) -> Optional[tuple[object, str, int]]:
+    ) -> tuple[object, str, int | None]:
         """Soft-Viterbi-decode accumulated body LLRs and trial-decrypt.
 
         Returns (decoded_hail, polarity_label, chase_flips) or None.
@@ -849,11 +751,11 @@ def _try_fec_decrypt(
         peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
     )
 
-    best_attempt: Optional[dict] = None
+    best_attempt: dict | None = None
     best_offset = -1
     best_score = 0.0
     best_pts_ratio = 0.0
-    decoded_hail: Optional[sc.DecodedHail] = None
+    decoded_hail: sc.DecodedHail | None = None
     polarity_label = "fec"
     # Collect ALL valid candidates' LLRs for multi-frame combining.
     # The TX loops the same frame, so every candidate with enough room
@@ -1025,8 +927,8 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
 def live_rx_decode(
     duration_s: float = 10.0,
     block_seconds: float = 1.5,
-    responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
-    save_path: Optional[str] = None,
+    responder_static: ec.EllipticCurvePrivateKey | None = None,
+    save_path: str | None = None,
     lna_db: int = HACKRF_RX_LNA_DB,
     vga_db: int = HACKRF_RX_VGA_DB,
     amp_on: bool = False,
@@ -1182,7 +1084,7 @@ def live_rx_decode(
     import threading
     import queue as _queue
 
-    block_queue: _queue.Queue[Optional[np.ndarray]] = _queue.Queue(maxsize=4)
+    block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
     overflow_count_at_last_check = 0
 
@@ -1362,7 +1264,7 @@ def live_rx_decode(
 
 def offline_decode_hail(
     cfile_path: str,
-    responder_static: Optional[ec.EllipticCurvePrivateKey] = None,
+    responder_static: ec.EllipticCurvePrivateKey | None = None,
 ) -> dict:
     """Full pipeline: capture → FEC decode → trial decrypt.
 
