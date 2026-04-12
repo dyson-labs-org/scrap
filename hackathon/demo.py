@@ -926,6 +926,14 @@ def main() -> int:
                              f"(default {CENTER_FREQ_HZ/1e6:.0f}). "
                              f"See list at bottom of --help for quieter "
                              f"alternatives.")
+    parser.add_argument("--ppm", type=float, default=0.0,
+                        help="rx: known crystal PPM offset (e.g. from a "
+                             "prior calibration at a lower frequency). "
+                             "Pre-adjusts the RX center frequency to "
+                             "compensate for the crystal error, so the "
+                             "FFT frequency estimator only needs to find "
+                             "the small residual. Critical at 5+ GHz "
+                             "where 50 ppm = 250 kHz offset.")
     parser.add_argument("--signal-threshold", type=float,
                         default=sisl_rx._SIGNAL_FLOOR_RATIO,
                         help=f"rx: peak/median ratio that counts as signal "
@@ -1052,6 +1060,17 @@ def main() -> int:
         min_block_sec = max(3.0, frame_sec * 2.5)
         if block_sec < min_block_sec:
             block_sec = min_block_sec
+        # Apply PPM pre-correction to the initial center frequency.
+        # This shifts the tuner to compensate for the known crystal
+        # error, placing the signal near 0 Hz in baseband so the FFT
+        # estimator only needs to find the small residual.
+        rx_center_hz = args.freq * 1e6
+        if args.ppm != 0.0:
+            ppm_offset_hz = rx_center_hz * args.ppm / 1e6
+            rx_center_hz += ppm_offset_hz
+            print(f"  PPM pre-correction: {args.ppm:+.1f} ppm → "
+                  f"tuning to {rx_center_hz/1e6:.6f} MHz "
+                  f"({ppm_offset_hz:+.0f} Hz)")
         stats = live_rx_decode(
             duration_s=args.duration,
             block_seconds=block_sec,
@@ -1060,7 +1079,7 @@ def main() -> int:
             lna_db=args.rx_lna,
             vga_db=args.rx_vga,
             amp_on=args.rx_amp,
-            center_hz=args.freq * 1e6,
+            center_hz=rx_center_hz,
             device_name=args.device,
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
