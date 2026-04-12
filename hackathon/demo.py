@@ -95,6 +95,7 @@ HACKRF_RX_LNA_DB = 40                   # gain than RTL-SDR to compensate
 from sdr_devices import (
     DeviceInfo, DEVICES, PLUGIN_INSTALL_HINTS as _PLUGIN_INSTALL_HINTS,
     format_device_open_error as _format_device_open_error,
+    get_device_ppm as _get_device_ppm,
 )
 
 
@@ -645,6 +646,31 @@ def live_rx_decode(
             "ok": False,
             "error": _format_device_open_error(SoapySDR, info, e),
         }
+
+    # Auto-load calibrated PPM correction from the device serial.
+    try:
+        hw_info = device.getHardwareInfo()
+        serial = hw_info.get("serial", "")
+        # RTL-SDR uses a different key
+        if not serial:
+            serial = hw_info.get("index", "")
+    except Exception:
+        serial = ""
+    # Try SoapySDR serial query if hardware info didn't have it
+    if not serial:
+        try:
+            found = SoapySDR.Device.enumerate(info.driver)
+            if found:
+                serial = str(dict(found[0]).get("serial", ""))
+        except Exception:
+            pass
+    cal_ppm = _get_device_ppm(serial)
+    if cal_ppm != 0.0:
+        ppm_offset_hz = center_hz * cal_ppm / 1e6
+        center_hz += ppm_offset_hz
+        print(f"  PPM cal: device {serial} → {cal_ppm:+.1f} ppm "
+              f"({ppm_offset_hz:+.0f} Hz)")
+
     device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
 

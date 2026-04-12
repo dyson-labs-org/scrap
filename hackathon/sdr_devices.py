@@ -23,6 +23,27 @@ class DeviceInfo:
     gain_stages: tuple[str, ...] = ()
 
 
+# Per-device PPM calibration, keyed by serial number. Measured relative
+# to HackRF #0 (930c64dc279e7bc3) as the TX reference. The PPM offset
+# is a property of each device's crystal oscillator and is constant
+# across frequencies. Applied automatically when the device is opened.
+#
+# To recalibrate: TX at 915 MHz with the reference HackRF, RX with the
+# target device, read the converged Δf from the first DECRYPTED block:
+#   ppm = Δf_hz / 915e6 * 1e6
+DEVICE_PPM: dict[str, float] = {
+    "930c64dc279e7bc3": 0.0,      # HackRF #0 — TX reference
+    "78d063dc2b6d2267": -19.1,    # HackRF #1
+    "930c64dc29144ac3": +16.6,    # HackRF #2
+    "00000001":         -22.2,    # Nooelec SMArt XTR v5 (RTL-SDR)
+}
+
+
+def get_device_ppm(serial: str) -> float:
+    """Look up the calibrated PPM for a device by serial number."""
+    return DEVICE_PPM.get(serial, 0.0)
+
+
 DEVICES: dict[str, DeviceInfo] = {
     "hackrf": DeviceInfo(
         name="HackRF One",
