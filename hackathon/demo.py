@@ -550,6 +550,12 @@ class _AgcPpmState:
 
     def _update_ppm(self, result: dict) -> None:
         from SoapySDR import SOAPY_SDR_RX
+        # Only use frequency estimates from blocks that found real signal.
+        # no_signal / track_lost with low periodic ratio are spur-locked;
+        # their Δf would drive the auto-PPM away from the real frequency.
+        s = result.get("status", "")
+        if s in ("no_signal", "short_block"):
+            return
         foff = result.get("freq_offset_hz")
         now = time.time()
         if foff is not None and abs(foff) > 0:
