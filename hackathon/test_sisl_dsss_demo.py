@@ -9,14 +9,9 @@ Run: python hackathon/test_sisl_dsss_demo.py
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
-import time
-import traceback
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
 import sisl_dsss_demo as dd
@@ -267,17 +262,6 @@ def test_decode_one_hail_in_block_populates_llrs_on_clean_decrypt():
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
         assert key in result, (key, sorted(result.keys()))
         assert result[key] is not None, key
-    assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
-    assert result["fec_llrs"].dtype == np.float32
-
-
-def test_decode_one_hail_in_block_populates_fec_llrs():
-    """FEC decoder must surface a 2096-bit fec_llrs vector on clean decrypt."""
-    block, _ = _make_block_with_hail()
-    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
-    assert result["status"] == "decrypt_ok", result
-    assert "fec_llrs" in result, sorted(result.keys())
-    assert result["fec_llrs"] is not None
     assert result["fec_llrs"].shape == (sc.HAIL_FEC_TOTAL_BITS,)
     assert result["fec_llrs"].dtype == np.float32
 
@@ -545,27 +529,3 @@ def test_decimate_to_chips_shape():
     assert len(chips) == 16 // dd.SAMPS_PER_CHIP
     assert np.allclose(chips, 1.0)
 
-
-# ── Runner ──────────────────────────────────────────────────────────────────
-
-def _run_all():
-    tests = [(n, f) for n, f in globals().items()
-             if n.startswith("test_") and callable(f)]
-    passed = failed = 0
-    t0 = time.time()
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-            failed += 1
-    dt = time.time() - t0
-    print(f"\n{passed} passed, {failed} failed in {dt:.2f}s")
-    return failed
-
-
-if __name__ == "__main__":
-    sys.exit(_run_all())
