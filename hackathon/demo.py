@@ -1300,26 +1300,62 @@ def main() -> int:
             )
             print(" done. Listening for ACK...", flush=True)
 
-            # RX phase — listen for ACK
-            # TODO: implement ACK-specific decode path in sisl_rx.py
-            # For now, use the hail decode path as a placeholder — the
-            # ACK has the same ASM so it will be detected, but the
-            # decrypt will fail (different msg_type). A production
-            # implementation would call _decode_one_ack_in_block.
-            stats = live_rx_decode(
-                duration_s=RX_DURATION,
-                block_seconds=RX_DURATION,
-                responder_static=demo_responder_key(),  # placeholder
-                lna_db=args.rx_lna, vga_db=args.rx_vga,
-                amp_on=args.rx_amp, center_hz=center_hz,
-                device_name=args.device,
-                signal_threshold=args.signal_threshold,
-                samps_per_chip=active_samps_per_chip,
-            )
-            # Check for ACK (TODO: proper ACK decode)
-            if stats.get("hails_decrypted", 0) > 0:
-                print(f"\n\033[32m  ACK RECEIVED — session established\033[0m")
-                return 0
+            # RX phase — capture one block and try ACK decode
+            import SoapySDR as _soapy
+            from SoapySDR import SOAPY_SDR_RX as _RX, SOAPY_SDR_CF32 as _CF32
+            rx_samp_hz = active_samps_per_chip * chip_rate_hz
+            rx_samp_hz = max(2_000_000, min(DEVICES["hackrf"].samp_hz,
+                                             rx_samp_hz))
+            rx_dev = _soapy.Device("driver=hackrf")
+            rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
+            rx_dev.setFrequency(_RX, 0, center_hz)
+            rx_dev.setGain(_RX, 0, "AMP", 14.0 if args.rx_amp else 0.0)
+            rx_dev.setGain(_RX, 0, "LNA", float(args.rx_lna))
+            rx_dev.setGain(_RX, 0, "VGA", float(args.rx_vga))
+            rx_stream = rx_dev.setupStream(_RX, _CF32)
+            rx_dev.activateStream(rx_stream)
+
+            n_rx_samples = int(RX_DURATION * rx_samp_hz)
+            rx_buf = np.empty(n_rx_samples, dtype=np.complex64)
+            filled = 0
+            while filled < n_rx_samples:
+                sr = rx_dev.readStream(
+                    rx_stream, [rx_buf[filled:]], n_rx_samples - filled,
+                    timeoutUs=500_000)
+                if sr.ret > 0:
+                    filled += sr.ret
+                elif sr.ret == -1:
+                    continue
+                else:
+                    break
+            rx_dev.deactivateStream(rx_stream)
+            rx_dev.closeStream(rx_stream)
+            del rx_dev
+
+            if filled > n_rx_samples // 2:
+                ack_result = sisl_rx.decode_one_ack_in_block(
+                    rx_buf[:filled],
+                    caller_static_priv=caller_static,
+                    caller_eph_priv=caller_eph_priv,
+                    dh1=dh1,
+                    expected_nonce_echo=body.body_nonce,
+                    samps_per_chip=active_samps_per_chip,
+                    samp_hz=rx_samp_hz,
+                )
+                s = ack_result.get("status", "")
+                foff = ack_result.get("freq_offset_hz", 0)
+                if s == "decrypt_ok":
+                    da = ack_result["decoded_ack"]
+                    print(f"\n\033[32m  ACK RECEIVED — "
+                          f"status={da.body.status} "
+                          f"nonce_echo={da.body.nonce_echo.hex()} "
+                          f"Δf={foff:+.0f}Hz\033[0m")
+                    print(f"  SESSION ESTABLISHED")
+                    return 0
+                elif s in ("decrypt_fail", "track_lost"):
+                    print(f"    ({s} Δf={foff:+.0f}Hz)")
+                else:
+                    print(f"    ({s})")
 
         print(f"\n  timeout after {MAX_ROUNDS} rounds — no ACK received")
         return 1

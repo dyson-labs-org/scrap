@@ -40,6 +40,11 @@ _PILOT_BITS = np.unpackbits(
     np.frombuffer(_PILOT_BYTES, dtype=np.uint8)
 ).astype(np.uint8)
 
+_ACK_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_ACK])
+_ACK_PILOT_BITS = np.unpackbits(
+    np.frombuffer(_ACK_PILOT_BYTES, dtype=np.uint8)
+).astype(np.uint8)
+
 
 class LlrAccumulator:
     """Multi-copy FEC LLR accumulator for SISL hails.
@@ -245,6 +250,7 @@ def _acquire_and_track(
     samps_per_chip: int,
     samp_hz: float,
     signal_threshold: float,
+    fec_total_bits: int = sc.HAIL_FEC_TOTAL_BITS,
 ) -> dict:
     """Frequency estimation, correction, matched filter, periodicity test,
     and per-symbol tracking decode.
@@ -316,7 +322,7 @@ def _acquire_and_track(
             "note": "spurious spike, no periodic structure",
         }
 
-    target_bytes = (2 * sc.HAIL_FEC_TOTAL_BITS + 7) // 8
+    target_bytes = (2 * fec_total_bits + 7) // 8
     track_result = sf.decode_with_freq_tracking(
         samples,
         samps_per_chip=samps_per_chip,
@@ -325,7 +331,7 @@ def _acquire_and_track(
         precomputed_corr=corr_c,
     )
     if track_result is None:
-        fallback_bytes = (sc.HAIL_FEC_TOTAL_BITS + 7) // 8
+        fallback_bytes = (fec_total_bits + 7) // 8
         track_result = sf.decode_with_freq_tracking(
             samples,
             samps_per_chip=samps_per_chip,
@@ -490,6 +496,176 @@ def _decode_one_hail_in_block(
         peak_values=acq["peak_values"],
         positions=acq["positions"],
         responder_static=responder_static,
+        top_k_soft=top_k_soft,
+        freq_hz=acq["freq_hz"],
+        peak_mag=acq["peak_mag"],
+        median_mag=acq["median_mag"],
+        rad_per_sample=acq["rad_per_sample"],
+    )
+
+
+# ── ACK decode path (parallel to hail, different frame sizes) ────────────
+
+def _extract_ack_llrs_at_position(
+    peak_values: list,
+    peak_offset: int,
+) -> dict:
+    """Run the DBPSK decoder at one ASM offset for an ACK frame."""
+    out: dict = {
+        "fec_llrs": None,
+        "phase_rms_residual_rad": None,
+        "asm_errs_in_coherent": None,
+    }
+    aligned_peaks = peak_values[peak_offset:]
+    n_fec_bits = sc.ACK_FEC_TOTAL_BITS
+    if len(aligned_peaks) < n_fec_bits:
+        return out
+
+    dbpsk = sf.dbpsk_decode_from_pilot(
+        aligned_peaks, _ACK_PILOT_BITS, n_fec_bits,
+    )
+    if dbpsk is None:
+        return out
+    fec_frame, fec_soft, _, _, rms = dbpsk
+    out["fec_llrs"] = fec_soft
+    out["phase_rms_residual_rad"] = rms
+    c_bits_first32 = np.unpackbits(
+        np.frombuffer(fec_frame[:4], dtype=np.uint8))
+    out["asm_errs_in_coherent"] = int(np.sum(c_bits_first32 != _ASM_BITS))
+    return out
+
+
+def _try_ack_fec_decrypt(
+    peak_values: list,
+    positions: list,
+    caller_static_priv: ec.EllipticCurvePrivateKey,
+    caller_eph_priv: ec.EllipticCurvePrivateKey,
+    dh1: bytes,
+    expected_nonce_echo: bytes,
+    top_k_soft: int,
+    freq_hz: float,
+    peak_mag: float,
+    median_mag: float,
+    rad_per_sample: float,
+) -> dict:
+    """ACK-specific FEC decrypt path. Parallel to _try_fec_decrypt."""
+    if not peak_values or len(peak_values) < sc.ACK_FEC_TOTAL_BITS:
+        return {
+            "status": "track_lost",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+        }
+
+    topk = find_sisl_frame_soft_topk(
+        peak_values, sc.ACK_FRAME_LEN, k=top_k_soft,
+    )
+
+    best_attempt = None
+    best_offset = -1
+    best_score = 0.0
+    best_pts_ratio = 0.0
+    decoded_ack = None
+    polarity_label = "ack-fec"
+
+    for cand_offset, cand_score, cand_pts in topk:
+        if cand_offset + sc.ACK_FEC_TOTAL_BITS > len(peak_values):
+            continue
+        if abs(cand_score) <= 10.0 or cand_pts < 3.0:
+            continue
+
+        llr_diag = _extract_ack_llrs_at_position(
+            peak_values, int(cand_offset))
+        fec_llrs_arr = llr_diag.get("fec_llrs")
+        if fec_llrs_arr is None:
+            continue
+
+        attempt = sc.decode_ack_fec_from_llrs(
+            fec_llrs_arr, caller_static_priv, caller_eph_priv,
+            dh1, expected_nonce_echo)
+        if attempt is None:
+            attempt = sc.decode_ack_fec_from_llrs(
+                -fec_llrs_arr, caller_static_priv, caller_eph_priv,
+                dh1, expected_nonce_echo)
+            if attempt is not None:
+                polarity_label = "ack-fec-inv"
+        else:
+            polarity_label = "ack-fec"
+
+        if attempt is not None:
+            decoded_ack = attempt
+            best_offset = int(cand_offset)
+            best_score = float(cand_score)
+            best_pts_ratio = float(cand_pts)
+            best_attempt = {"llr_diag": llr_diag}
+            break
+
+        if best_attempt is None or abs(cand_score) > abs(best_score):
+            best_attempt = {"llr_diag": llr_diag}
+            best_offset = int(cand_offset)
+            best_score = float(cand_score)
+            best_pts_ratio = float(cand_pts)
+
+    if best_attempt is None:
+        return {
+            "status": "track_lost",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+        }
+
+    base = {
+        "start_sample": positions[0] if positions else 0,
+        "asm_at_byte": f"soft-bit{best_offset}",
+        "peak_mag": peak_mag,
+        "median_mag": median_mag,
+        "rad_per_sample": rad_per_sample,
+        "freq_offset_hz": freq_hz,
+        "soft_score": best_score,
+        "pts_ratio": best_pts_ratio,
+    }
+    if decoded_ack is None:
+        return {"status": "decrypt_fail", "polarity": polarity_label, **base}
+    return {
+        "status": "decrypt_ok",
+        "polarity": polarity_label,
+        "decoded_ack": decoded_ack,
+        "body": decoded_ack.body,
+        **base,
+    }
+
+
+def decode_one_ack_in_block(
+    samples: np.ndarray,
+    caller_static_priv: ec.EllipticCurvePrivateKey,
+    caller_eph_priv: ec.EllipticCurvePrivateKey,
+    dh1: bytes,
+    expected_nonce_echo: bytes,
+    samps_per_chip: int = 2,
+    samp_hz: float = 2_000_000.0,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
+) -> dict:
+    """Process one block, try to decode an ACK frame.
+
+    Parallel to _decode_one_hail_in_block but for the 95-byte ACK.
+    """
+    acq = _acquire_and_track(
+        samples, samps_per_chip, samp_hz, signal_threshold,
+        fec_total_bits=sc.ACK_FEC_TOTAL_BITS,
+    )
+    if acq["status"] != "acquired":
+        return acq
+
+    return _try_ack_fec_decrypt(
+        peak_values=acq["peak_values"],
+        positions=acq["positions"],
+        caller_static_priv=caller_static_priv,
+        caller_eph_priv=caller_eph_priv,
+        dh1=dh1,
+        expected_nonce_echo=expected_nonce_echo,
         top_k_soft=top_k_soft,
         freq_hz=acq["freq_hz"],
         peak_mag=acq["peak_mag"],
