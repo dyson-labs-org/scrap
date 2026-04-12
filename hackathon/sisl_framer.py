@@ -237,8 +237,20 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
 
     mag = np.abs(accum)
     # The spectral line is at 2*residual_freq (after coarse correction).
-    # Search the full spectrum for the peak.
-    peak_bin = int(np.argmax(mag))
+    # Restrict the search to ±100 kHz (in the squared domain, that's
+    # ±200 kHz) around DC. After coarse R[1] correction the true
+    # residual is within this window. Searching the full spectrum picks
+    # up PLL/clock spurs on devices like HackRF (fixed-frequency lines
+    # at multiples of 250/500 kHz that dominate the DSSS carrier).
+    # Use a fraction of nfft as the search window: ±5% of the Nyquist
+    # band covers ±100 kHz at 2 Msps and ±400 kHz at 8 Msps — wide
+    # enough for any real crystal offset but excludes clock spurs.
+    search_half = max(256, nfft // 20)
+    mask = np.zeros(nfft, dtype=bool)
+    mask[:search_half] = True
+    mask[-search_half:] = True
+    masked_mag = np.where(mask, mag, 0.0)
+    peak_bin = int(np.argmax(masked_mag))
 
     # Parabolic interpolation for sub-bin accuracy. Fits a parabola
     # through the peak and its two neighbours to find the fractional
