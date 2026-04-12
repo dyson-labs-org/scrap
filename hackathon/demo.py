@@ -465,6 +465,7 @@ class _AgcPpmState:
         self._agc_warmup_blocks = 3
         self._blocks_seen = 0
         self._agc_stable = False  # True once gain hasn't changed for 1 block
+        self._clip_count = 0     # consecutive clipping blocks
 
         if device_name == "hackrf":
             self._current_vga = float(vga_db)
@@ -532,25 +533,32 @@ class _AgcPpmState:
     def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
         sample_p99 = float(np.percentile(np.abs(block_data), 99))
         if sample_p99 > 0.9 and self._current_vga > self._vga_min:
-            reduce_db = min(6.0, max(3.0,
-                            20.0 * np.log10(sample_p99 / 0.5)))
-            self._current_vga = max(
-                self._vga_min, self._current_vga - reduce_db)
-            # Set a ceiling: the proportional AGC can't ramp back above
-            # this level. Prevents the oscillation where gain ramps to
-            # 62 → clips → drops to 38 → ramps to 62 → clips again.
-            self._vga_ceiling = self._current_vga
-            self._set_rx_vga(self._current_vga)
-            print(f"       AGC: ADC clipping (p99={sample_p99:.2f}), "
-                  f"gain → {self._current_vga:.0f} dB "
-                  f"(ceiling set)")
+            self._clip_count += 1
+            # Only set the ceiling after 2 consecutive clipping blocks.
+            # A single WiFi burst at 2.4 GHz can spike p99 > 0.9 for one
+            # block without meaning the DSSS signal is too strong. Setting
+            # the ceiling from a transient burst permanently caps gain
+            # too low, killing the signal.
+            if self._clip_count >= 2:
+                reduce_db = min(6.0, max(3.0,
+                                20.0 * np.log10(sample_p99 / 0.5)))
+                self._current_vga = max(
+                    self._vga_min, self._current_vga - reduce_db)
+                self._vga_ceiling = self._current_vga
+                self._set_rx_vga(self._current_vga)
+                print(f"       AGC: sustained clipping (p99={sample_p99:.2f}), "
+                      f"gain → {self._current_vga:.0f} dB "
+                      f"(ceiling set)")
+            else:
+                print(f"       AGC: transient clipping (p99={sample_p99:.2f}), "
+                      f"monitoring")
         else:
+            self._clip_count = 0
             pk = result.get("peak_mag")
             if pk is not None and pk > 1:
                 if pk < self.AGC_MIN_PEAK or pk > self.AGC_MAX_PEAK:
                     step_db = 10.0 * np.log10(self.AGC_TARGET / pk)
                     step_db = max(-6.0, min(6.0, step_db))
-                    # Respect the ceiling set by ADC clipping detection
                     new_vga = max(self._vga_min, min(
                         self._vga_ceiling, self._current_vga + step_db))
                     if abs(new_vga - self._current_vga) >= 1.0:
