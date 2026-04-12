@@ -642,11 +642,14 @@ class LlrAccumulator:
         # The soft-Viterbi + Poly1305 gate at try_decrypt is the real
         # quality oracle. Skip phase_rms and asm_errs gates — the FEC +
         # crypto layer rejects bad copies after combining.
+        # DBPSK body LLRs are phase-invariant: the differential dot
+        # product Re(y_k · conj(y_{k-1})) has the correct sign regardless
+        # of absolute phase θ₀. NO polarity vote — applying one flips
+        # correct body LLRs based on noisy pilot phase, causing ~half the
+        # copies to cancel instead of add (sublinear L1 growth).
         llrs_f64 = llrs[:self.n_bits].astype(np.float64)
-        polarity_vote = float(np.dot(llrs_f64[:32], self._asm_signs))
-        sign = 1.0 if polarity_vote >= 0 else -1.0
         body_llrs = llrs_f64[self._header_bits:]
-        self.accumulated += sign * body_llrs
+        self.accumulated += body_llrs
         self.n_copies += 1
         if self.n_copies >= self.max_copies:
             self.accumulated *= 0.5
@@ -950,6 +953,11 @@ def _try_fec_decrypt(
     best_pts_ratio = 0.0
     decoded_hail: Optional[sc.DecodedHail] = None
     polarity_label = "fec"
+    # Collect ALL valid candidates' LLRs for multi-frame combining.
+    # The TX loops the same frame, so every candidate with enough room
+    # after it is a valid copy of the same data — feeding all of them
+    # to the accumulator gives 2-3× combining per block.
+    extra_fec_llrs: list[np.ndarray] = []
 
     for cand_offset, cand_score, cand_pts in topk:
         if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
@@ -980,6 +988,9 @@ def _try_fec_decrypt(
             best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
             break
 
+        # Failed to decrypt — save the LLRs for accumulator combining
+        # and keep trying the next candidate.
+        extra_fec_llrs.append(fec_llrs_arr)
         if best_attempt is None or abs(cand_score) > abs(best_score):
             best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
             best_offset = int(cand_offset)
@@ -1008,6 +1019,7 @@ def _try_fec_decrypt(
         "soft_score": best_score,
         "pts_ratio": best_pts_ratio,
         "fec_llrs": fec_llrs_arr,
+        "extra_fec_llrs": extra_fec_llrs,
         "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
         "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
     }
@@ -1335,13 +1347,12 @@ def live_rx_decode(
     offset_history: list[float] = []
 
     # ── Auto-gain (AGC) state ──
-    # Target: peak matched-filter magnitude in [AGC_LOW, AGC_HIGH].
-    # Below AGC_LOW the signal is too weak for FEC. Above AGC_HIGH
-    # the ADC may be compressing. Adjust the variable-gain stage
-    # (HackRF VGA or RTL-SDR TUNER) by AGC_STEP_DB per block.
-    AGC_LOW = 80.0
-    AGC_HIGH = 500.0
-    AGC_STEP_DB = 2.0
+    # Target: peak matched-filter magnitude near AGC_TARGET. Uses
+    # proportional steps (converges in 2-3 blocks instead of 15+).
+    # Overflow events trigger an immediate 6 dB drop.
+    AGC_TARGET = 200.0
+    AGC_MIN_PEAK = 50.0
+    AGC_MAX_PEAK = 400.0
     if device_name == "hackrf":
         current_vga = float(vga_db)
         vga_min, vga_max = 0.0, 62.0
@@ -1374,6 +1385,15 @@ def live_rx_decode(
             if filled < block_samples // 2:
                 if overflow:
                     stats["overflows"] += 1
+                    # Immediate gain reduction on ADC overflow — the most
+                    # destructive condition for phase quality.
+                    if current_vga > vga_min + 6:
+                        current_vga -= 6.0
+                        if device_name == "hackrf":
+                            device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
+                        else:
+                            device.setGain(SOAPY_SDR_RX, 0, current_vga)
+                        print(f"  AGC: overflow → gain {current_vga:.0f} dB")
                 continue
 
             stats["blocks_processed"] += 1
@@ -1430,33 +1450,39 @@ def live_rx_decode(
                     if abs(correction) < SETTLED_THRESHOLD_HZ:
                         settled = True
 
-            # ── Auto-gain (AGC): adjust RX gain to keep peak_mag in range ──
+            # ── Auto-gain (AGC): proportional adjustment toward target ──
             pk = result.get("peak_mag")
-            if pk is not None and pk > 0:
-                if pk < AGC_LOW and current_vga < vga_max:
-                    new_vga = min(vga_max, current_vga + AGC_STEP_DB)
-                    current_vga = new_vga
-                    if device_name == "hackrf":
-                        device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
-                    else:
-                        device.setGain(SOAPY_SDR_RX, 0, current_vga)
-                    print(f"  AGC: peak={pk:.0f} < {AGC_LOW:.0f}, "
-                          f"gain → {current_vga:.0f} dB")
-                elif pk > AGC_HIGH and current_vga > vga_min:
-                    new_vga = max(vga_min, current_vga - AGC_STEP_DB)
-                    current_vga = new_vga
-                    if device_name == "hackrf":
-                        device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
-                    else:
-                        device.setGain(SOAPY_SDR_RX, 0, current_vga)
-                    print(f"  AGC: peak={pk:.0f} > {AGC_HIGH:.0f}, "
-                          f"gain → {current_vga:.0f} dB")
+            if pk is not None and pk > 1:
+                if pk < AGC_MIN_PEAK or pk > AGC_MAX_PEAK:
+                    # Proportional step: 10*log10(target/actual) dB, clamped.
+                    step_db = 10.0 * np.log10(AGC_TARGET / pk)
+                    step_db = max(-6.0, min(6.0, step_db))
+                    new_vga = max(vga_min, min(vga_max, current_vga + step_db))
+                    if abs(new_vga - current_vga) >= 1.0:
+                        current_vga = round(new_vga)
+                        if device_name == "hackrf":
+                            device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
+                        else:
+                            device.setGain(SOAPY_SDR_RX, 0, current_vga)
+                        print(f"  AGC: peak={pk:.0f}, "
+                              f"gain → {current_vga:.0f} dB")
 
-            # D4: LLR chase-combining.
+            # D4: LLR chase-combining. Feed ALL valid candidates' LLRs
+            # from this block into the accumulator (multi-frame extraction).
+            # The TX loops the same frame, so every candidate in the
+            # peak stream is a copy of the same data.
             if accumulator is not None:
+                # Primary candidate
                 added = accumulator.try_add(result)
                 if added:
                     stats["combined_copies"] += 1
+                # Extra candidates from the same block
+                for extra_llrs in result.get("extra_fec_llrs", []):
+                    extra_result = {"fec_llrs": extra_llrs}
+                    if accumulator.try_add(extra_result):
+                        stats["combined_copies"] += 1
+                # Show progress and try decrypt
+                if accumulator.n_copies > 0:
                     acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
                     print(f"       +ACC n={accumulator.n_copies}  "
                           f"L1={acc_l1:.0f}")

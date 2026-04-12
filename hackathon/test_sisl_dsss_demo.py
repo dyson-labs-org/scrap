@@ -477,18 +477,17 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
 
 
 def test_llr_accumulator_fec_polarity_inversion_normalized():
-    """A copy with inverted polarity (entire LLR vector negated) must be
-    sign-flipped via the ASM polarity vote and combine constructively
-    with a normal-polarity copy."""
+    """DBPSK body LLRs are phase-invariant — no polarity vote is applied.
+    Two identical copies add constructively (L1 doubles)."""
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
-    inverted = dict(result)
-    inverted["fec_llrs"] = -result["fec_llrs"].copy()
 
     acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
-    assert acc.try_add(inverted) is True
-    assert acc.n_copies == 2
+    l1_single = float(np.mean(np.abs(acc.accumulated)))
+    assert acc.try_add(result) is True
+    l1_double = float(np.mean(np.abs(acc.accumulated)))
+    assert l1_double > 1.8 * l1_single, (l1_single, l1_double)
 
     decrypt = acc.try_decrypt(responder_static)
     assert decrypt is not None
