@@ -39,13 +39,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
 import demo as dd
@@ -139,14 +136,8 @@ def _build_demo_fec_body() -> sc.HailBody:
     Uses a fixed body_nonce for bench reproducibility — production uses
     os.urandom(8)."""
     caller_static = dd.demo_caller_key()
-    return sc.HailBody(
+    return sc.make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key()),
-        center_freq_offset=100,
-        bandwidth_code=0x03,
-        mode=0x01,
-        chip_rate_code=0x32,
-        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-        flags=0x03,
     )
 
 

@@ -47,8 +47,6 @@ import sys
 import time
 from types import SimpleNamespace
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
 import numpy as np
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -288,7 +286,7 @@ if _HAVE_GR:
                 if preamble_only:
                     # Diagnostic mode: transmit only the 4-byte ASM on
                     # repeat. No body, no crypto, no per-call variation.
-                    frame = _ASM_BYTES
+                    frame = sc.ASM
                     self.hail_frame = frame
                     chips = sf.tx_bytes_to_chips(frame)
                 else:
@@ -372,7 +370,6 @@ def tx_to_file(message: bytes, path: str,
     return out.size
 
 
-_ASM_BYTES = sisl_rx._ASM_BYTES
 _ASM_BITS = sisl_rx._ASM_BITS
 _PILOT_BYTES = sisl_rx._PILOT_BYTES
 _PILOT_BITS = sisl_rx._PILOT_BITS

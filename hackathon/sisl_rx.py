@@ -24,12 +24,10 @@ import sisl_framer as sf
 _SIGNAL_FLOOR_RATIO = 4.0
 
 
-_ASM_BYTES = b"\x1A\xCF\xFC\x1D"
-
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
 # bytes_to_bits / rx_chips_to_bytes conventions.
 _ASM_BITS = np.unpackbits(
-    np.frombuffer(_ASM_BYTES, dtype=np.uint8)
+    np.frombuffer(sc.ASM, dtype=np.uint8)
 ).astype(np.uint8)
 
 # Extended pilot: ASM + deterministic version (0x03) and msg_type (0x01)
@@ -37,7 +35,7 @@ _ASM_BITS = np.unpackbits(
 # so these 48 bits are a free extended training sequence for phase and
 # frequency estimation. Longer pilot = tighter slope variance = better
 # coherent decode at marginal SNR.
-_PILOT_BYTES = _ASM_BYTES + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
+_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
 _PILOT_BITS = np.unpackbits(
     np.frombuffer(_PILOT_BYTES, dtype=np.uint8)
 ).astype(np.uint8)

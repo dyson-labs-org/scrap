@@ -1,9 +1,4 @@
-import os
-import sys
-
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(__file__))
 
 import sisl_crypto as sc
 import sisl_framer as sf
@@ -47,15 +42,4 @@ def encoded_fec_bits_to_post_dbpsk(encoded_bits: np.ndarray) -> np.ndarray:
     return np.concatenate([header, body_orig])
 
 
-def make_test_hail_body(**overrides):
-    defaults = dict(
-        caller_static_pub=sc.pubkey_to_compressed(sc.generate_keypair().public_key()),
-        center_freq_offset=100,
-        bandwidth_code=0x03,
-        mode=0x01,
-        chip_rate_code=0x32,
-        body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
-        flags=0x03,
-    )
-    defaults.update(overrides)
-    return sc.HailBody(**defaults)
+from sisl_crypto import make_test_hail_body
