@@ -503,20 +503,32 @@ def _decode_one_hail_in_block(
 def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
     s = result["status"]
     foff = result.get("freq_offset_hz", 0.0)
+    # Signal power estimate: peak/median of MF output in dB.
+    # peak_mag = signal + noise at the symbol peak, median_mag ≈ noise.
+    # SNR ≈ (peak/median)² in linear → 20*log10(peak/median) in dB.
+    pk = result.get("peak_mag", 0)
+    md = result.get("median_mag", 0)
+    if md > 0 and pk > 0:
+        snr_db = 20.0 * np.log10(pk / md)
+        snr_str = f"SNR={snr_db:+.1f}dB"
+    else:
+        snr_str = ""
+    _GREEN = "\033[32m"
+    _RESET = "\033[0m"
     if s == "decrypt_ok":
         b = result["body"]
-        print(f"[{block_num:4d}] DECRYPTED  "
-              f"sample={result['start_sample']}  "
+        print(f"{_GREEN}[{block_num:4d}] DECRYPTED  "
               f"asm@{result['asm_at_byte']}  "
-              f"peak={result['peak_mag']:.3g}  "
+              f"peak={pk:.3g}  {snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
               f"nonce={b.body_nonce.hex()}  "
-              f"freq=+{b.center_freq_offset}MHz  mode=0x{b.mode:02x}")
+              f"freq=+{b.center_freq_offset}MHz  "
+              f"mode=0x{b.mode:02x}{_RESET}")
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
-              f"sample={result.get('start_sample', 0)}  "
               f"asm@{result['asm_at_byte']}  "
+              f"{snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
               f"\u2014 DECRYPT FAILED (not addressed to this key)")

@@ -769,18 +769,21 @@ def live_rx_decode(
                         stats["combined_copies"] += 1
                 if accumulator.n_copies > 0:
                     acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
-                    print(f"       +ACC n={accumulator.n_copies}  "
-                          f"L1={acc_l1:.0f}")
+                    print(f"       accumulator: {accumulator.n_copies} "
+                          f"frame copies combined, "
+                          f"mean |LLR|={acc_l1:.0f}")
                     combined = accumulator.try_decrypt(responder_static)
                     if combined is not None:
                         decoded_hail, label, n_flips = combined
                         stats["combined_decrypts"] += 1
                         stats["hails_decrypted"] += 1
-                        print(f"       ACCUMULATOR DECRYPT  "
+                        print(f"\033[32m       ACCUMULATOR DECRYPT  "
                               f"n_copies={accumulator.n_copies}  "
                               f"pol={label}  "
                               f"mode=0x{decoded_hail.body.mode:02x}  "
-                              f"nonce={decoded_hail.body.body_nonce.hex()}")
+                              f"nonce="
+                              f"{decoded_hail.body.body_nonce.hex()}"
+                              f"\033[0m")
                         accumulator.reset()
     except KeyboardInterrupt:
         print("  interrupted")
