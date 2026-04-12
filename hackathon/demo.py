@@ -545,27 +545,48 @@ def live_rx_decode(
     # ── Background USB reader thread ──
     # Continuously drain the SDR's USB buffer into a queue of numpy
     # blocks so DSP processing on the main thread never causes USB
-    # overflows. Suppresses SoapySDR's bare "O" overflow print by
-    # redirecting C-level stdout to /dev/null in the reader thread.
+    # overflows.
+    #
+    # Windows notes: the WinUSB/libusb backend has higher latency and
+    # smaller default transfer buffers than Linux. The reader uses
+    # small fixed-size reads (READ_CHUNK samples) instead of asking
+    # for the full block in one call. This keeps the USB pipeline fed
+    # and avoids gaps when the OS scheduler doesn't wake the thread
+    # quickly (Windows default quantum is 15.6 ms ≈ 31 K samples).
     import threading
     import queue as _queue
+    import platform
+
+    # On Windows, request the 1 ms timer resolution so the reader
+    # thread wakes promptly. Without this, the 15.6 ms default quantum
+    # causes ~31 K sample gaps at 2 Msps, overflowing the HackRF's
+    # 32 KB USB buffer.
+    _win_timer_set = False
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)  # type: ignore[attr-defined]
+            _win_timer_set = True
+        except Exception:
+            pass
 
     block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
     overflow_count_at_last_check = 0
+    # Small reads keep the USB pipeline fed on all platforms. 32 K
+    # samples ≈ 16 ms at 2 Msps — comfortably within one USB
+    # microframe even on Windows.
+    READ_CHUNK = 32768
 
     def _reader_thread():
-        # NOTE: we do NOT redirect stdout here — os.dup2 affects the
-        # whole process (threads share file descriptors). The bare "O"
-        # from SoapySDR is an acceptable cosmetic issue; silencing it
-        # would silence ALL output including the main thread's prints.
         local_buf = np.empty(block_samples, dtype=np.complex64)
         while not reader_stop.is_set():
             filled = 0
             while filled < block_samples and not reader_stop.is_set():
+                want = min(READ_CHUNK, block_samples - filled)
                 sr = device.readStream(
-                    stream, [local_buf[filled:]],
-                    block_samples - filled, timeoutUs=500_000,
+                    stream, [local_buf[filled:filled + want]],
+                    want, timeoutUs=500_000,
                 )
                 if sr.ret > 0:
                     filled += sr.ret
@@ -723,6 +744,11 @@ def live_rx_decode(
         device.closeStream(stream)
         if save_file is not None:
             save_file.close()
+        if _win_timer_set:
+            try:
+                ctypes.windll.winmm.timeEndPeriod(1)  # type: ignore[attr-defined]
+            except Exception:
+                pass
 
     stats["elapsed_s"] = time.time() - t_start
     return stats
