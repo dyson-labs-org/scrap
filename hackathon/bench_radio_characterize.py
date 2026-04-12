@@ -131,7 +131,9 @@ def characterize_block(samples: np.ndarray, samps_per_chip: int,
 
 
 def run_characterization(freq_mhz: float, n_blocks: int, block_seconds: float,
-                         lna_db: int, vga_db: int) -> list[dict]:
+                         lna_db: int, vga_db: int,
+                         device_name: str = "hackrf",
+                         amp_on: bool = False) -> list[dict]:
     try:
         import SoapySDR
         from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CF32
@@ -139,7 +141,10 @@ def run_characterization(freq_mhz: float, n_blocks: int, block_seconds: float,
         print("SoapySDR not available")
         return []
 
-    info = dd.DEVICES["rtlsdr"]
+    if device_name not in dd.DEVICES:
+        print(f"unknown device {device_name!r}")
+        return []
+    info = dd.DEVICES[device_name]
     center_hz = freq_mhz * 1e6
     samp_hz = info.samp_hz
     samps_per_chip = info.samps_per_chip
@@ -147,8 +152,17 @@ def run_characterization(freq_mhz: float, n_blocks: int, block_seconds: float,
     device = SoapySDR.Device(info.driver)
     device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
-    combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
-    device.setGain(SOAPY_SDR_RX, 0, combined_db)
+
+    if device_name == "hackrf":
+        device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
+        device.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
+        device.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
+        gain_str = (f"AMP={'on' if amp_on else 'off'} "
+                    f"LNA={lna_db} dB VGA={vga_db} dB")
+    else:
+        combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
+        device.setGain(SOAPY_SDR_RX, 0, combined_db)
+        gain_str = f"TUNER={combined_db:.0f} dB"
 
     stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0])
     device.activateStream(stream)
@@ -158,7 +172,7 @@ def run_characterization(freq_mhz: float, n_blocks: int, block_seconds: float,
     results = []
 
     print(f"\n{'='*72}")
-    print(f"  {freq_mhz:.0f} MHz — TUNER={combined_db:.0f} dB, "
+    print(f"  {freq_mhz:.0f} MHz — {info.name} {gain_str}, "
           f"{n_blocks} blocks × {block_seconds:.1f}s")
     print(f"{'='*72}")
     print(f"{'blk':>4}  {'peak':>6}  {'med':>6}  {'ratio':>5}  "
@@ -279,9 +293,15 @@ def main():
     p.add_argument("--block-seconds", type=float, default=6.0)
     p.add_argument("--rx-lna", type=int, default=20)
     p.add_argument("--rx-vga", type=int, default=5)
+    p.add_argument("--rx-amp", action="store_true",
+                   help="enable RX pre-amp (HackRF only)")
+    p.add_argument("--device", choices=list(dd.DEVICES.keys()),
+                   default="hackrf",
+                   help="RX device (default: hackrf)")
     args = p.parse_args()
 
     print("Radio characterization sweep")
+    print(f"  device:      {args.device}")
     print(f"  frequencies: {args.freq} MHz")
     print(f"  blocks/freq: {args.blocks}")
     print(f"  NOTE: TX must be running on the target frequency")
@@ -289,7 +309,8 @@ def main():
     for freq in args.freq:
         results = run_characterization(
             freq, args.blocks, args.block_seconds,
-            args.rx_lna, args.rx_vga)
+            args.rx_lna, args.rx_vga,
+            device_name=args.device, amp_on=args.rx_amp)
         print_summary(freq, results)
     print()
 
