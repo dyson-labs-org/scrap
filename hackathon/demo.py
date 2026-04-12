@@ -1325,7 +1325,7 @@ def main() -> int:
         # 4s gives ~2.5 complete ACK frames for reliable decode.
         # gcd(9, T_respond) = 1 for most T_respond values.
         TX_DURATION = 5.0
-        RX_DURATION = 8.0
+        RX_DURATION = 12.0  # 5s block + AGC warmup + reader startup
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
 
         # Auto-PPM for ACK RX: learn Δf from track_lost/decrypt_fail
@@ -1373,7 +1373,7 @@ def main() -> int:
             # Gets full AGC, PPM, background reader infrastructure.
             ack_stats = live_rx_decode(
                 duration_s=RX_DURATION,
-                block_seconds=3.0,  # short blocks for ACK (1.52s frame)
+                block_seconds=5.0,  # need room for tracker start offset
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
                 amp_on=args.rx_amp,
