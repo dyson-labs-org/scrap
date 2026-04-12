@@ -1,32 +1,13 @@
-"""SISL framer / deframer — pure-numpy DSP for the hackathon demo.
+"""SISL framer / deframer — pure-numpy DSP for BPSK-DSSS TX/RX.
 
-Implements the TX and RX chip-rate DSP for the SISL DSSS hailing channel,
-independent of GNU Radio. The same functions are reused by the Phase 1
-hidden-signal demo (`sisl_dsss_demo.py`) and the Phase 2 handshake flowgraph
-(`sisl_hail_flow.py`) via thin GR wrappers.
+TX: bytes → BPSK symbols (±1) → spread by 1023-chip code → int8 chips
+RX: chips → reshape → row-dot with code → sign decision → bytes
 
-Signal chain:
-
-    TX: bytes → MSB-first bit unpack → BPSK symbols (±1)
-              → repeat each symbol 1023 times → multiply by spreading code
-              → int8 chip stream
-
-    RX: chip stream → reshape into (n_symbols, 1023) → row-dot with local
-        code → sign decision → MSB-first bit pack → bytes
-
-Acquisition (sliding correlator, matched-filter frame detection) is NOT
-implemented here. Per Hackathon.md §1.3 and §Risks, the Phase 1 demo
-assumes chip-aligned start on both ends. For production or a real receiver,
-add a sliding correlator on top of this module.
-
-The spreading code is the public hailing code from SISL v3 §4.6.1, generated
-by `sisl_dsss.hail_code_seed()` + `sisl_dsss.generate_dsss_code()`. Callers
-may supply a session-derived code for the Phase 3 P2P channel.
+Assumes chip-aligned start; add a sliding correlator for acquisition.
 """
 
 from __future__ import annotations
 
-from typing import Optional
 
 import numpy as np
 
@@ -59,11 +40,6 @@ DEFAULT_PUBLIC_CODE: np.ndarray = code_from_seed(sd.hail_code_seed())
 DEFAULT_PUBLIC_CODE.flags.writeable = False
 
 
-def public_hail_code() -> np.ndarray:
-    """Return the public SISL hailing spreading code as int8 ±1 array."""
-    return DEFAULT_PUBLIC_CODE
-
-
 # ── Byte/bit packing ────────────────────────────────────────────────────────
 
 def bytes_to_bits(data: bytes) -> np.ndarray:
@@ -80,25 +56,9 @@ def bits_to_bytes(bits: np.ndarray) -> bytes:
 
 # ── Differential bit encoding (for DBPSK) ───────────────────────────────────
 #
-# DBPSK eliminates the absolute-phase requirement by encoding each bit as
-# a TRANSITION (or non-transition) of the previous symbol, rather than as
-# an absolute symbol value. The receiver decodes via the differential dot
-# product Re(y_k · conj(y_{k−1})), which depends only on the inter-symbol
-# phase difference and is insensitive to a global phase rotation.
-#
-# Encoder:    e_{−1} = seed
-#             e_k    = e_{k−1} XOR b_k
-# Decoder:    b_k    = sign(Re(y_k · conj(y_{k−1}))) → 0 if positive, 1 if neg
-#
-# This file provides the bit-domain primitives. The DBPSK demodulator
-# (dbpsk_decode_from_pilot, defined below) uses them to recover bits from
-# complex peak values after V-V drift correction.
-#
-# Use case in SISL FEC: the 48-bit uncoded header stays coherent (the pilot
-# fit needs un-encoded symbols to estimate θ₀), and the 2048-bit FEC body
-# is differentially encoded with seed = the last header bit, so the first
-# body bit's differential decode anchors on the receiver's coherent estimate
-# of the last pilot symbol.
+# Encoder: e_k = e_{k−1} XOR b_k
+# Decoder: b_k = sign(Re(y_k · conj(y_{k−1})))
+# Phase-insensitive; depends only on inter-symbol phase difference.
 
 def differential_encode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
     """Differentially encode a uint8 0/1 bit array.
@@ -120,15 +80,7 @@ def differential_encode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
 
 
 def differential_decode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
-    """Inverse of differential_encode_bits, on hard-decided bit values.
-
-    b_k = bits[k] XOR bits[k−1]    for k = 1 .. N−1
-    b_0 = bits[0] XOR seed
-
-    This is the bit-domain inverse, used for testing and for paths that
-    do not have soft LLR access. The DBPSK soft demodulator computes the
-    LLRs directly via differential dot products and bypasses this.
-    """
+    """Inverse of differential_encode_bits: b_k = bits[k] XOR bits[k−1]."""
     bits = np.ascontiguousarray(bits, dtype=np.uint8)
     if bits.ndim != 1:
         raise ValueError(f"bits must be 1-D, got shape {bits.shape}")
@@ -143,7 +95,7 @@ def differential_decode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
 # ── TX: bytes → chip stream ─────────────────────────────────────────────────
 
 def tx_bytes_to_chips(data: bytes,
-                      code: Optional[np.ndarray] = None) -> np.ndarray:
+                      code: np.ndarray | None = None) -> np.ndarray:
     """Spread `data` into an int8 bipolar chip stream.
 
     BPSK mapping: bit 0 → +1, bit 1 → -1. Each symbol is multiplied by the
@@ -158,7 +110,7 @@ def tx_bytes_to_chips(data: bytes,
 
 
 def tx_bits_to_chips(bits: np.ndarray,
-                     code: Optional[np.ndarray] = None) -> np.ndarray:
+                     code: np.ndarray | None = None) -> np.ndarray:
     """Spread an arbitrary-length bit array into an int8 bipolar chip stream.
 
     Bits must be a uint8 array of 0/1 values; length need NOT be a multiple
@@ -187,7 +139,7 @@ def tx_bits_to_chips(bits: np.ndarray,
 # ── RX: chip stream → bytes ─────────────────────────────────────────────────
 
 def rx_chips_to_bytes(chips: np.ndarray, n_bytes: int,
-                      code: Optional[np.ndarray] = None) -> bytes:
+                      code: np.ndarray | None = None) -> bytes:
     """Despread a chip-aligned stream into bytes.
 
     `chips` must contain at least `n_bytes * 8 * CHIPS_PER_SYMBOL` samples
@@ -201,7 +153,7 @@ def rx_chips_to_bytes(chips: np.ndarray, n_bytes: int,
 
 
 def rx_chips_to_bits(chips: np.ndarray, n_bits: int,
-                     code: Optional[np.ndarray] = None) -> np.ndarray:
+                     code: np.ndarray | None = None) -> np.ndarray:
     """Despread a chip-aligned stream into an arbitrary-length bit array.
 
     `chips` must contain at least `n_bits * CHIPS_PER_SYMBOL` samples
@@ -228,39 +180,8 @@ def rx_chips_to_bits(chips: np.ndarray, n_bits: int,
 
 # ── Sliding-correlator acquisition (Phase 2/3, optional) ────────────────────
 
-def matched_filter_magnitude(chips: np.ndarray,
-                              code: Optional[np.ndarray] = None) -> np.ndarray:
-    """Return |correlation| of `chips` against one period of the spreading code.
-
-    Chip-rate matched filter. `chips` is expected to already be decimated
-    to one sample per chip, chip-aligned at the start. For sample-rate
-    input (unknown sub-chip phase), use `matched_filter_magnitude_sample_rate`
-    instead — it is phase-agnostic and runs in a single pass.
-
-    Output length = len(chips) - len(code) + 1.
-    """
-    if code is None:
-        code = DEFAULT_PUBLIC_CODE
-    chips_f = np.asarray(chips, dtype=np.float32)
-    code_f = code.astype(np.float32)
-    if len(chips_f) < len(code_f):
-        return np.zeros(0, dtype=np.float32)
-    kernel = code_f[::-1]
-    corr = _fftconvolve(chips_f, kernel, mode="valid")
-    return np.abs(corr.astype(np.float32))
-
-
 def _remove_dc(samples: np.ndarray) -> np.ndarray:
-    """Subtract the block-mean (DC component) from a complex sample stream.
-
-    RTL-SDR direct-conversion receivers have significant LO feedthrough
-    that shows up as a large DC spike at the tuned frequency. For our
-    BPSK-DSSS signal the modulated energy is mean-zero over any
-    reasonable window, so subtracting the block mean removes the LO
-    leakage without affecting the useful signal. This matters for R[1]
-    autocorrelation — a DC component contributes a large real-valued
-    (phase-zero) term that biases the phase estimate toward zero.
-    """
+    """Subtract block-mean DC from a complex sample stream."""
     s = np.asarray(samples, dtype=np.complex64)
     if len(s) == 0:
         return s
@@ -283,19 +204,10 @@ def _estimate_freq_offset_r1(samples: np.ndarray) -> float:
 
 def _estimate_freq_fft_squared(samples: np.ndarray,
                                coarse_rad: float = 0.0) -> float:
-    """FFT-based frequency estimator on the squared signal.
+    """FFT-based frequency estimator on squared signal.
 
-    For BPSK/DSSS: s(t) = A*d(t)*c(t)*exp(jωt). Squaring removes the
-    data/code modulation: s²(t) = A²*exp(j2ωt). The FFT of s² has a
-    spectral line at 2ω, giving an unambiguous carrier estimate.
-
-    This works at much lower per-sample SNR than R[1] because the FFT
-    integrates over the entire block with √N gain. For 12M samples at
-    -17 dB per-sample SNR, the spectral line at 2ω has ~30 dB SNR.
-
-    `coarse_rad`: optional coarse frequency estimate (from R[1]) used to
-    center the FFT search window. If 0, searches the full band.
-
+    s²(t) = A²·exp(j2ωt) removes BPSK modulation; FFT peak at 2ω / 2.
+    `coarse_rad`: optional R[1] estimate to center the search window.
     Returns frequency estimate in rad/sample.
     """
     s = np.asarray(samples, dtype=np.complex64)
@@ -340,15 +252,10 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
 
 def estimate_freq_drift_rate(samples: np.ndarray,
                              n_segments: int = 6) -> tuple[float, float]:
-    """Estimate both carrier offset and linear drift rate from sub-block R[1].
+    """Estimate carrier offset and linear drift rate from sub-block R[1].
 
-    Splits the block into `n_segments` sub-blocks, runs R[1] on each,
-    fits a line through the per-segment frequency estimates. Returns
-    (rad_per_sample_at_center, drift_rad_per_sample2).
-
-    The drift rate captures RTL-SDR crystal warm-up drift (~1-3 kHz/s at
-    433 MHz). Without this correction, a 6-second block can have ~5 kHz
-    of in-block drift — enough to destroy the 1023-chip MF coherence.
+    Splits into `n_segments` sub-blocks, fits a line through per-segment
+    R[1] estimates. Returns (rad_per_sample_at_start, drift_rad_per_sample²).
     """
     N = len(samples)
     if N < n_segments * 1000:
@@ -390,31 +297,11 @@ def estimate_freq_drift_rate(samples: np.ndarray,
 
 def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
                                          iterations: int = 2) -> float:
-    """Estimate carrier frequency offset of a BPSK-DSSS baseband signal.
+    """Iterative R[1] autocorrelation frequency offset estimator.
 
-    Uses the 1-sample-lag autocorrelation R[1] = Σ s[n]·conj(s[n+1]).
-    For a signal s[n] = x[n]·exp(j·2π·Δf·n·T + jφ), with x[n] ∈ {+1,-1},
-    the autocorrelation has phase -2π·Δf·T. When samps_per_chip ≥ 2, many
-    sample-pairs (n, n+1) fall inside the same chip (x[n] = x[n+1] = ±1)
-    so they coherently contribute `exp(-j·2π·Δf·T)`; cross-chip pairs
-    contribute random-sign products that average toward zero.
-
-    To improve accuracy over long streams, this function iterates the
-    R[1] estimator: after computing a coarse offset, it applies the
-    correction and re-estimates on the corrected samples. Each iteration
-    typically reduces the residual error by 1-2 orders of magnitude
-    until numerical precision is reached. Two iterations are usually
-    enough for ~0.01 Hz residual on multi-second streams, which keeps
-    cumulative phase drift below 0.1 rad across a one-second frame.
-
-    Returns the total phase advance per sample in radians (= 2π·Δf·T).
-    Multiply by f_s / (2π) to convert to Hz.
-
-    The input is implicitly DC-centered by subtracting the block mean.
-    This is critical for direct-conversion receivers (notably RTL-SDR)
-    whose LO feedthrough produces a large DC spike right on top of the
-    signal; without DC removal, R[1] is pulled toward zero phase by
-    that bias term and the estimate can be off by hundreds of Hz.
+    R[1] phase = −2π·Δf·T; iterates correction + re-estimation for
+    refinement. Returns phase advance per sample in rad (= 2π·Δf·T).
+    DC is removed internally (critical for direct-conversion receivers).
     """
     samples_ac = _remove_dc(samples)
     total = _estimate_freq_offset_r1(samples_ac)
@@ -452,7 +339,7 @@ def apply_freq_correction(samples: np.ndarray,
 def matched_filter_complex_sample_rate(
     samples: np.ndarray,
     samps_per_chip: int,
-    code: Optional[np.ndarray] = None,
+    code: np.ndarray | None = None,
 ) -> np.ndarray:
     """Complex sample-rate matched filter.
 
@@ -480,33 +367,16 @@ def decode_with_freq_tracking(
     samples: np.ndarray,
     samps_per_chip: int,
     n_bytes: int,
-    code: Optional[np.ndarray] = None,
-    search_half_samples: Optional[int] = None,
+    code: np.ndarray | None = None,
+    search_half_samples: int | None = None,
     lock_threshold_frac: float = 0.1,
-    freq_offset_rad_per_sample: Optional[float] = None,
-    precomputed_corr: Optional[np.ndarray] = None,
-) -> Optional[dict]:
-    """Full-stack decoder: carrier offset correction + complex MF + tracking.
+    freq_offset_rad_per_sample: float | None = None,
+    precomputed_corr: np.ndarray | None = None,
+) -> dict | None:
+    """Full-stack decoder: R[1] freq correction → complex MF → symbol tracking.
 
-    Handles both carrier frequency offset (via one-shot R[1] estimation
-    and correction) AND symbol-timing drift (via per-symbol peak search
-    within a local window). Works with any integer samps_per_chip ≥ 2.
-
-    Returns a dict with:
-        bytes           — decoded bytes (one bit polarity; caller should
-                          try this and its complement for SISL framing)
-        positions       — peak position (sample index) per decoded bit
-        freq_offset_hz  — estimated frequency offset applied (needs the
-                          caller to supply the original sample rate; we
-                          return rad/sample and let the caller scale)
-        freq_rad_per_sample
-        peak_magnitude  — global matched-filter peak after correction
-        ref_angle_rad   — reference carrier phase taken from first peak
-
-    Returns None if:
-        - Stream too short for one symbol
-        - No matched-filter peak above lock threshold
-        - Tracker lost lock before decoding n_bytes*8 bits
+    Returns dict with bytes, positions, rad_per_sample, peak_magnitude,
+    ref_angle_rad, drift_per_symbol_rad, peak_values, etc. or None on failure.
     """
     if code is None:
         code = DEFAULT_PUBLIC_CODE
@@ -587,7 +457,7 @@ def decode_with_freq_tracking(
     peak_values: list[complex] = []
     positions: list[int] = []
 
-    def _refine_peak(lo: int, hi: int) -> tuple[Optional[float], Optional[complex]]:
+    def _refine_peak(lo: int, hi: int) -> tuple[float | None, complex | None]:
         """Parabolic peak interpolation.
 
         Fits y(x) = a·(x-x0)² + b·x + c to the three magnitudes around
@@ -746,43 +616,14 @@ def fit_phase_from_known_bits(
     known_bits: np.ndarray,
     delta_search_range: float = np.pi,
     delta_fine_steps: int = 8,
-) -> Optional[tuple[float, float, float]]:
+) -> tuple[float, float, float | None]:
     """ML fit of absolute phase θ₀ and per-symbol drift Δθ from a known pilot.
 
-    Maximum-likelihood estimator for the linear carrier-phase model
-    θ(k) = θ₀ + k·Δθ, given that peak_values[start:start+N] carry bits
-    with known signs. Robust at arbitrary residual frequency offsets up
-    to ±symbol_rate/2 — does NOT use np.unwrap, which diverges when the
-    true slope approaches π/symbol.
+    Derotate by known bit sign: d[k] = sign[k] · peak[k] ≈ |p|·exp(j·(θ₀+k·Δθ))
+        Δθ̂ = argmax_{δ} |Σ_k d[k]·exp(-j·k·δ)|²   (FFT peak, zero-padded)
+        θ̂₀ = angle(Σ_k d[k]·exp(-j·k·Δθ̂))
 
-    Derivation. After derotating each peak by the known bit sign:
-        d[k] = sign(known_bits[k]) · peak[k]
-             ≈ |p| · exp(j·(θ₀ + k·Δθ))  +  noise
-
-    The ML estimate of Δθ is:
-        Δθ̂ = argmax_{δ}  | Σ_k d[k] · exp(-j·k·δ) |²
-
-    This is exactly the peak of the FFT of d[k], zero-padded for fine
-    resolution. Given Δθ̂, the ML estimate of θ₀ is the angle of the
-    coherent sum:
-        θ̂₀ = angle( Σ_k d[k] · exp(-j·k·Δθ̂) )
-
-    The rms_residual diagnostic is computed as the ratio between the
-    coherent-sum magnitude and the incoherent sum of magnitudes — a
-    value near 0 means all peaks are phase-aligned after correction
-    (clean), values near 1 mean they are randomly oriented (noise).
-    For backward compatibility with existing callers expecting a radians
-    value, we return the equivalent phase spread:
-        rms_residual ≈ sqrt(-2 · ln(coherent_mag / incoherent_mag))
-
-    So rms_residual < 0.3 rad → clean, > 0.9 rad → marginal, > 1.5 rad
-    → essentially noise.
-
-    `delta_search_range` is the half-width of the Δθ search interval in
-    radians per symbol (default π, the full unambiguous range).
-
-    `delta_fine_steps` is the number of fine-refinement FFT iterations
-    around the coarse peak; default 8 gives ~0.001 rad resolution.
+    rms_residual ≈ sqrt(-2·ln(coherent/incoherent)): <0.3 clean, >1.5 noise.
 
     Returns (theta0, delta_theta, rms_residual_rad) or None on failure.
     """
@@ -876,7 +717,7 @@ def refine_freq_from_pilot(
     pilot_bit_offset: int,
     pilot_bits: np.ndarray,
     symbol_rate_hz: float,
-) -> Optional[tuple[float, float, float]]:
+) -> tuple[float, float, float | None]:
     """Pilot-aided ML refinement of residual frequency offset.
 
     Wraps fit_phase_from_known_bits and converts the per-symbol phase
@@ -906,7 +747,7 @@ def coherent_decode_from_pilot(
     pilot_bit_offset: int,
     pilot_bits: np.ndarray,
     n_data_bits: int,
-) -> Optional[tuple[bytes, np.ndarray, float, float, float]]:
+) -> tuple[bytes, np.ndarray, float, float, float | None]:
     """Coherent BPSK decode using a known pilot for absolute phase recovery.
 
     1. Fit θ₀, Δθ, residual from the pilot bits (pilot_bits_offset = where
@@ -961,7 +802,7 @@ def coherent_decode_from_pilot(
 
 def estimate_drift_per_symbol(
     peak_values,
-    pilot_bits: Optional[np.ndarray] = None,
+    pilot_bits: np.ndarray | None = None,
 ) -> float:
     """Estimate per-symbol phase drift Δθ in rad/symbol.
 
@@ -1004,7 +845,7 @@ def estimate_drift_per_symbol(
     diffs_vv = sq[1:] * np.conjugate(sq[:-1])
     s_vv = complex(np.sum(diffs_vv))
     if abs(s_vv) > 1e-12:
-        delta_vv: Optional[float] = float(np.angle(s_vv)) / 2.0
+        delta_vv: float | None = float(np.angle(s_vv)) / 2.0
     else:
         delta_vv = None
 
@@ -1042,7 +883,7 @@ def dbpsk_decode_from_pilot(
     peak_values,
     pilot_bits: np.ndarray,
     n_data_bits: int,
-) -> Optional[tuple[bytes, np.ndarray, float, float, float]]:
+) -> tuple[bytes, np.ndarray, float, float, float | None]:
     """Hybrid coherent-pilot + differential-body decoder for DBPSK signals.
 
     Replaces `coherent_decode_from_pilot` for the FEC fast path. Solves
@@ -1143,46 +984,5 @@ def dbpsk_decode_from_pilot(
 
 
 
-
-def find_frame_start(chips: np.ndarray, code: Optional[np.ndarray] = None,
-                     max_search: Optional[int] = None,
-                     peak_threshold: float = 4.0) -> Optional[int]:
-    """Locate the chip offset of the first symbol via matched-filter peak.
-
-    Returns the offset into `chips` at which the first symbol begins, or
-    None if no peak is confidently above noise within `max_search` chips.
-
-    `max_search=None` searches the entire input. `peak_threshold` is the
-    ratio of peak magnitude to median magnitude required to declare a lock;
-    4.0 is conservative and works well under AWGN with processing gain.
-
-    Note: the matched filter also peaks at every symbol boundary (every
-    1023 chips) because the code period matches the symbol period. We return
-    the FIRST above-threshold peak, which corresponds to the first symbol
-    edge in the stream.
-    """
-    if code is None:
-        code = DEFAULT_PUBLIC_CODE
-    mag = matched_filter_magnitude(chips, code)
-    if len(mag) == 0:
-        return None
-    if max_search is not None:
-        mag = mag[:max_search]
-        if len(mag) == 0:
-            return None
-
-    peak_val = float(mag.max())
-    median = float(np.median(mag))
-    if median == 0.0 or peak_val < peak_threshold * median:
-        return None
-
-    # Note: the matched filter peaks at every symbol boundary (every 1023
-    # chips) with magnitude ≈ CHIPS_PER_SYMBOL; FFT-based convolution
-    # introduces ULP-level rounding across these near-identical peaks, so
-    # a strict np.argmax may return a LATER peak than the first. Return
-    # the first index that is within 10% of the global maximum — robust
-    # to float32 rounding while still unambiguously above noise.
-    near_peak = mag >= 0.9 * peak_val
-    return int(np.argmax(near_peak))
 
 

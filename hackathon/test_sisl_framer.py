@@ -16,13 +16,6 @@ import sisl_framer as sf
 
 # ── Basic sanity ────────────────────────────────────────────────────────────
 
-def test_public_code_length_and_shape():
-    code = sf.public_hail_code()
-    assert code.dtype == np.int8
-    assert len(code) == sf.CHIPS_PER_SYMBOL
-    assert set(np.unique(code).tolist()) == {-1, 1}
-
-
 def test_byte_bit_roundtrip():
     data = b"\x00\x01\xAB\xFF\x1A\xCF\xFC\x1D"
     bits = sf.bytes_to_bits(data)
@@ -479,7 +472,7 @@ def test_loopback_noise_minus_20dB_ber():
 def test_wrong_code_produces_garbage():
     """Despreading with a different code must NOT recover the message."""
     data = b"this is a secret transmission that must stay hidden"
-    code_a = sf.public_hail_code()
+    code_a = sf.DEFAULT_PUBLIC_CODE
     code_b = sf.code_from_seed(b"\x55" * 32)
 
     chips = sf.tx_bytes_to_chips(data, code=code_a)
@@ -492,51 +485,6 @@ def test_wrong_code_produces_garbage():
     assert errors > total * 0.3, (
         f"unexpectedly few errors with wrong code: {errors}/{total}"
     )
-
-
-# ── Sliding correlator acquisition ──────────────────────────────────────────
-
-def test_find_frame_start_chip_zero():
-    data = b"hello world"
-    chips = sf.tx_bytes_to_chips(data)
-    offset = sf.find_frame_start(chips.astype(np.float32), max_search=256)
-    # Signal starts at chip 0; peak at 0
-    assert offset == 0
-
-
-def test_find_frame_start_with_prefix_noise():
-    rng = np.random.default_rng(seed=4)
-    data = b"hello world"
-    pad = rng.normal(0, 0.5, size=137).astype(np.float32)
-    chips = sf.tx_bytes_to_chips(data).astype(np.float32)
-    stream = np.concatenate([pad, chips])
-    offset = sf.find_frame_start(stream, max_search=512)
-    # True start is at 137
-    assert offset is not None
-    assert abs(offset - 137) <= 1
-
-
-def test_find_frame_start_large_prefix_no_bound():
-    """Full-stream search locates the frame without an explicit max_search."""
-    rng = np.random.default_rng(seed=5)
-    data = b"greetings from chip 7500"
-    pad = rng.normal(0, 0.3, size=7500).astype(np.float32)
-    chips = sf.tx_bytes_to_chips(data).astype(np.float32)
-    stream = np.concatenate([pad, chips])
-    offset = sf.find_frame_start(stream)
-    assert offset is not None
-    # The matched filter peaks at every symbol boundary; the first above-
-    # threshold peak corresponds to chip 7500 (the signal start).
-    assert abs(offset - 7500) <= 1
-
-
-def test_matched_filter_magnitude_shape():
-    rng = np.random.default_rng(seed=6)
-    stream = rng.normal(0, 1, size=10_000).astype(np.float32)
-    mag = sf.matched_filter_magnitude(stream)
-    assert len(mag) == 10_000 - sf.CHIPS_PER_SYMBOL + 1
-    # Pure noise → no peak clearly above median
-    assert np.max(mag) < 6 * np.median(mag)
 
 
 # ── Pilot-aided coherent decode ─────────────────────────────────────────────
