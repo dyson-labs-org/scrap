@@ -1333,8 +1333,9 @@ def main() -> int:
             # TX phase
             tx_repeats = max(1, int(TX_DURATION * chip_rate_hz
                                     / len(hail_chips)))
-            print(f"\n  round {round_num}: TX hail "
-                  f"({tx_repeats} repeats)...", end="", flush=True)
+            print(f"\n  round {round_num}: \033[33mTX hail\033[0m "
+                  f"({tx_repeats}×{TX_DURATION:.0f}s)...",
+                  end="", flush=True)
             soapy_tx_burst(
                 hail_samples, center_hz,
                 samp_hz=SAMP_RATE_HZ,
@@ -1343,7 +1344,8 @@ def main() -> int:
                 repeats=tx_repeats,
                 device_str=tx_device_str,
             )
-            print(" done. Listening for ACK...", flush=True)
+            print(f" done → \033[36mRX listening {RX_DURATION:.0f}s\033[0m",
+                  flush=True)
 
             # RX phase — use the SAME pinned HackRF (half-duplex switch)
             import SoapySDR as _soapy
@@ -1407,9 +1409,11 @@ def main() -> int:
                     print(f"  Δf:            {foff:+.0f} Hz")
                     return 0
                 elif s in ("decrypt_fail", "track_lost"):
-                    print(f"    ({s} Δf={foff:+.0f}Hz)")
+                    print(f"       RX: {s} Δf={foff:+.0f}Hz")
+                elif s == "no_signal":
+                    print(f"       RX: no signal")
                 else:
-                    print(f"    ({s})")
+                    print(f"       RX: {s}")
 
         print(f"\n  timeout after {MAX_ROUNDS} rounds — no ACK received")
         return 1
