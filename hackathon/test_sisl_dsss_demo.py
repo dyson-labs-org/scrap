@@ -11,6 +11,7 @@ import tempfile
 import numpy as np
 
 import sisl_crypto as sc
+import sisl_rx
 import demo as dd
 from conftest import bits_to_hard_llrs, encoded_fec_bits_to_post_dbpsk, make_test_hail_body
 
@@ -105,7 +106,7 @@ def _make_block_with_hail(prefix_samples: int = 50_000,
 
 def test_decode_one_hail_in_block_correct_key():
     block, _ = _make_block_with_hail()
-    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    result = sisl_rx._decode_one_hail_in_block(block, dd.demo_responder_key())
     assert result["status"] == "decrypt_ok", result
     assert result["body"].center_freq_offset == 100
     assert result["body"].mode == 0x01
@@ -115,7 +116,7 @@ def test_decode_one_hail_in_block_populates_llrs_on_clean_decrypt():
     """Clean decrypts must surface fec_llrs / phase_rms / asm_errs
     so the LLR accumulator can chase-combine across blocks."""
     block, _ = _make_block_with_hail()
-    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    result = sisl_rx._decode_one_hail_in_block(block, dd.demo_responder_key())
     assert result["status"] == "decrypt_ok", result
     for key in ("fec_llrs",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
@@ -129,7 +130,7 @@ def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
     """decrypt_fail must also surface fec_llrs so the accumulator can
     keep combining marginal blocks across the wrong-key boundary case."""
     block, _ = _make_block_with_hail()
-    result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
+    result = sisl_rx._decode_one_hail_in_block(block, dd.demo_other_key())
     assert result["status"] == "decrypt_fail", result
     for key in ("fec_llrs",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
@@ -139,7 +140,7 @@ def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
 
 def test_decode_one_hail_in_block_wrong_key():
     block, _ = _make_block_with_hail()
-    result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
+    result = sisl_rx._decode_one_hail_in_block(block, dd.demo_other_key())
     assert result["status"] == "decrypt_fail", result
 
 
@@ -149,7 +150,7 @@ def test_decode_one_hail_in_block_pure_noise():
         rng.normal(0, 0.05, 8_000_000).astype(np.float32)
         + 1j * rng.normal(0, 0.05, 8_000_000).astype(np.float32)
     ).astype(np.complex64)
-    result = dd._decode_one_hail_in_block(noise, dd.demo_responder_key())
+    result = sisl_rx._decode_one_hail_in_block(noise, dd.demo_responder_key())
     # Pure noise: any non-decode status is acceptable. With the lower
     # signal threshold (4x) we now let more borderline blocks through
     # so downstream periodicity / tracking / ASM checks can reject them.
@@ -164,7 +165,7 @@ def test_decode_one_hail_in_block_pure_noise():
 def test_decode_one_hail_in_block_sub_chip_phase_offset():
     """Signal starts at a non-integer-chip sample — sub-chip search needed."""
     block, _ = _make_block_with_hail(phase_offset=3)   # 3 of 8 samples off
-    result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
+    result = sisl_rx._decode_one_hail_in_block(block, dd.demo_responder_key())
     # Because _decode_one_hail_in_block iterates all 8 chip phases, it
     # finds the shifted signal and recovers it.
     assert result["status"] == "decrypt_ok", result
@@ -196,10 +197,10 @@ def test_find_sisl_frame_soft_topk_returns_candidates():
     peaks = peaks.astype(np.complex128)
     # Inject a strong ASM-like signal at position 60 by setting peaks there
     # to follow _ASM_BITS sign pattern with large magnitude.
-    asm_signs = np.where(dd._ASM_BITS == 0, 1.0, -1.0)
+    asm_signs = np.where(sisl_rx._ASM_BITS == 0, 1.0, -1.0)
     for i in range(32):
         peaks[60 + i] = 10.0 * asm_signs[i]
-    results = dd.find_sisl_frame_soft_topk(
+    results = sisl_rx.find_sisl_frame_soft_topk(
         peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5,
     )
     assert len(results) > 0
@@ -219,7 +220,7 @@ def test_find_sisl_frame_soft_topk_separation():
     """Results respect minimum separation — no two candidates adjacent."""
     rng = np.random.default_rng(seed=100)
     peaks = (rng.normal(0, 1, 500) + 1j * rng.normal(0, 1, 500)).astype(np.complex128)
-    results = dd.find_sisl_frame_soft_topk(
+    results = sisl_rx.find_sisl_frame_soft_topk(
         peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5, min_separation=4,
     )
     offsets = sorted(off for off, _, _ in results)
@@ -231,7 +232,7 @@ def test_find_sisl_frame_soft_topk_separation():
 
 
 def test_find_sisl_frame_soft_topk_empty_on_short():
-    assert dd.find_sisl_frame_soft_topk([1+0j]*10) == []
+    assert sisl_rx.find_sisl_frame_soft_topk([1+0j]*10) == []
 
 
 def _build_fec_result(responder_static, magnitude: float = 10.0,
@@ -261,13 +262,13 @@ def _build_fec_result(responder_static, magnitude: float = 10.0,
 def test_llr_accumulator_fec_constructor_validates_n_bits():
     # Requires n_bits == HAIL_FEC_TOTAL_BITS
     try:
-        dd.LlrAccumulator(n_bits=1064)
+        sisl_rx.LlrAccumulator(n_bits=1064)
         raise AssertionError("expected AssertionError on wrong n_bits")
     except AssertionError as e:
         if "n_bits must be" not in str(e) and "HAIL_FEC_TOTAL_BITS" not in str(e):
             raise
     # Correct construction works and allocates body-sized accumulator
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.accumulated.shape == (sc.HAIL_FEC_BODY_CODED_BITS,)
     assert acc._header_bits == sc.HAIL_FEC_HEADER_BITS
 
@@ -276,7 +277,7 @@ def test_llr_accumulator_fec_single_copy_decrypt():
     """One clean FEC copy should admit and decrypt via the Viterbi path."""
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     assert acc.n_copies == 1
     decrypt = acc.try_decrypt(responder_static)
@@ -292,7 +293,7 @@ def test_llr_accumulator_fec_wrong_responder_returns_none():
     target = dd.demo_responder_key()
     other = dd.demo_other_key()
     result = _build_fec_result(target, magnitude=10.0)
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     assert acc.try_decrypt(other) is None
 
@@ -320,14 +321,14 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
     noisy2 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
     base = {"phase_rms_residual_rad": 0.05, "asm_errs_in_coherent": 0}
 
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add({**base, "fec_llrs": noisy1}) is True
     assert acc.try_add({**base, "fec_llrs": noisy2}) is True
     assert acc.n_copies == 2
 
     # Body LLR magnitude after 2 copies should be ~2× single-copy
     body_l1_2 = float(np.mean(np.abs(acc.accumulated)))
-    acc_single = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc_single = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc_single.try_add({**base, "fec_llrs": noisy1}) is True
     body_l1_1 = float(np.mean(np.abs(acc_single.accumulated)))
     assert body_l1_2 > 1.5 * body_l1_1, (body_l1_1, body_l1_2)
@@ -346,7 +347,7 @@ def test_llr_accumulator_fec_polarity_inversion_normalized():
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
 
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is True
     l1_single = float(np.mean(np.abs(acc.accumulated)))
     assert acc.try_add(result) is True
@@ -361,7 +362,7 @@ def test_llr_accumulator_fec_short_input_rejected():
     responder_static = dd.demo_responder_key()
     result = _build_fec_result(responder_static, magnitude=10.0)
     result["fec_llrs"] = result["fec_llrs"][: sc.HAIL_FEC_TOTAL_BITS // 2]
-    acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add(result) is False
     assert acc.n_copies == 0
 

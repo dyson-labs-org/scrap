@@ -371,21 +371,6 @@ def tx_to_file(message: bytes, path: str,
     return out.size
 
 
-_ASM_BITS = sisl_rx._ASM_BITS
-_PILOT_BYTES = sisl_rx._PILOT_BYTES
-_PILOT_BITS = sisl_rx._PILOT_BITS
-_SIGNAL_FLOOR_RATIO = sisl_rx._SIGNAL_FLOOR_RATIO
-
-
-
-LlrAccumulator = sisl_rx.LlrAccumulator
-find_sisl_frame_soft_topk = sisl_rx.find_sisl_frame_soft_topk
-_extract_llrs_at_position = sisl_rx._extract_llrs_at_position
-_acquire_and_track = sisl_rx._acquire_and_track
-_try_fec_decrypt = sisl_rx._try_fec_decrypt
-_decode_one_hail_in_block = sisl_rx._decode_one_hail_in_block
-_print_live_event = sisl_rx._print_live_event
-
 
 
 
@@ -401,7 +386,7 @@ def live_rx_decode(
     amp_on: bool = False,
     center_hz: float = CENTER_FREQ_HZ,
     device_name: str = "hackrf",
-    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    signal_threshold: float = sisl_rx._SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     combine_copies: int = 0,
     samps_per_chip_override: int | None = None,
@@ -517,7 +502,7 @@ def live_rx_decode(
     # when combine_copies > 0; otherwise does nothing.
     accumulator = None
     if combine_copies > 0:
-        accumulator = LlrAccumulator(
+        accumulator = sisl_rx.LlrAccumulator(
             n_bits=sc.HAIL_FEC_TOTAL_BITS,
             max_copies=combine_copies,
         )
@@ -656,14 +641,14 @@ def live_rx_decode(
             if save_file is not None:
                 block_data.tofile(save_file)
 
-            result = _decode_one_hail_in_block(
+            result = sisl_rx._decode_one_hail_in_block(
                 block_data, responder_static,
                 samps_per_chip=samps_per_chip,
                 samp_hz=samp_hz,
                 signal_threshold=signal_threshold,
                 top_k_soft=top_k_soft,
             )
-            _print_live_event(stats["blocks_processed"], result)
+            sisl_rx._print_live_event(stats["blocks_processed"], result)
 
             s = result["status"]
             if s == "decrypt_ok":
@@ -795,7 +780,7 @@ def offline_decode_hail(
         responder_static = demo_responder_key()
 
     raw = np.fromfile(cfile_path, dtype=np.complex64)
-    decode_result = _decode_one_hail_in_block(raw, responder_static)
+    decode_result = sisl_rx._decode_one_hail_in_block(raw, responder_static)
     out: dict = {
         "offset": None,
         "decoded_bytes": b"",
@@ -884,9 +869,9 @@ def main() -> int:
                              f"See list at bottom of --help for quieter "
                              f"alternatives.")
     parser.add_argument("--signal-threshold", type=float,
-                        default=_SIGNAL_FLOOR_RATIO,
+                        default=sisl_rx._SIGNAL_FLOOR_RATIO,
                         help=f"rx: peak/median ratio that counts as signal "
-                             f"present (default {_SIGNAL_FLOOR_RATIO}). "
+                             f"present (default {sisl_rx._SIGNAL_FLOOR_RATIO}). "
                              f"Lower to ~6-8 to force decode attempts on "
                              f"weak signals; raise to ~20 to avoid wasted "
                              f"attempts on interference. Pure Gaussian "

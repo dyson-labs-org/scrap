@@ -34,6 +34,7 @@ import time
 import numpy as np
 
 import sisl_crypto as sc
+import sisl_rx
 import demo as dd
 import sisl_framer as sf
 
@@ -80,7 +81,7 @@ def characterize_block(samples: np.ndarray, samps_per_chip: int,
     peak_mag_std = float(peak_mags.std())
 
     # Try DBPSK decode at the best soft-correlator offset
-    topk = dd.find_sisl_frame_soft_topk(pv.tolist(), sc.HAIL_FRAME_LEN, k=5)
+    topk = sisl_rx.find_sisl_frame_soft_topk(pv.tolist(), sc.HAIL_FRAME_LEN, k=5)
     phase_rms = None
     pilot_errs = None
     body_l1 = None
@@ -93,7 +94,7 @@ def characterize_block(samples: np.ndarray, samps_per_chip: int,
         if abs(score) <= 8.0:
             continue
         res = sf.dbpsk_decode_from_pilot(
-            pv[off:].tolist(), dd._PILOT_BITS, sc.HAIL_FEC_TOTAL_BITS)
+            pv[off:].tolist(), sisl_rx._PILOT_BITS, sc.HAIL_FEC_TOTAL_BITS)
         if res is None:
             continue
         _, soft, _t0, _dt, rms = res
@@ -102,7 +103,7 @@ def characterize_block(samples: np.ndarray, samps_per_chip: int,
             asm_found = True
         phase_rms = rms
         pilot_bits_decoded = (soft[:48] < 0).astype(np.uint8)
-        pilot_errs = int(np.sum(pilot_bits_decoded != dd._PILOT_BITS))
+        pilot_errs = int(np.sum(pilot_bits_decoded != sisl_rx._PILOT_BITS))
         body_llrs = soft[sc.HAIL_FEC_HEADER_BITS:]
         body_l1 = float(np.mean(np.abs(body_llrs)))
         soft_score = score
