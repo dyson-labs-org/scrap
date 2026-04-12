@@ -632,6 +632,15 @@ def decode_with_freq_tracking(
     }
 
 
+def _phase_spread_rms(coherent_mag: float, incoherent_mag: float) -> float:
+    """Convert coherent/incoherent magnitude ratio to equivalent phase spread in radians."""
+    if incoherent_mag <= 0:
+        return float("inf")
+    ratio = coherent_mag / incoherent_mag
+    safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
+    return float(np.sqrt(-2.0 * np.log(safe_ratio)))
+
+
 def fit_phase_from_known_bits(
     peak_values,
     start_bit_offset: int,
@@ -756,15 +765,9 @@ def fit_phase_from_known_bits(
     # incoherent sums. coherent/incoherent = 1 for a perfectly aligned
     # signal; → 1/sqrt(N) for random noise.
     incoherent_mag = float(np.sum(np.abs(derotated)))
-    if incoherent_mag <= 0:
+    rms_residual = _phase_spread_rms(coherent_mag, incoherent_mag)
+    if rms_residual == float("inf"):
         return None
-    ratio = coherent_mag / incoherent_mag
-    # Convert ratio to an equivalent radian phase-spread:
-    # For a Gaussian phase jitter σ, E[e^{jφ}] = e^{-σ²/2}, so
-    #    σ² = -2 · ln(ratio), σ = sqrt(-2 · ln ratio).
-    # Clamped below so a perfect match doesn't log(0).
-    safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
-    rms_residual = float(np.sqrt(-2.0 * np.log(safe_ratio)))
 
     return theta0_at_zero, float(delta_hat), rms_residual
 
@@ -1003,12 +1006,7 @@ def dbpsk_decode_from_pilot(
     # (Gaussian phase-jitter equivalent).
     coherent_mag = abs(coherent_sum)
     incoherent_mag = float(np.sum(np.abs(aligned)))
-    if incoherent_mag > 0:
-        ratio = coherent_mag / incoherent_mag
-        safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
-        rms_residual = float(np.sqrt(-2.0 * np.log(safe_ratio)))
-    else:
-        rms_residual = float("inf")
+    rms_residual = _phase_spread_rms(coherent_mag, incoherent_mag)
 
     # Apply θ₀ derotation to the entire frame for consistency.
     theta_rotator = np.exp(-1j * theta0)
