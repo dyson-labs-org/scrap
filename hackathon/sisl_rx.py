@@ -652,9 +652,15 @@ def decode_one_ack_in_block(
 
     Parallel to _decode_one_hail_in_block but for the 95-byte ACK.
     """
+    # Use the hail tracker target (4192 bits) rather than the ACK target
+    # (2976 bits). The hail target tracks more symbols, giving the soft
+    # correlator more room to find the ACK's ASM. With HackRF spurs, the
+    # tracker's first_candidate can land on a spur peak; a longer target
+    # gives more opportunities for the real signal peaks to dominate.
+    # The _try_ack_fec_decrypt extracts only the 1488 bits it needs.
     acq = _acquire_and_track(
         samples, samps_per_chip, samp_hz, signal_threshold,
-        fec_total_bits=sc.ACK_FEC_TOTAL_BITS,
+        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS,
     )
     if acq["status"] != "acquired":
         return acq
