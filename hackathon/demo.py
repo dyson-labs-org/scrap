@@ -486,12 +486,17 @@ def live_rx_decode(
     else:
         raise ValueError(f"unhandled device {device_name}")
 
-    stream = device.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32, [0])
+    # Request larger USB buffers to absorb processing jitter. The
+    # SoapySDR "bufflen" and "buffers" args map to the libusb transfer
+    # size and queue depth. Larger values give the reader thread more
+    # slack before the kernel drops samples.
+    stream_args = {"bufflen": "262144", "buffers": "8"}
+    stream = device.setupStream(
+        SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], stream_args)
     device.activateStream(stream)
 
     save_file = open(save_path, "wb") if save_path else None
     block_samples = int(block_seconds * samp_hz)
-    buf = np.empty(block_samples, dtype=np.complex64)
 
     stats = {
         "ok": True,
@@ -547,22 +552,21 @@ def live_rx_decode(
     # blocks so DSP processing on the main thread never causes USB
     # overflows.
     #
-    # Windows notes: the WinUSB/libusb backend has higher latency and
-    # smaller default transfer buffers than Linux. The reader uses
-    # small fixed-size reads (READ_CHUNK samples) instead of asking
-    # for the full block in one call. This keeps the USB pipeline fed
-    # and avoids gaps when the OS scheduler doesn't wake the thread
-    # quickly (Windows default quantum is 15.6 ms ≈ 31 K samples).
+    # Key design choices:
+    #   • readStream chunk size: Linux's USB stack has large kernel
+    #     buffers, so big reads are fine. Windows needs smaller reads
+    #     (32 K) to keep the USB pipeline fed across scheduler quanta.
+    #   • Queue overflow policy: if the main thread falls behind, DROP
+    #     the oldest queued block rather than blocking the reader. A
+    #     blocked reader → USB overflow → corrupted samples, which is
+    #     worse than losing one processing block.
     import threading
     import queue as _queue
     import platform
 
-    # On Windows, request the 1 ms timer resolution so the reader
-    # thread wakes promptly. Without this, the 15.6 ms default quantum
-    # causes ~31 K sample gaps at 2 Msps, overflowing the HackRF's
-    # 32 KB USB buffer.
+    _is_windows = platform.system() == "Windows"
     _win_timer_set = False
-    if platform.system() == "Windows":
+    if _is_windows:
         try:
             import ctypes
             ctypes.windll.winmm.timeBeginPeriod(1)  # type: ignore[attr-defined]
@@ -573,17 +577,18 @@ def live_rx_decode(
     block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
     overflow_count_at_last_check = 0
-    # Small reads keep the USB pipeline fed on all platforms. 32 K
-    # samples ≈ 16 ms at 2 Msps — comfortably within one USB
-    # microframe even on Windows.
-    READ_CHUNK = 32768
+    # Linux kernel USB buffers are large — read the full remainder in
+    # one call to minimize Python GIL round-trips. Windows needs small
+    # reads to avoid inter-transfer gaps in the WinUSB/libusb backend.
+    READ_CHUNK = 32768 if _is_windows else 0  # 0 = no cap (read all)
 
     def _reader_thread():
         local_buf = np.empty(block_samples, dtype=np.complex64)
         while not reader_stop.is_set():
             filled = 0
             while filled < block_samples and not reader_stop.is_set():
-                want = min(READ_CHUNK, block_samples - filled)
+                remain = block_samples - filled
+                want = min(READ_CHUNK, remain) if READ_CHUNK else remain
                 sr = device.readStream(
                     stream, [local_buf[filled:filled + want]],
                     want, timeoutUs=500_000,
@@ -598,10 +603,21 @@ def live_rx_decode(
                 else:
                     break
             if filled >= block_samples // 2 and not reader_stop.is_set():
-                try:
-                    block_queue.put(local_buf[:filled].copy(), timeout=2.0)
-                except _queue.Full:
-                    pass
+                blk = local_buf[:filled].copy()
+                # Non-blocking put: if the queue is full, drop the oldest
+                # block to keep the reader draining USB. A stalled reader
+                # is worse than a missed processing block.
+                while True:
+                    try:
+                        block_queue.put_nowait(blk)
+                        break
+                    except _queue.Full:
+                        try:
+                            block_queue.get_nowait()  # drop oldest
+                            stats["dropped_blocks"] = \
+                                stats.get("dropped_blocks", 0) + 1
+                        except _queue.Empty:
+                            break
                 local_buf = np.empty(block_samples, dtype=np.complex64)
         block_queue.put(None)
 
@@ -971,6 +987,9 @@ def main() -> int:
         print(f"  elapsed:         {stats['elapsed_s']:.1f} s")
         print(f"  blocks:          {stats['blocks_processed']}")
         print(f"  overflows:       {stats.get('overflows', 0)}")
+        if stats.get("dropped_blocks", 0):
+            print(f"  dropped blocks:  {stats['dropped_blocks']} "
+                  "(queue full, reader kept draining USB)")
         print(f"  hails detected:  {stats['hails_detected']} "
               "(SISL frame parsed)")
         print(f"  hails decrypted: {stats['hails_decrypted']} "
