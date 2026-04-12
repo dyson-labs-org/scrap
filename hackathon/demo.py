@@ -497,7 +497,7 @@ class _AgcPpmState:
         if not self._agc_stable:
             if self._blocks_seen >= self._agc_warmup_blocks and not gain_changed:
                 self._agc_stable = True
-                print("  AGC stable — enabling auto-PPM")
+                print("       AGC stable — enabling auto-PPM")
         if self._agc_stable:
             self._update_ppm(result)
 
@@ -520,10 +520,9 @@ class _AgcPpmState:
                     SOAPY_SDR_RX, 0, self._center_hz)
                 total_ppm = (self._total_correction_hz
                              / self._nominal_center_hz * 1e6)
-                print(f"  AUTO-PPM: retune {correction:+.0f} Hz "
+                print(f"       AUTO-PPM: retune {correction:+.0f} Hz "
                       f"(total {self._total_correction_hz:+.0f} Hz / "
-                      f"{total_ppm:+.1f} ppm, "
-                      f"center {self._center_hz/1e6:.6f} MHz)")
+                      f"{total_ppm:+.1f} ppm)")
                 self._offset_history.clear()
                 self._last_recal_t = now
                 if abs(correction) < self.SETTLED_THRESHOLD_HZ:
@@ -541,7 +540,7 @@ class _AgcPpmState:
             # 62 → clips → drops to 38 → ramps to 62 → clips again.
             self._vga_ceiling = self._current_vga
             self._set_rx_vga(self._current_vga)
-            print(f"  AGC: ADC clipping (p99={sample_p99:.2f}), "
+            print(f"       AGC: ADC clipping (p99={sample_p99:.2f}), "
                   f"gain → {self._current_vga:.0f} dB "
                   f"(ceiling set)")
         else:
@@ -556,7 +555,7 @@ class _AgcPpmState:
                     if abs(new_vga - self._current_vga) >= 1.0:
                         self._current_vga = round(new_vga)
                         self._set_rx_vga(self._current_vga)
-                        print(f"  AGC: peak={pk:.0f}, "
+                        print(f"       AGC: peak={pk:.0f}, "
                               f"gain → {self._current_vga:.0f} dB")
 
 
@@ -735,7 +734,7 @@ def live_rx_decode(
             if current_overflows > overflow_count_at_last_check:
                 n_new = current_overflows - overflow_count_at_last_check
                 overflow_count_at_last_check = current_overflows
-                print(f"  [{n_new} overflow(s) during block, "
+                print(f"       [{n_new} overflow(s) during block, "
                       f"total {current_overflows}]")
 
             if save_file is not None:
