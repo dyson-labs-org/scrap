@@ -528,7 +528,7 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"{snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
-              f"\u2014 DECRYPT FAILED (not addressed to this key)")
+              f"\u2014 DECRYPT FAILED")
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)

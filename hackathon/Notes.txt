@@ -4,3 +4,11 @@
     What is the frequency response envelope WRT the bandwidth
 4. Timing - what's going on
 
+
+2437 - very noisy:
+    For waterfall:
+        LNA 8 db
+        AMP 14 db
+        VGA 24 db
+    Tx:
+        2437:   --tx-vga 10 reliable
