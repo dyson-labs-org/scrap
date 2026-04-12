@@ -118,6 +118,25 @@ def _interleave_bits(bits: np.ndarray) -> np.ndarray:
     return bits[_INTERLEAVE_PERM]
 
 
+# ── ACK FEC frame layout ──────────────────────────────────────────────────
+ACK_HEADER_LEN = 6                                          # ASM+ver+type
+ACK_BODY_PAYLOAD_LEN = ACK_FRAME_LEN - ACK_HEADER_LEN       # 89
+ACK_FEC_HEADER_BITS = ACK_HEADER_LEN * 8                    # 48
+ACK_FEC_BODY_PAYLOAD_BITS = ACK_BODY_PAYLOAD_LEN * 8        # 712
+ACK_FEC_BODY_CODED_BITS = sisl_fec.coded_length(
+    ACK_FEC_BODY_PAYLOAD_BITS)                              # 1440
+ACK_FEC_TOTAL_BITS = ACK_FEC_HEADER_BITS + ACK_FEC_BODY_CODED_BITS  # 1488
+
+_ACK_INTERLEAVE_ROWS = 32
+_ACK_INTERLEAVE_COLS = ACK_FEC_BODY_CODED_BITS // _ACK_INTERLEAVE_ROWS  # 45
+assert _ACK_INTERLEAVE_ROWS * _ACK_INTERLEAVE_COLS == ACK_FEC_BODY_CODED_BITS
+
+_ACK_INTERLEAVE_PERM = np.arange(ACK_FEC_BODY_CODED_BITS).reshape(
+    _ACK_INTERLEAVE_ROWS, _ACK_INTERLEAVE_COLS
+).T.ravel()
+_ACK_DEINTERLEAVE_PERM = np.argsort(_ACK_INTERLEAVE_PERM)
+
+
 def _deinterleave_llrs(llrs: np.ndarray) -> np.ndarray:
     """Undo block interleaving on soft LLR array (float32)."""
     return llrs[_DEINTERLEAVE_PERM]
@@ -284,6 +303,17 @@ class Ephemeral:
     @property
     def pub(self) -> ec.EllipticCurvePublicKey:
         return self._pub
+
+    def peek(self) -> ec.EllipticCurvePrivateKey:
+        """Return the private key WITHOUT consuming it.
+
+        The caller side needs to retain the ephemeral private key to
+        decode the ACK (compute DH3 = ECDH(caller_eph, responder_eph)).
+        Use peek() before encode_hail_fec (which consume()s the key).
+        """
+        if self._priv is None:
+            raise RuntimeError("Ephemeral already consumed")
+        return self._priv
 
     def consume(self) -> ec.EllipticCurvePrivateKey:
         if self._priv is None:
@@ -656,6 +686,61 @@ def decode_ack(
         return None                                 # replay / wrong hail
 
     return DecodedAck(body=body, responder_eph_pub=responder_eph_pub, dh3=dh3)
+
+
+# ── ACK FEC encode / decode ────────────────────────────────────────────────
+
+def encode_ack_fec(
+    responder_eph: Ephemeral,
+    decoded_hail: DecodedHail,
+    status: int = 1,
+) -> np.ndarray:
+    """Produce FEC-coded channel bits for one ACK.
+
+    Returns uint8 ndarray of ACK_FEC_TOTAL_BITS = 1488 bits.
+    Same pipeline as encode_hail_fec but for the 95-byte ACK frame.
+    """
+    frame = encode_ack(responder_eph, decoded_hail, status)
+    header_bytes = frame[:ACK_HEADER_LEN]
+    body_bytes = frame[ACK_HEADER_LEN:]
+    assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
+
+    header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
+    body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
+    coded_body_bits = sisl_fec.encode(body_bits)
+    assert len(coded_body_bits) == ACK_FEC_BODY_CODED_BITS
+
+    coded_body_bits = coded_body_bits[_ACK_INTERLEAVE_PERM]
+    seed = int(header_bits[-1])
+    diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
+
+    out = np.empty(ACK_FEC_TOTAL_BITS, dtype=np.uint8)
+    out[:ACK_FEC_HEADER_BITS] = header_bits
+    out[ACK_FEC_HEADER_BITS:] = diff_coded_body
+    return out
+
+
+def decode_ack_fec_from_llrs(
+    llrs: np.ndarray,
+    caller_static_priv: ec.EllipticCurvePrivateKey,
+    caller_eph_priv: ec.EllipticCurvePrivateKey,
+    dh1: bytes,
+    expected_nonce_echo: bytes,
+) -> DecodedAck | None:
+    """Trial-decrypt a FEC-coded ACK from per-bit LLRs."""
+    if len(llrs) < ACK_FEC_TOTAL_BITS:
+        return None
+    llrs = np.asarray(llrs[:ACK_FEC_TOTAL_BITS], dtype=np.float32)
+
+    coded_body_llrs = llrs[ACK_FEC_HEADER_BITS:][_ACK_DEINTERLEAVE_PERM]
+    body_bits = sisl_fec.decode(coded_body_llrs, ACK_FEC_BODY_PAYLOAD_BITS)
+    body_bytes = np.packbits(body_bits).tobytes()
+    assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
+
+    header_bytes = ASM + bytes([SISL_VERSION, MSG_ACK])
+    frame = header_bytes + body_bytes
+    return decode_ack(frame, caller_static_priv, caller_eph_priv,
+                      dh1, expected_nonce_echo)
 
 
 # ── Session key derivation (§4.3 v3) ────────────────────────────────────────

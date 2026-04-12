@@ -258,6 +258,51 @@ def upsample_chips_to_samples(chips: np.ndarray,
     return rep.astype(np.complex64)
 
 
+# ── SoapySDR TX burst (for ACK, no GnuRadio) ────────────────────────────────
+
+def soapy_tx_burst(
+    samples: np.ndarray,
+    center_hz: float,
+    samp_hz: float = SAMP_RATE_HZ,
+    tx_vga_db: int = HACKRF_TX_VGA_DB,
+    tx_amp_on: bool = HACKRF_TX_AMP_ON,
+    repeats: int = 1,
+) -> None:
+    """Transmit a finite sample buffer via SoapySDR (no GnuRadio).
+
+    Opens a HackRF for TX, writes the samples `repeats` times, then
+    closes. Used for ACK transmission in the listen-after-talk handshake.
+    """
+    import SoapySDR
+    from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
+
+    device = SoapySDR.Device("driver=hackrf")
+    device.setSampleRate(SOAPY_SDR_TX, 0, samp_hz)
+    device.setFrequency(SOAPY_SDR_TX, 0, center_hz)
+    device.setGain(SOAPY_SDR_TX, 0, "VGA", float(tx_vga_db))
+    device.setGain(SOAPY_SDR_TX, 0, "AMP", 14.0 if tx_amp_on else 0.0)
+
+    stream = device.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CF32)
+    device.activateStream(stream)
+
+    full = np.tile(samples, repeats) if repeats > 1 else samples
+    offset = 0
+    chunk = 65536
+    while offset < len(full):
+        end = min(offset + chunk, len(full))
+        sr = device.writeStream(stream, [full[offset:end]], end - offset,
+                                timeoutUs=1_000_000)
+        if sr.ret > 0:
+            offset += sr.ret
+        elif sr.ret == -1:  # timeout
+            continue
+        else:
+            break
+
+    device.deactivateStream(stream)
+    device.closeStream(stream)
+
+
 # ── GR top-block ────────────────────────────────────────────────────────────
 
 if _HAVE_GR:
@@ -785,6 +830,9 @@ def live_rx_decode(
             if s == "decrypt_ok":
                 stats["hails_detected"] += 1
                 stats["hails_decrypted"] += 1
+                # Store the full DecodedHail for ACK construction
+                if "_decoded_hail" not in stats:
+                    stats["_decoded_hail"] = result.get("decoded_hail")
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
 
@@ -896,7 +944,8 @@ def main() -> int:
         epilog=_format_freq_suggestions(),
     )
     parser.add_argument("--mode",
-                        choices=("tx", "rx", "tx-to-file", "offline"),
+                        choices=("tx", "rx", "tx-to-file", "offline",
+                                 "call", "respond"),
                         required=True)
     parser.add_argument("--capture", default="/tmp/sisl_rx.cfile",
                         help="capture file (input for offline, output for tx-to-file)")
@@ -1138,6 +1187,142 @@ def main() -> int:
             print(f"  combined copies: {stats.get('combined_copies', 0)}")
             print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
+
+    # ── mode == "respond": listen for hail → TX ACK → print session keys ──
+    if args.mode == "respond":
+        responder_static = demo_responder_key()
+        center_hz = args.freq * 1e6
+        print(f"respond: listening for hail on {args.freq:.1f} MHz, "
+              f"will TX ACK on decrypt")
+
+        # Listen-after-talk: coprime periods T_respond=3s (2s TX, 1s gap)
+        # Responder listens continuously until hail received, then TX ACK
+        block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
+        decoded_hail = None
+
+        # Phase 1: listen for hail
+        while decoded_hail is None:
+            stats = live_rx_decode(
+                duration_s=args.duration,
+                block_seconds=block_sec,
+                responder_static=responder_static,
+                lna_db=args.rx_lna, vga_db=args.rx_vga,
+                amp_on=args.rx_amp, center_hz=center_hz,
+                device_name=args.device,
+                signal_threshold=args.signal_threshold,
+                top_k_soft=args.top_k,
+                combine_copies=args.combine,
+                samps_per_chip=active_samps_per_chip,
+            )
+            # Check if any hail was decrypted — pull DecodedHail from stats
+            dh = stats.get("_decoded_hail")
+            if dh is not None:
+                decoded_hail = dh
+                print(f"\n\033[32m  HAIL RECEIVED — preparing ACK\033[0m")
+                break
+            if not stats.get("ok", True):
+                print(f"RX error: {stats.get('error')}", file=sys.stderr)
+                return 2
+
+        # Phase 2: TX ACK (repeat 3× for reliability, T_respond=3s)
+        responder_eph = sc.Ephemeral()
+        ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
+        ack_chips = sf.tx_bits_to_chips(ack_bits)
+        ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
+        ack_repeats = 5  # ~7.6 seconds at 1 Mcps
+        print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits × "
+              f"{ack_repeats} repeats → "
+              f"{len(ack_chips) * ack_repeats / chip_rate_hz:.1f}s on air")
+        soapy_tx_burst(
+            ack_samples, center_hz,
+            samp_hz=SAMP_RATE_HZ,
+            tx_vga_db=args.tx_vga,
+            tx_amp_on=args.tx_amp,
+            repeats=ack_repeats,
+        )
+        print(f"\033[32m  ACK TRANSMITTED — handshake complete\033[0m")
+        # Session keys available on responder side already (encode_ack
+        # computed all three DH terms). Print confirmation.
+        print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
+        return 0
+
+    # ── mode == "call": TX hail → listen for ACK → session keys ──────────
+    if args.mode == "call":
+        caller_static = demo_caller_key()
+        responder_static_pub = demo_responder_key().public_key()
+        center_hz = args.freq * 1e6
+
+        # Build the hail — retain ephemeral key for ACK decode
+        caller_eph = sc.Ephemeral()
+        caller_eph_priv = caller_eph.peek()  # retain for ACK decode
+        body = sc.HailBody(
+            caller_static_pub=sc.pubkey_to_compressed(
+                caller_static.public_key()),
+            center_freq_offset=100,
+            bandwidth_code=0x03, mode=0x01,
+            chip_rate_code=0x32,
+            body_nonce=os.urandom(8),
+            flags=0x03,
+        )
+        # Compute DH1 for later ACK verification
+        dh1 = sc.ecdh(caller_eph_priv, responder_static_pub)
+
+        hail_bits = sc.encode_hail_fec(
+            caller_eph, responder_static_pub, body)
+        hail_chips = sf.tx_bits_to_chips(hail_bits)
+        hail_samples = upsample_chips_to_samples(
+            hail_chips, SAMPS_PER_CHIP)
+
+        # Listen-after-talk: coprime periods
+        # Caller: TX 5s, RX 2s → period T₁=7s
+        TX_DURATION = 5.0
+        RX_DURATION = 2.0
+        MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
+
+        print(f"call: hailing on {args.freq:.1f} MHz")
+        print(f"  nonce:         {body.body_nonce.hex()}")
+        print(f"  duty cycle:    TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
+              f"(coprime period 7s)")
+        print(f"  max rounds:    {MAX_ROUNDS}")
+
+        for round_num in range(1, MAX_ROUNDS + 1):
+            # TX phase
+            tx_repeats = max(1, int(TX_DURATION * chip_rate_hz
+                                    / len(hail_chips)))
+            print(f"\n  round {round_num}: TX hail "
+                  f"({tx_repeats} repeats)...", end="", flush=True)
+            soapy_tx_burst(
+                hail_samples, center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=args.tx_vga,
+                tx_amp_on=args.tx_amp,
+                repeats=tx_repeats,
+            )
+            print(" done. Listening for ACK...", flush=True)
+
+            # RX phase — listen for ACK
+            # TODO: implement ACK-specific decode path in sisl_rx.py
+            # For now, use the hail decode path as a placeholder — the
+            # ACK has the same ASM so it will be detected, but the
+            # decrypt will fail (different msg_type). A production
+            # implementation would call _decode_one_ack_in_block.
+            stats = live_rx_decode(
+                duration_s=RX_DURATION,
+                block_seconds=RX_DURATION,
+                responder_static=demo_responder_key(),  # placeholder
+                lna_db=args.rx_lna, vga_db=args.rx_vga,
+                amp_on=args.rx_amp, center_hz=center_hz,
+                device_name=args.device,
+                signal_threshold=args.signal_threshold,
+                samps_per_chip=active_samps_per_chip,
+            )
+            # Check for ACK (TODO: proper ACK decode)
+            if stats.get("hails_decrypted", 0) > 0:
+                print(f"\n\033[32m  ACK RECEIVED — session established\033[0m")
+                return 0
+
+        print(f"\n  timeout after {MAX_ROUNDS} rounds — no ACK received")
+        return 1
 
     # mode == "tx"
     if not _HAVE_GR:

@@ -458,6 +458,7 @@ def _try_fec_decrypt(
         "polarity": polarity_label,
         "body": decoded_hail.body,
         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
+        "decoded_hail": decoded_hail,  # full object for ACK construction
         **base,
     }
 
