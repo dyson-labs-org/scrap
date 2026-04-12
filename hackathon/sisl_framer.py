@@ -806,31 +806,10 @@ def estimate_drift_per_symbol(
 ) -> float:
     """Estimate per-symbol phase drift Δθ in rad/symbol.
 
-    Two estimators are computed and combined:
-
-      • **V-V** (Viterbi-Viterbi squared estimator) on ALL peaks. This
-        is the existing per-block-tracker drift estimator. It uses
-        every peak so it is statistically efficient, but it operates
-        on the squared signal y² so its unambiguous range is bounded
-        to Δθ ∈ [−π/2, +π/2]. Beyond that range it aliases by π.
-
-      • **Pilot** (BPSK-demodulated adjacent differentials over the
-        known pilot region). Removes the BPSK modulation by multiplying
-        each pilot peak by its known sign, then computes adjacent
-        products whose phase is exactly Δθ (no squaring). Range is
-        unambiguous over [−π, +π], but only N_pilot ≈ 48 samples are
-        used so it is noisier than V-V.
-
-    When pilot_bits is given, V-V's [−π/2, +π/2] estimate is **unwrapped**
-    around the pilot-derived coarse estimate by adding the integer
-    multiple of π that minimises |delta_VV + k·π − delta_pilot|. This
-    gives the V-V accuracy AND the pilot's full unambiguous range.
-
-    When pilot_bits is None, only V-V is available and the range is
-    bounded to [−π/2, +π/2].
-
-    Returns Δθ in rad/symbol. Returns 0.0 on degenerate input
-    (too few peaks, all-zero signal).
+    Combines V-V squared estimator (all peaks, range [−π/2,+π/2]) with
+    pilot-aided differentials (range [−π,+π], noisier). When pilot_bits
+    is given, V-V is unwrapped around the pilot estimate (V-V accuracy
+    + pilot's full unambiguous range). Returns 0.0 on degenerate input.
     """
     peaks = np.asarray(peak_values, dtype=np.complex128)
     n = len(peaks)
@@ -886,33 +865,11 @@ def dbpsk_decode_from_pilot(
 ) -> tuple[bytes, np.ndarray, float, float, float | None]:
     """Hybrid coherent-pilot + differential-body decoder for DBPSK signals.
 
-    Replaces `coherent_decode_from_pilot` for the FEC fast path. Solves
-    the long-codeword phase-trajectory problem documented in the second
-    reviewer's S4 critique and confirmed on real RF in today's live
-    test (decrypt_fail on every block due to back-half BPSK flips).
+    Pipeline: (1) Δθ estimate, (2) derotate peaks, (3) coherent pilot
+    decode for θ₀, (4) differential body decode anchored on last pilot
+    peak, (5) pack into bytes. llr > 0 ⇒ bit 0, llr < 0 ⇒ bit 1.
 
-    Pipeline:
-      1. Δθ estimate via FFT coarse search + V-V refinement (full
-         [−π, +π] range, bypasses V-V's π/2 cliff).
-      2. Derotate every peak by exp(-j·k·Δθ) to remove drift.
-      3. Pilot region (k = 0 .. len(pilot_bits)-1): coherent ML decode
-         using the known pilot bits to estimate θ₀.
-      4. Body region (k = len(pilot_bits) .. n_data_bits-1): differential
-         decode. The first body bit anchors on the last pilot peak, which
-         is known coherently — this matches the TX-side convention of
-         differentially encoding the body with seed = last header bit.
-      5. Pack hard decisions into bytes for backwards compatibility.
-
-    Sign convention (matches coherent_decode_from_pilot and sisl_fec):
-      llr > 0  ⇒  bit 0
-      llr < 0  ⇒  bit 1
-
-    Returns (frame_bytes, soft_llrs, θ₀, Δθ, rms_residual_rad)
-    or None on degenerate input.
-
-    The TX side MUST differentially encode the body with seed equal to
-    the last header bit's value (sc.encode_hail_fec does this), or the
-    body decode produces meaningless XOR-of-adjacent-bits LLRs.
+    Returns (frame_bytes, soft_llrs, θ₀, Δθ, rms_residual_rad) or None.
     """
     n_pilot = len(pilot_bits)
     if n_pilot < 1 or n_data_bits < n_pilot:
