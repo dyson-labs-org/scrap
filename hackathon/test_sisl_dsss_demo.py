@@ -258,12 +258,12 @@ def test_decode_one_hail_in_block_correct_key():
 
 
 def test_decode_one_hail_in_block_populates_llrs_on_clean_decrypt():
-    """A5: clean decrypts must surface fec_llrs / c_frame / phase_rms / asm_errs
+    """Clean decrypts must surface fec_llrs / phase_rms / asm_errs
     so the LLR accumulator can chase-combine across blocks."""
     block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_responder_key())
     assert result["status"] == "decrypt_ok", result
-    for key in ("fec_llrs", "c_frame",
+    for key in ("fec_llrs",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
         assert key in result, (key, sorted(result.keys()))
         assert result[key] is not None, key
@@ -283,12 +283,12 @@ def test_decode_one_hail_in_block_populates_fec_llrs():
 
 
 def test_decode_one_hail_in_block_populates_llrs_on_decrypt_fail():
-    """A5: decrypt_fail must also surface fec_llrs so the accumulator can
+    """decrypt_fail must also surface fec_llrs so the accumulator can
     keep combining marginal blocks across the wrong-key boundary case."""
     block, _ = _make_block_with_hail()
     result = dd._decode_one_hail_in_block(block, dd.demo_other_key())
     assert result["status"] == "decrypt_fail", result
-    for key in ("fec_llrs", "c_frame",
+    for key in ("fec_llrs",
                 "phase_rms_residual_rad", "asm_errs_in_coherent"):
         assert key in result, (key, sorted(result.keys()))
         assert result[key] is not None, key
@@ -362,13 +362,13 @@ def test_find_sisl_frame_soft_topk_returns_candidates():
     assert len(results) > 0
     assert len(results) <= 5
     # Top result should be near position 60 (differential, so ±1 is fine)
-    top_offset, top_score, _, top_pts = results[0]
+    top_offset, top_score, top_pts = results[0]
     assert abs(top_offset - 59) <= 2 or abs(top_offset - 60) <= 2
     assert abs(top_score) > 20
     # pts ratio should be clearly above the noise-driven sidelobe median
     assert top_pts > 4, f"pts_ratio {top_pts} too low for clean signal"
     # Results must be sorted by |score| descending
-    scores = [abs(s) for _, s, _, _ in results]
+    scores = [abs(s) for _, s, _ in results]
     assert scores == sorted(scores, reverse=True)
 
 
@@ -379,11 +379,11 @@ def test_find_sisl_frame_soft_topk_separation():
     results = dd.find_sisl_frame_soft_topk(
         peaks.tolist(), frame_len=sc.HAIL_FRAME_LEN, k=5, min_separation=4,
     )
-    offsets = sorted(off for off, _, _, _ in results)
+    offsets = sorted(off for off, _, _ in results)
     for a, b in zip(offsets, offsets[1:]):
         assert b - a > 4, f"candidates {a} and {b} too close"
     # Pure noise pts ratios should all be ~2-3 (not > 5)
-    for _, _, _, pts in results:
+    for _, _, pts in results:
         assert pts < 5, f"noise pts_ratio {pts} implausibly high"
 
 
@@ -420,8 +420,6 @@ def _build_fec_result(responder_static, magnitude: float = 10.0,
         llrs = llrs + rng.normal(0, noise_std, len(llrs)).astype(np.float32)
     return {
         "fec_llrs": llrs,
-        "llrs": None,                              # unused in fec mode
-        "c_frame": b"\x00" * sc.HAIL_FRAME_LEN,   # unused in fec mode
         "phase_rms_residual_rad": 0.05,
         "asm_errs_in_coherent": 0,
     }
@@ -491,8 +489,7 @@ def test_llr_accumulator_fec_combines_two_noisy_copies():
     rng = np.random.default_rng(seed=7)
     noisy1 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
     noisy2 = (clean + rng.normal(0, 1.0, len(clean))).astype(np.float32)
-    base = {"phase_rms_residual_rad": 0.05, "asm_errs_in_coherent": 0,
-            "c_frame": b"\x00" * sc.HAIL_FRAME_LEN, "llrs": None}
+    base = {"phase_rms_residual_rad": 0.05, "asm_errs_in_coherent": 0}
 
     acc = dd.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
     assert acc.try_add({**base, "fec_llrs": noisy1}) is True

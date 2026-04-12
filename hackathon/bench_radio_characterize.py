@@ -90,7 +90,7 @@ def characterize_block(samples: np.ndarray, samps_per_chip: int,
     soft_score = None
     asm_found = False
 
-    for off, score, _frame, pts in topk:
+    for off, score, pts in topk:
         if off + sc.HAIL_FEC_TOTAL_BITS > len(pv):
             continue
         if abs(score) <= 8.0:

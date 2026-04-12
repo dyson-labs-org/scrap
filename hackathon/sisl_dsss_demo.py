@@ -688,36 +688,6 @@ _ASM_DIFF_POLARITY = np.where(
 ).astype(np.float64)
 
 
-def _extract_soft_frame_bits(
-    soft: np.ndarray,
-    n_soft: int,
-    best_offset: int,
-    best_score: float,
-    n_bits: int,
-    n_peaks: int,
-) -> bytes:
-    """Hard-decision bit extraction given a soft correlator match position.
-
-    Used by find_sisl_frame_soft_topk to produce a bit-level frame from
-    each candidate ASM position. If the match is near the end of
-    peak_values and not enough peaks remain, zero-pad the tail.
-    """
-    best_sign = +1 if best_score >= 0 else -1
-    bits = np.empty(n_bits, dtype=np.uint8)
-    bits[0] = 0
-    bits_available = min(n_bits, n_peaks - best_offset)
-    for k in range(1, bits_available):
-        src = best_offset + k - 1
-        if src >= n_soft:
-            break
-        bits[k] = bits[k - 1] if soft[src] >= 0 else (1 - bits[k - 1])
-    if bits_available < n_bits:
-        bits[bits_available:] = 0
-    if best_sign < 0:
-        bits = 1 - bits
-    return np.packbits(bits).tobytes()
-
-
 def find_sisl_frame_soft_topk(
     peak_values: list,
     frame_len: int = sc.HAIL_FRAME_LEN,
@@ -735,8 +705,8 @@ def find_sisl_frame_soft_topk(
     bit positions apart, so adjacent samples in the same peak neighborhood
     don't all crowd the top-K list.
 
-    Returns a list of (bit_offset, soft_score, frame_bytes, pts_ratio)
-    tuples, sorted by |soft_score| descending, at most K entries long.
+    Returns a list of (bit_offset, soft_score, pts_ratio) tuples,
+    sorted by |soft_score| descending, at most K entries long.
     `pts_ratio` is the candidate's |score| divided by the median |score|
     across all positions — a CFAR-style peak-to-sidelobe ratio usable
     as an additional cheap gate before feeding candidates to the
@@ -787,10 +757,7 @@ def find_sisl_frame_soft_topk(
             break
         score = float(scores[idx])
         pts_ratio = float(abs_scores[idx]) / sidelobe
-        frame_bytes = _extract_soft_frame_bits(
-            soft, n_soft, idx, score, n_bits, n_peaks,
-        )
-        results.append((idx, score, frame_bytes, pts_ratio))
+        results.append((idx, score, pts_ratio))
         lo = max(0, idx - min_separation)
         hi = min(n_positions, idx + min_separation + 1)
         taken[lo:hi] = True
@@ -817,63 +784,33 @@ def _extract_llrs_at_position(
     peak_values: list,
     peak_offset: int,
 ) -> dict:
-    """Run the coherent decode at one ASM offset and return LLR diagnostics.
+    """Run the DBPSK decoder at one ASM offset and return FEC LLRs.
 
-    Used to populate llrs / c_frame / phase_rms_residual_rad / asm_errs_in_coherent
-    on every status branch where peak_values are available, so the LLR
-    accumulator can chase-combine across blocks regardless of whether
-    the current block decrypted on its own. No decryption attempted here.
-
-    Returns a dict with keys (llrs, c_frame, phase_rms_residual_rad,
-    asm_errs_in_coherent), all None if the offset is out of range or the
-    coherent decode fails.
+    Returns a dict with fec_llrs (2096 float32), phase_rms_residual_rad,
+    and asm_errs_in_coherent. All None if the offset is out of range or
+    the decode fails.
     """
     out: dict = {
-        "llrs": None,
         "fec_llrs": None,
-        "c_frame": None,
         "phase_rms_residual_rad": None,
         "asm_errs_in_coherent": None,
     }
     aligned_peaks = peak_values[peak_offset:]
-    n_frame_bits = sc.HAIL_FRAME_LEN * 8           # 1064
-    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS             # 2096
-    if len(aligned_peaks) < n_frame_bits:
+    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
+    if len(aligned_peaks) < n_fec_bits:
         return out
 
-    # Always run the legacy coherent decoder for the 1064-bit `llrs`
-    # (the non-FEC accumulator and the soft-correlator path consume
-    # this). It uses the existing pilot-only (θ₀, Δθ) fit which is
-    # accurate enough over a 1064-symbol codeword.
-    coherent = sf.coherent_decode_from_pilot(
-        aligned_peaks, 0, _PILOT_BITS, n_frame_bits,
+    dbpsk = sf.dbpsk_decode_from_pilot(
+        aligned_peaks, _PILOT_BITS, n_fec_bits,
     )
-    if coherent is None:
+    if dbpsk is None:
         return out
-    c_frame, c_soft, _c_theta0, _c_delta, c_rms = coherent
-    out["c_frame"] = c_frame
-    out["llrs"] = c_soft
-    out["phase_rms_residual_rad"] = c_rms
+    fec_frame, fec_soft, _, _, rms = dbpsk
+    out["fec_llrs"] = fec_soft
+    out["phase_rms_residual_rad"] = rms
     c_bits_first32 = np.unpackbits(
-        np.frombuffer(c_frame[:4], dtype=np.uint8))
+        np.frombuffer(fec_frame[:4], dtype=np.uint8))
     out["asm_errs_in_coherent"] = int(np.sum(c_bits_first32 != _ASM_BITS))
-
-    # If we have enough peaks for the FEC channel layout, run the
-    # DBPSK fast-path decoder over the longer span. This produces the
-    # 2096-bit `fec_llrs` vector that the FEC accumulator + soft Viterbi
-    # consume. The DBPSK decoder uses pilot-aided drift estimation
-    # (estimate_drift_per_symbol with pilot_bits) and differential
-    # demodulation across the body — the two-step fix mandated by the
-    # second reviewer's S4 critique to handle the back-half phase wrap
-    # that the legacy coherent decoder cannot recover from on a
-    # 2096-symbol codeword. See sisl_framer.dbpsk_decode_from_pilot.
-    if len(aligned_peaks) >= n_fec_bits:
-        dbpsk = sf.dbpsk_decode_from_pilot(
-            aligned_peaks, _PILOT_BITS, n_fec_bits,
-        )
-        if dbpsk is not None:
-            _fec_frame, fec_soft, _, _, _ = dbpsk
-            out["fec_llrs"] = fec_soft
     return out
 
 
@@ -1014,7 +951,7 @@ def _try_fec_decrypt(
     decoded_hail: Optional[sc.DecodedHail] = None
     polarity_label = "fec"
 
-    for cand_offset, cand_score, _cand_frame, cand_pts in topk:
+    for cand_offset, cand_score, cand_pts in topk:
         if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
             continue
         if abs(cand_score) <= 10.0 or cand_pts < 3.0:
@@ -1070,9 +1007,7 @@ def _try_fec_decrypt(
         "freq_offset_hz": freq_hz,
         "soft_score": best_score,
         "pts_ratio": best_pts_ratio,
-        "llrs": llr_diag["llrs"],
         "fec_llrs": fec_llrs_arr,
-        "c_frame": llr_diag["c_frame"],
         "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
         "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
     }
