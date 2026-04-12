@@ -990,8 +990,12 @@ def main() -> int:
         if save is not None:
             print(f"  also saving raw samples → {save}")
         block_sec = args.block_seconds
-        if block_sec < 5.0:
-            block_sec = 6.0
+        # Minimum block must hold ≥2 FEC frames. Frame duration depends
+        # on chip rate: 2096 symbols × 1023 chips/symbol / chip_rate.
+        frame_sec = 2096 * 1023 / chip_rate_hz
+        min_block_sec = max(3.0, frame_sec * 2.5)
+        if block_sec < min_block_sec:
+            block_sec = min_block_sec
         stats = live_rx_decode(
             duration_s=args.duration,
             block_seconds=block_sec,
