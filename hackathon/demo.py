@@ -477,6 +477,7 @@ class _AgcPpmState:
         self._update_agc(result, block_data)
 
     def _update_ppm(self, result: dict) -> None:
+        from SoapySDR import SOAPY_SDR_RX
         foff = result.get("freq_offset_hz")
         now = time.time()
         if foff is not None and abs(foff) > 0:
