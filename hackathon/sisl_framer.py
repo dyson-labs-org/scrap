@@ -158,11 +158,7 @@ def tx_bytes_to_chips(data: bytes,
     if len(code) != CHIPS_PER_SYMBOL:
         raise ValueError(f"code length {len(code)} != {CHIPS_PER_SYMBOL}")
 
-    bits = bytes_to_bits(data)
-    symbols = (1 - 2 * bits.astype(np.int8))          # 0→+1, 1→-1
-    # Broadcast multiply: (n_symbols, 1) * (1, chips) → (n_symbols, chips)
-    chips = (symbols[:, None] * code[None, :]).reshape(-1)
-    return chips.astype(np.int8)
+    return tx_bits_to_chips(bytes_to_bits(data), code)
 
 
 def tx_bits_to_chips(bits: np.ndarray,
@@ -205,19 +201,7 @@ def rx_chips_to_bytes(chips: np.ndarray, n_bytes: int,
         code = DEFAULT_PUBLIC_CODE
 
     n_bits = n_bytes * 8
-    needed = n_bits * CHIPS_PER_SYMBOL
-    if len(chips) < needed:
-        raise ValueError(f"need {needed} chips, got {len(chips)}")
-
-    # Reshape, correlate each row against the local code
-    mat = np.asarray(chips[:needed], dtype=np.float32).reshape(
-        n_bits, CHIPS_PER_SYMBOL
-    )
-    corr = mat @ code.astype(np.float32)
-
-    # BPSK decision: correlation > 0 → bit 0, < 0 → bit 1
-    bits = (corr < 0).astype(np.uint8)
-    return bits_to_bytes(bits)
+    return bits_to_bytes(rx_chips_to_bits(chips, n_bits, code))
 
 
 def rx_chips_to_bits(chips: np.ndarray, n_bits: int,
