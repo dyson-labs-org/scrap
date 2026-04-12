@@ -589,9 +589,20 @@ def live_rx_decode(
     if responder_static is None:
         responder_static = demo_responder_key()
 
-    samp_hz = info.samp_hz
-    if samps_per_chip is None:
-        samps_per_chip = info.samps_per_chip
+    # Always use 2 samples/chip for RX — Nyquist is sufficient and
+    # higher oversampling just wastes USB bandwidth and processing time.
+    # At chip-rate 1 on HackRF this gives 2 Msps instead of 8 Msps:
+    # 4× less data → no USB overflows, no SNR loss.
+    base_chip_rate_hz = info.samp_hz // info.samps_per_chip
+    if samps_per_chip is not None:
+        # --chip-rate override: derive chip rate from the override
+        chip_rate_hz = info.samp_hz // samps_per_chip
+    else:
+        chip_rate_hz = base_chip_rate_hz
+    samps_per_chip = 2
+    samp_hz = chip_rate_hz * samps_per_chip
+    # Clamp to device limits
+    samp_hz = max(2_000_000, min(info.samp_hz, samp_hz))
 
     print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
           f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
