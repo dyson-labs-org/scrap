@@ -472,6 +472,10 @@ class _AgcPpmState:
             self._current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
             self._vga_min, self._vga_max = 0.0, 49.0
         self._prev_vga = self._current_vga
+        # Ceiling starts at max; lowered by ADC saturation detection.
+        # The proportional AGC respects this ceiling so it can't ramp
+        # back into the clipping zone.
+        self._vga_ceiling = self._vga_max
 
     def _set_rx_vga(self, gain: float) -> None:
         from SoapySDR import SOAPY_SDR_RX
@@ -527,23 +531,28 @@ class _AgcPpmState:
 
     def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
         sample_p99 = float(np.percentile(np.abs(block_data), 99))
-        # Reduce gain only near ADC clipping (p99 > 0.9). Cap step at 6 dB.
         if sample_p99 > 0.9 and self._current_vga > self._vga_min:
             reduce_db = min(6.0, max(3.0,
                             20.0 * np.log10(sample_p99 / 0.5)))
             self._current_vga = max(
                 self._vga_min, self._current_vga - reduce_db)
+            # Set a ceiling: the proportional AGC can't ramp back above
+            # this level. Prevents the oscillation where gain ramps to
+            # 62 → clips → drops to 38 → ramps to 62 → clips again.
+            self._vga_ceiling = self._current_vga
             self._set_rx_vga(self._current_vga)
-            print(f"  AGC: ADC near saturation (p99={sample_p99:.2f}), "
-                  f"gain → {self._current_vga:.0f} dB")
+            print(f"  AGC: ADC clipping (p99={sample_p99:.2f}), "
+                  f"gain → {self._current_vga:.0f} dB "
+                  f"(ceiling set)")
         else:
             pk = result.get("peak_mag")
             if pk is not None and pk > 1:
                 if pk < self.AGC_MIN_PEAK or pk > self.AGC_MAX_PEAK:
                     step_db = 10.0 * np.log10(self.AGC_TARGET / pk)
                     step_db = max(-6.0, min(6.0, step_db))
+                    # Respect the ceiling set by ADC clipping detection
                     new_vga = max(self._vga_min, min(
-                        self._vga_max, self._current_vga + step_db))
+                        self._vga_ceiling, self._current_vga + step_db))
                     if abs(new_vga - self._current_vga) >= 1.0:
                         self._current_vga = round(new_vga)
                         self._set_rx_vga(self._current_vga)
