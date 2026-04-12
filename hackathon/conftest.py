@@ -6,7 +6,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 import sisl_crypto as sc
-import sisl_framer as _sf
+import sisl_framer as sf
 
 
 def bits_to_hard_llrs(bits: np.ndarray, magnitude: float = 10.0) -> np.ndarray:
@@ -43,7 +43,7 @@ def encoded_fec_bits_to_post_dbpsk(encoded_bits: np.ndarray) -> np.ndarray:
     header = encoded_bits[:sc.HAIL_FEC_HEADER_BITS]
     body_diff = encoded_bits[sc.HAIL_FEC_HEADER_BITS:]
     seed = int(header[-1])
-    body_orig = _sf.differential_decode_bits(body_diff, seed=seed)
+    body_orig = sf.differential_decode_bits(body_diff, seed=seed)
     return np.concatenate([header, body_orig])
 
 

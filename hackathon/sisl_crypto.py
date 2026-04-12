@@ -26,7 +26,6 @@ import hashlib
 import secrets
 import struct
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -36,7 +35,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 import sisl_fec
-import sisl_framer as _sf  # for differential_encode_bits used in encode_hail_fec
+import sisl_framer as sf  # for differential_encode_bits used in encode_hail_fec
 
 
 # ── Protocol constants ──────────────────────────────────────────────────────
@@ -231,7 +230,7 @@ class Ephemeral:
     """
 
     def __init__(self) -> None:
-        self._priv: Optional[ec.EllipticCurvePrivateKey] = generate_keypair()
+        self._priv: ec.EllipticCurvePrivateKey | None = generate_keypair()
         self._pub = self._priv.public_key()
 
     @property
@@ -294,7 +293,7 @@ class DecodedHail:
 def decode_hail(
     frame: bytes,
     my_static_priv: ec.EllipticCurvePrivateKey,
-) -> Optional[DecodedHail]:
+) -> DecodedHail | None:
     """Trial-decrypt a hail. Return DecodedHail iff addressed to us.
 
     §5.2.1 workflow. Returns None on any cheap-reject (ASM, version,
@@ -411,7 +410,7 @@ def encode_hail_fec(
     # receiver can anchor the first body-bit differential decode on the
     # coherently-recovered last pilot symbol.
     seed = int(header_bits[-1])
-    diff_coded_body = _sf.differential_encode_bits(coded_body_bits, seed=seed)
+    diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
 
     out = np.empty(HAIL_FEC_TOTAL_BITS, dtype=np.uint8)
     out[:HAIL_FEC_HEADER_BITS] = header_bits
@@ -422,7 +421,7 @@ def encode_hail_fec(
 def decode_hail_fec_from_llrs(
     llrs: np.ndarray,
     my_static_priv: ec.EllipticCurvePrivateKey,
-) -> Optional[DecodedHail]:
+) -> DecodedHail | None:
     """Trial-decrypt a FEC-coded hail from per-bit LLRs.
 
     `llrs` must be a length-HAIL_FEC_TOTAL_BITS float array using the
@@ -546,7 +545,7 @@ def decode_ack(
     caller_eph_priv: ec.EllipticCurvePrivateKey,
     dh1: bytes,
     expected_nonce_echo: bytes,
-) -> Optional[DecodedAck]:
+) -> DecodedAck | None:
     """Verify and decrypt an ACK frame. Caller-side, full X3DH.
 
     Requires:
