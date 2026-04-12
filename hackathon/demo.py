@@ -1374,53 +1374,36 @@ def main() -> int:
             device_str=tx_device_str,
         )
         print(" done")
-        print(f"  phase 2: alternating TX/RX")
 
-        for round_num in range(1, MAX_ROUNDS + 1):
-            # TX phase
-            tx_repeats = max(1, int(TX_DURATION * chip_rate_hz
-                                    / len(hail_chips)))
-            print(f"\n  round {round_num}: \033[33mTX hail\033[0m "
-                  f"({tx_repeats}×{TX_DURATION:.0f}s)...",
-                  end="", flush=True)
-            soapy_tx_burst(
-                hail_samples, center_hz,
-                samp_hz=SAMP_RATE_HZ,
-                tx_vga_db=args.tx_vga,
-                tx_amp_on=args.tx_amp,
-                repeats=tx_repeats,
-                device_str=tx_device_str,
-            )
-            print(f" done → \033[36mRX listening {RX_DURATION:.0f}s\033[0m",
-                  flush=True)
+        # Phase 2: listen for ACK continuously. No more TX/RX alternation
+        # — the responder has had 30s of uninterrupted hail to decrypt and
+        # is now TX'ing ACK continuously. Keep listening until we get it.
+        # Use the full live_rx_decode infrastructure (AGC, PPM, reader)
+        # so the gain converges properly over multiple blocks.
+        print(f"\n  phase 2: \033[36mRX listening for ACK "
+              f"(up to {args.duration:.0f}s)\033[0m")
+        ack_stats = live_rx_decode(
+            duration_s=args.duration,
+            block_seconds=5.36,  # same as hail path (proven to work)
+            lna_db=args.rx_lna,
+            vga_db=args.rx_vga,
+            amp_on=args.rx_amp,
+            center_hz=center_hz,
+            device_name=args.device,
+            signal_threshold=args.signal_threshold,
+            samps_per_chip=active_samps_per_chip,
+            exit_on_decrypt=True,
+            decode_fn=_ack_decode_fn,
+        )
+        dh = ack_stats.get("_decoded_hail")
+        if ack_stats.get("hails_decrypted", 0) > 0 and dh is not None:
+            print()
+            print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
+            print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
+            print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+            return 0
 
-            # RX phase — use live_rx_decode with ACK decode function.
-            # Start at lower gain: the ACK signal is strong (same TX
-            # power, bench distance). At --rx-lna 40 + AMP + VGA 40,
-            # the ADC clips (p99>1.4), destroying the spreading code.
-            # Start at VGA=20 and let AGC ramp if needed.
-            ack_stats = live_rx_decode(
-                duration_s=RX_DURATION,
-                block_seconds=5.0,  # need room for tracker start offset
-                lna_db=args.rx_lna,
-                vga_db=min(20, args.rx_vga),
-                amp_on=args.rx_amp,
-                center_hz=center_hz,
-                device_name=args.device,
-                signal_threshold=args.signal_threshold,
-                samps_per_chip=active_samps_per_chip,
-                exit_on_decrypt=True,
-                decode_fn=_ack_decode_fn,
-            )
-            dh = ack_stats.get("_decoded_hail")  # reused key for any decrypt
-            if ack_stats.get("hails_decrypted", 0) > 0 and dh is not None:
-                print()
-                print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
-                print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
-                print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
-                return 0
-
-        print(f"\n  timeout after {MAX_ROUNDS} rounds — no ACK received")
+        print(f"\n  timeout — no ACK received")
         return 1
 
     # mode == "tx"
