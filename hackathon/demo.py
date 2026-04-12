@@ -1323,6 +1323,11 @@ def main() -> int:
         RX_DURATION = 4.0
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
 
+        # Auto-PPM for ACK RX: learn Δf from track_lost/decrypt_fail
+        # blocks and apply as a cumulative retune. Same principle as the
+        # hail RX auto-PPM, just applied to the caller's ACK listen.
+        ack_rx_correction_hz = 0.0
+
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
         print(f"  duty cycle:    TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
@@ -1356,9 +1361,10 @@ def main() -> int:
             rx_dev = _soapy.Device(tx_device_str)
             rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
                                              chip_rate_hz * 2))
-            # Apply PPM correction for the ACK RX frequency
+            # Apply PPM cal + learned correction from previous rounds
             rx_ppm = _get_device_ppm(tx_serial)
-            rx_center = center_hz + center_hz * rx_ppm / 1e6
+            rx_center = (center_hz + center_hz * rx_ppm / 1e6
+                         + ack_rx_correction_hz)
             rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
             rx_dev.setFrequency(_RX, 0, rx_center)
             if args.device == "hackrf":
@@ -1412,7 +1418,13 @@ def main() -> int:
                     print(f"  Δf:            {foff:+.0f} Hz")
                     return 0
                 elif s in ("decrypt_fail", "track_lost"):
-                    print(f"       RX: {s} Δf={foff:+.0f}Hz")
+                    # Learn from consistent Δf to auto-correct
+                    if abs(foff) > 1000 and abs(foff) < 500_000:
+                        ack_rx_correction_hz += foff
+                        print(f"       RX: {s} Δf={foff:+.0f}Hz "
+                              f"(correction now {ack_rx_correction_hz:+.0f}Hz)")
+                    else:
+                        print(f"       RX: {s} Δf={foff:+.0f}Hz")
                 elif s == "no_signal":
                     print(f"       RX: no signal")
                 else:
