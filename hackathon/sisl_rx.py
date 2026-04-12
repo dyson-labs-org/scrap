@@ -99,9 +99,6 @@ class LlrAccumulator:
         body_llrs = llrs_f64[self._header_bits:]
         self.accumulated += body_llrs
         self.n_copies += 1
-        if self.n_copies >= self.max_copies:
-            self.accumulated *= 0.5
-            self.n_copies //= 2
         return True
 
     def try_decrypt(
