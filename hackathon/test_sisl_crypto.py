@@ -416,7 +416,83 @@ def test_ack_wrong_nonce_echo_rejected():
     assert result is None
 
 
-# ── 6. Ephemeral one-shot enforcement ──────────────────────────────────────
+# ── 6. Hail/ACK session key derivation ────────────────────────────────────
+
+def test_hail_ack_session_key_derivation():
+    caller_static = sc.generate_keypair()
+    responder_static = sc.generate_keypair()
+
+    caller_eph = sc.Ephemeral()
+    caller_eph_priv = caller_eph._priv
+
+    body = _test_body(
+        caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
+    )
+    hail_frame = sc.encode_hail(
+        caller_eph, responder_static.public_key(), body
+    )
+    decoded_hail = sc.decode_hail(hail_frame, responder_static)
+    assert decoded_hail is not None
+
+    responder_eph = sc.Ephemeral()
+    responder_eph_priv = responder_eph._priv
+    ack_frame = sc.encode_ack(
+        responder_eph=responder_eph,
+        decoded_hail=decoded_hail,
+        status=1,
+    )
+
+    dh1_caller = sc.ecdh(caller_eph_priv, responder_static.public_key())
+    decoded_ack = sc.decode_ack(
+        frame=ack_frame,
+        caller_static_priv=caller_static,
+        caller_eph_priv=caller_eph_priv,
+        dh1=dh1_caller,
+        expected_nonce_echo=body.body_nonce,
+    )
+    assert decoded_ack is not None
+
+    caller_eph_canonical = sc.pubkey_to_compressed(
+        caller_eph_priv.public_key()
+    )
+    responder_eph_canonical = sc.pubkey_to_compressed(
+        decoded_ack.responder_eph_pub
+    )
+
+    # Caller-side DH terms
+    dh2_caller = sc.ecdh(caller_static, decoded_ack.responder_eph_pub)
+    dh3_caller = sc.ecdh(caller_eph_priv, decoded_ack.responder_eph_pub)
+    caller_keys = sc.derive_session_keys(
+        dh1=dh1_caller,
+        dh2=dh2_caller,
+        dh3=dh3_caller,
+        caller_eph_pub_canonical=caller_eph_canonical,
+        responder_eph_pub_canonical=responder_eph_canonical,
+    )
+
+    # Responder-side DH terms (same shared secrets, different private keys)
+    dh1_responder = sc.ecdh(responder_static, caller_eph_priv.public_key())
+    dh2_responder = sc.ecdh(responder_eph_priv, caller_static.public_key())
+    dh3_responder = sc.ecdh(responder_eph_priv, caller_eph_priv.public_key())
+    responder_keys = sc.derive_session_keys(
+        dh1=dh1_responder,
+        dh2=dh2_responder,
+        dh3=dh3_responder,
+        caller_eph_pub_canonical=caller_eph_canonical,
+        responder_eph_pub_canonical=responder_eph_canonical,
+    )
+
+    # Both sides must produce identical session keys
+    assert caller_keys == responder_keys
+
+    # All 4 key fields exist and are 32 bytes each
+    expected_fields = ["p2p_tx_key", "p2p_rx_key", "spreading_seed", "reserved"]
+    for field in expected_fields:
+        assert field in caller_keys, f"missing field: {field}"
+        assert len(caller_keys[field]) == 32, f"{field} is not 32 bytes"
+
+
+# ── 7. Ephemeral one-shot enforcement ──────────────────────────────────────
 
 def test_ephemeral_one_shot():
     e = sc.Ephemeral()
