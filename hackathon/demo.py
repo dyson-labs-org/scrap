@@ -82,8 +82,8 @@ SAMP_RATE_HZ = 8_000_000                # 8 Msps (HackRF default)
 SAMPS_PER_CHIP = SAMP_RATE_HZ // CHIP_RATE_HZ    # 8 — integer
 HACKRF_TX_VGA_DB = 0                    # TX IF gain, 0..47 dB. Default = min.
 HACKRF_TX_AMP_ON = False                # TX RF PA (14 dB). Off by default.
-HACKRF_RX_VGA_DB = 20                   # conservative
-HACKRF_RX_LNA_DB = 16                   # conservative
+HACKRF_RX_VGA_DB = 40                   # HackRF NF is ~10-12 dB; needs more
+HACKRF_RX_LNA_DB = 40                   # gain than RTL-SDR to compensate
 
 
 # ── Per-device RX configuration ────────────────────────────────────────────
