@@ -10,7 +10,7 @@ Measures the HackRF TX → RTL-SDR RX link quality at each frequency:
 
 Usage:
   1. Start TX on HackRF (any frequency — we'll retune the RX):
-       python sisl_dsss_demo.py --mode tx --fec --freq 433 --tx-vga 30 --tx-amp --duration 600
+       python demo.py --mode tx --fec --freq 433 --tx-vga 30 --tx-amp --duration 600
 
   2. Run this script (it retunes the RTL-SDR across frequencies):
        python bench_radio_characterize.py
@@ -37,7 +37,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
-import sisl_dsss_demo as dd
+import demo as dd
 import sisl_framer as sf
 
 

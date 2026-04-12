@@ -15,7 +15,7 @@ Usage (from the repo root or the hackathon directory):
 
 Optional `freq_mhz` overrides the center frequency for that sweep. Both
 machines must use the same value. Default is 2437 MHz. Try 5820 if the
-2.4 GHz band is crowded. See sisl_dsss_demo.py --help for a full list
+2.4 GHz band is crowded. See demo.py --help for a full list
 of suggested quieter frequencies.
 
 Each step runs until the sub-process exits (usually 30 s duration), then
@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEMO = HERE / "sisl_dsss_demo.py"
+DEMO = HERE / "demo.py"
 
 # Where we stash intermediate .cfile captures. /tmp on unix, %TEMP% on Windows.
 def tmp_path(name: str) -> Path:
@@ -81,7 +81,7 @@ def run(cmd: list[str], check: bool = False) -> int:
 
 
 def demo(*args: str) -> int:
-    """Run a sisl_dsss_demo.py subcommand with the current python."""
+    """Run a demo.py subcommand with the current python."""
     return run([sys.executable, str(DEMO), *args])
 
 
