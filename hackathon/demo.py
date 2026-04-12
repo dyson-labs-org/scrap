@@ -487,7 +487,7 @@ class _AgcPpmState:
             elif now - self._last_recal_t >= self.RECAL_INTERVAL:
                 do_retune = True
             if do_retune and self._offset_history:
-                correction = float(np.median(self._offset_history[-4:]))
+                correction = float(np.median(list(self._offset_history)[-4:]))
                 self._center_hz += correction
                 self._total_correction_hz += correction
                 self._device.setFrequency(
@@ -743,9 +743,13 @@ def live_rx_decode(
     except KeyboardInterrupt:
         print("  interrupted")
     finally:
+        # Deactivate the stream FIRST — this unblocks any pending
+        # readStream call in the reader thread, which otherwise hangs
+        # for up to 500 ms on Windows while USB buffers overflow and
+        # SoapySDR prints "O" to stdout for each one.
         reader_stop.set()
-        reader.join(timeout=3.0)
         device.deactivateStream(stream)
+        reader.join(timeout=3.0)
         device.closeStream(stream)
         if save_file is not None:
             save_file.close()
