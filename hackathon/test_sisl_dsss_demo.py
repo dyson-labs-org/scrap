@@ -1,4 +1,4 @@
-"""Tests for sisl_dsss_demo.py (pure-numpy, no HackRF).
+"""Tests for demo.py and sisl_rx.py (pure-numpy, no HackRF).
 
 Run: python -m pytest hackathon/test_sisl_dsss_demo.py
 """
@@ -11,7 +11,7 @@ import tempfile
 import numpy as np
 
 import sisl_crypto as sc
-import sisl_dsss_demo as dd
+import demo as dd
 from conftest import bits_to_hard_llrs, encoded_fec_bits_to_post_dbpsk, make_test_hail_body
 
 

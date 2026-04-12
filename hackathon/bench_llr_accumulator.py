@@ -48,7 +48,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import sisl_crypto as sc
-import sisl_dsss_demo as dd
+import demo as dd
 import sisl_fec
 import sisl_framer as sf
 

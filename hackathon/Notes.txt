@@ -1,0 +1,6 @@
+1. Bandwidth choice
+2. Characterize how much you can encode in the available frequency bandwidth
+3. Sideband -
+    What is the frequency response envelope WRT the bandwidth
+4. Timing - what's going on
+
