@@ -1247,9 +1247,10 @@ def main() -> int:
         print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
 
         ack_start = time.time()
+        ack_tx_duration = max(60.0, args.duration)  # at least 60s of ACK TX
         ack_round = 0
         try:
-            while time.time() - ack_start < args.duration:
+            while time.time() - ack_start < ack_tx_duration:
                 ack_round += 1
                 # TX one burst of 10 repeats (~15s), then brief pause
                 burst_repeats = 10
