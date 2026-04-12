@@ -1210,10 +1210,13 @@ def main() -> int:
         block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
         decoded_hail = None
 
-        # Phase 1: listen for hail — exit immediately on first decrypt
+        # Phase 1: listen for hail — exit immediately on first decrypt.
+        # Use a long listen duration so AGC and PPM have time to converge.
+        # exit_on_decrypt=True breaks out as soon as a hail decrypts.
+        listen_duration = max(600.0, args.duration)
         while decoded_hail is None:
             stats = live_rx_decode(
-                duration_s=args.duration,
+                duration_s=listen_duration,
                 block_seconds=block_sec,
                 responder_static=responder_static,
                 lna_db=args.rx_lna, vga_db=args.rx_vga,
