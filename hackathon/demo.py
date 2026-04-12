@@ -635,6 +635,7 @@ def live_rx_decode(
     combine_copies: int = 0,
     samps_per_chip: int | None = None,
     exit_on_decrypt: bool = False,
+    decode_fn=None,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -825,22 +826,26 @@ def live_rx_decode(
             if save_file is not None:
                 block_data.tofile(save_file)
 
-            result = sisl_rx._decode_one_hail_in_block(
-                block_data, responder_static,
-                samps_per_chip=samps_per_chip,
-                samp_hz=samp_hz,
-                signal_threshold=signal_threshold,
-                top_k_soft=top_k_soft,
-            )
+            if decode_fn is not None:
+                result = decode_fn(block_data)
+            else:
+                result = sisl_rx._decode_one_hail_in_block(
+                    block_data, responder_static,
+                    samps_per_chip=samps_per_chip,
+                    samp_hz=samp_hz,
+                    signal_threshold=signal_threshold,
+                    top_k_soft=top_k_soft,
+                )
             sisl_rx._print_live_event(stats["blocks_processed"], result)
 
             s = result["status"]
             if s == "decrypt_ok":
                 stats["hails_detected"] += 1
                 stats["hails_decrypted"] += 1
-                # Store the full DecodedHail for ACK construction
+                # Store the full decoded object (hail or ACK)
                 if "_decoded_hail" not in stats:
-                    stats["_decoded_hail"] = result.get("decoded_hail")
+                    stats["_decoded_hail"] = (result.get("decoded_hail")
+                                              or result.get("decoded_ack"))
                 if exit_on_decrypt:
                     break
             elif s == "decrypt_fail":
@@ -1352,83 +1357,39 @@ def main() -> int:
             print(f" done → \033[36mRX listening {RX_DURATION:.0f}s\033[0m",
                   flush=True)
 
-            # RX phase — use the SAME pinned HackRF (half-duplex switch)
-            import SoapySDR as _soapy
-            from SoapySDR import SOAPY_SDR_RX as _RX, SOAPY_SDR_CF32 as _CF32
-            rx_info = DEVICES[args.device]
-            rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
-                                             chip_rate_hz * 2))
-            rx_dev = _soapy.Device(tx_device_str)
-            rx_samp_hz = max(2_000_000, min(rx_info.samp_hz,
-                                             chip_rate_hz * 2))
-            # Apply PPM cal + learned correction from previous rounds
-            rx_ppm = _get_device_ppm(tx_serial)
-            rx_center = (center_hz + center_hz * rx_ppm / 1e6
-                         + ack_rx_correction_hz)
-            rx_dev.setSampleRate(_RX, 0, rx_samp_hz)
-            rx_dev.setFrequency(_RX, 0, rx_center)
-            if args.device == "hackrf":
-                rx_dev.setGain(_RX, 0, "AMP",
-                               14.0 if args.rx_amp else 0.0)
-                rx_dev.setGain(_RX, 0, "LNA", float(args.rx_lna))
-                rx_dev.setGain(_RX, 0, "VGA", float(args.rx_vga))
-            else:
-                rx_dev.setGain(_RX, 0, min(49.0,
-                               float(args.rx_lna + args.rx_vga)))
-            rx_stream = rx_dev.setupStream(_RX, _CF32)
-            rx_dev.activateStream(rx_stream)
-
-            n_rx_samples = int(RX_DURATION * rx_samp_hz)
-            rx_buf = np.empty(n_rx_samples, dtype=np.complex64)
-            filled = 0
-            while filled < n_rx_samples:
-                sr = rx_dev.readStream(
-                    rx_stream, [rx_buf[filled:]], n_rx_samples - filled,
-                    timeoutUs=500_000)
-                if sr.ret > 0:
-                    filled += sr.ret
-                elif sr.ret == -1:
-                    continue
-                else:
-                    break
-            rx_dev.deactivateStream(rx_stream)
-            rx_dev.closeStream(rx_stream)
-            del rx_dev
-
-            if filled > n_rx_samples // 2:
-                ack_result = sisl_rx.decode_one_ack_in_block(
-                    rx_buf[:filled],
+            # RX phase — use live_rx_decode with ACK decode function.
+            # Gets full AGC, PPM, background reader infrastructure.
+            def _ack_decode_fn(block_data):
+                return sisl_rx.decode_one_ack_in_block(
+                    block_data,
                     caller_static_priv=caller_static,
                     caller_eph_priv=caller_eph_priv,
                     dh1=dh1,
                     expected_nonce_echo=body.body_nonce,
                     samps_per_chip=active_samps_per_chip,
-                    samp_hz=rx_samp_hz,
+                    samp_hz=chip_rate_hz * 2,
                 )
-                s = ack_result.get("status", "")
-                foff = ack_result.get("freq_offset_hz", 0)
-                if s == "decrypt_ok":
-                    da = ack_result["decoded_ack"]
-                    print()
-                    print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
-                    print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
-                    print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
-                    print(f"  status:        {da.body.status}")
-                    print(f"  nonce echo:    {da.body.nonce_echo.hex()}")
-                    print(f"  Δf:            {foff:+.0f} Hz")
-                    return 0
-                elif s in ("decrypt_fail", "track_lost"):
-                    # Learn from consistent Δf to auto-correct
-                    if abs(foff) > 1000 and abs(foff) < 500_000:
-                        ack_rx_correction_hz += foff
-                        print(f"       RX: {s} Δf={foff:+.0f}Hz "
-                              f"(correction now {ack_rx_correction_hz:+.0f}Hz)")
-                    else:
-                        print(f"       RX: {s} Δf={foff:+.0f}Hz")
-                elif s == "no_signal":
-                    print(f"       RX: no signal")
-                else:
-                    print(f"       RX: {s}")
+
+            ack_stats = live_rx_decode(
+                duration_s=RX_DURATION,
+                block_seconds=RX_DURATION,
+                lna_db=args.rx_lna,
+                vga_db=args.rx_vga,
+                amp_on=args.rx_amp,
+                center_hz=center_hz,
+                device_name=args.device,
+                signal_threshold=args.signal_threshold,
+                samps_per_chip=active_samps_per_chip,
+                exit_on_decrypt=True,
+                decode_fn=_ack_decode_fn,
+            )
+            dh = ack_stats.get("_decoded_hail")  # reused key for any decrypt
+            if ack_stats.get("hails_decrypted", 0) > 0 and dh is not None:
+                print()
+                print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
+                print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
+                print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+                return 0
 
         print(f"\n  timeout after {MAX_ROUNDS} rounds — no ACK received")
         return 1
