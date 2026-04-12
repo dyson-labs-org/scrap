@@ -371,6 +371,37 @@ def matched_filter_complex_sample_rate(
     return (corr_re + 1j * corr_im).astype(np.complex64)
 
 
+def _refine_peak(
+    mag: np.ndarray, corr_c: np.ndarray, lo: int, hi: int,
+) -> tuple[float | None, complex | None]:
+    """Parabolic interpolation around argmax; returns (pos, complex_value)."""
+    if hi - lo < 3:
+        idx = int(np.argmax(mag[lo:hi]))
+        actual = lo + idx
+        return float(actual), complex(corr_c[actual])
+    window = mag[lo:hi]
+    local_idx = int(np.argmax(window))
+    if local_idx == 0 or local_idx == len(window) - 1:
+        actual = lo + local_idx
+        return float(actual), complex(corr_c[actual])
+    y0 = float(window[local_idx - 1])
+    y1 = float(window[local_idx])
+    y2 = float(window[local_idx + 1])
+    denom = (y0 - 2 * y1 + y2)
+    if abs(denom) < 1e-12:
+        actual = lo + local_idx
+        return float(actual), complex(corr_c[actual])
+    frac = 0.5 * (y0 - y2) / denom              # in [-0.5, 0.5]
+    refined = lo + local_idx + frac
+    i0 = int(np.floor(refined))
+    i1 = i0 + 1
+    if i1 >= len(corr_c):
+        return float(refined), complex(corr_c[i0])
+    t = refined - i0
+    c_refined = (1 - t) * corr_c[i0] + t * corr_c[i1]
+    return float(refined), complex(c_refined)
+
+
 def decode_with_freq_tracking(
     samples: np.ndarray,
     samps_per_chip: int,
@@ -444,37 +475,6 @@ def decode_with_freq_tracking(
     peak_values: list[complex] = []
     positions: list[int] = []
 
-    def _refine_peak(lo: int, hi: int) -> tuple[float | None, complex | None]:
-        """Parabolic interpolation around argmax; returns (pos, complex_value)."""
-        if hi - lo < 3:
-            idx = int(np.argmax(mag[lo:hi]))
-            actual = lo + idx
-            return float(actual), complex(corr_c[actual])
-        window = mag[lo:hi]
-        local_idx = int(np.argmax(window))
-        if local_idx == 0 or local_idx == len(window) - 1:
-            actual = lo + local_idx
-            return float(actual), complex(corr_c[actual])
-        y0 = float(window[local_idx - 1])
-        y1 = float(window[local_idx])
-        y2 = float(window[local_idx + 1])
-        denom = (y0 - 2 * y1 + y2)
-        if abs(denom) < 1e-12:
-            actual = lo + local_idx
-            return float(actual), complex(corr_c[actual])
-        frac = 0.5 * (y0 - y2) / denom              # in [-0.5, 0.5]
-        refined = lo + local_idx + frac
-        # Linear-interpolate the complex correlator value at the refined
-        # fractional position. Phase unwrapping isn't needed over 1 sample
-        # because the mainlobe is smooth.
-        i0 = int(np.floor(refined))
-        i1 = i0 + 1
-        if i1 >= len(corr_c):
-            return float(refined), complex(corr_c[i0])
-        t = refined - i0
-        c_refined = (1 - t) * corr_c[i0] + t * corr_c[i1]
-        return float(refined), complex(c_refined)
-
     BOOTSTRAP = 8
     max_consecutive_misses = max(8, n_bits // 32)
     consecutive_misses = 0
@@ -483,7 +483,7 @@ def decode_with_freq_tracking(
         hi = min(len(mag), int(round(pos)) + search_half_samples + 1)
         if hi - lo < samps_per_chip:
             return None
-        refined_pos, refined_c = _refine_peak(lo, hi)
+        refined_pos, refined_c = _refine_peak(mag, corr_c, lo, hi)
         if refined_pos is None or refined_c is None:
             return None
         local_peak = abs(refined_c)
@@ -512,19 +512,7 @@ def decode_with_freq_tracking(
             )
 
     # ── 5. V-V drift estimation + differential decoding ────────────────
-    # (c_k)² has phase 2·(θ₀+k·Δθ); squaring removes BPSK ambiguity.
-    if len(peak_values) >= 4:
-        squared = np.array(peak_values, dtype=np.complex128) ** 2
-        # Phase difference between consecutive squared values = 2·Δθ
-        diffs = squared[1:] * np.conjugate(squared[:-1])
-        mean_diff = complex(np.sum(diffs))
-        if abs(mean_diff) > 1e-12:
-            drift_per_symbol_2x = float(np.angle(mean_diff))
-            drift_per_symbol = drift_per_symbol_2x / 2.0
-        else:
-            drift_per_symbol = 0.0
-    else:
-        drift_per_symbol = 0.0
+    drift_per_symbol = estimate_drift_per_symbol(peak_values)
 
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0                          # caller tries both polarities
