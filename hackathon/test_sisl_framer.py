@@ -6,13 +6,9 @@ Run: python hackathon/test_sisl_framer.py
 from __future__ import annotations
 
 import os
-import sys
-import time
-import traceback
 
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pytest
 
 import sisl_crypto as sc
 import sisl_framer as sf
@@ -761,98 +757,29 @@ def _synth_tracker_samples(n_bits: int, samps_per_chip: int,
     return samples
 
 
-def test_decode_with_freq_tracking_long_frame_early_dip():
-    """I3 regression: a 2096-bit frame with a pre-bootstrap dip at
-    0.08 × nominal that the OLD lock-floor logic (0.1 * argmax peak)
-    would reject but the NEW long-frame-relaxed floor (0.05 * argmax
-    before the bootstrap re-anchor fires) accepts.
-
-    This test exercises the EXACT code path difference introduced by
-    the I3 fix. For a clean synthetic chip stream, argmax mag ≈ 2046
-    (matched filter peak for 1023 chips). Pre-fix floor = 205. We
-    attenuate symbol 3 (well before BOOTSTRAP=8) to 0.08 × 2046 = 164,
-    which is < 205 (pre-fix abort) but > 102 (post-fix long-frame
-    relaxed floor). Without the fix the tracker returns None and the
-    FEC accumulator gets no data.
-    """
+@pytest.mark.parametrize(
+    "n_bytes, attenuate_symbol, attenuate_factor, seed",
+    [
+        pytest.param(262, 3, 0.08, 271, id="long_frame_early_dip"),
+        pytest.param(262, 20, 0.15, 271, id="post_bootstrap_dip"),
+        pytest.param(133, -1, 1.0, 42, id="short_frame_unchanged"),
+    ],
+)
+def test_decode_with_freq_tracking_lock_floor(
+    n_bytes, attenuate_symbol, attenuate_factor, seed,
+):
     samps_per_chip = 2
-    n_bytes = 262   # 2096 bits ≥ 1500 trips the long-frame relaxation
+    n_bits = n_bytes * 8
     samples = _synth_tracker_samples(
-        n_bytes * 8, samps_per_chip,
-        attenuate_symbol=3, attenuate_factor=0.08,
-        seed=271,
-    )
-    result = sf.decode_with_freq_tracking(
-        samples, samps_per_chip=samps_per_chip,
-        n_bytes=n_bytes,
-    )
-    assert result is not None, (
-        "tracker aborted on long frame with pre-bootstrap dip at "
-        "0.08 × nominal; I3 lock-floor fix regressed"
-    )
-    assert len(result["peak_values"]) == n_bytes * 8
-
-
-def test_decode_with_freq_tracking_post_bootstrap_dip():
-    """I3 complementary case: a post-bootstrap dip at 0.15 × nominal.
-
-    After BOOTSTRAP=8 peaks the lock_floor is re-anchored on the
-    median, which for a clean signal is effectively unchanged from
-    the argmax. 0.15 × > 0.1 × so this survives both the old and new
-    floors — used as a sanity check that post-bootstrap dips at
-    modest depth still track through cleanly."""
-    samps_per_chip = 2
-    n_bytes = 262
-    samples = _synth_tracker_samples(
-        n_bytes * 8, samps_per_chip,
-        attenuate_symbol=20, attenuate_factor=0.15,
-        seed=271,
+        n_bits, samps_per_chip,
+        attenuate_symbol=attenuate_symbol,
+        attenuate_factor=attenuate_factor,
+        seed=seed,
     )
     result = sf.decode_with_freq_tracking(
         samples, samps_per_chip=samps_per_chip,
         n_bytes=n_bytes,
     )
     assert result is not None
-    assert len(result["peak_values"]) == n_bytes * 8
+    assert len(result["peak_values"]) == n_bits
 
-
-def test_decode_with_freq_tracking_short_frame_unchanged():
-    """Legacy 1064-bit path must still work identically (sanity that
-    the I3 fix didn't break the short-codeword baseline)."""
-    samps_per_chip = 2
-    samples = _synth_tracker_samples(
-        1064, samps_per_chip,
-        attenuate_symbol=-1, attenuate_factor=1.0,
-        seed=42,
-    )
-    result = sf.decode_with_freq_tracking(
-        samples, samps_per_chip=samps_per_chip,
-        n_bytes=133,   # 1064 bits
-    )
-    assert result is not None
-    assert len(result["peak_values"]) == 1064
-
-
-# ── Runner ──────────────────────────────────────────────────────────────────
-
-def _run_all():
-    tests = [(n, f) for n, f in globals().items()
-             if n.startswith("test_") and callable(f)]
-    passed = failed = 0
-    t0 = time.time()
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-            failed += 1
-    dt = time.time() - t0
-    print(f"\n{passed} passed, {failed} failed in {dt:.2f}s")
-    return failed
-
-
-if __name__ == "__main__":
-    sys.exit(_run_all())
