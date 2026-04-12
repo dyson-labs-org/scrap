@@ -88,6 +88,40 @@ HAIL_FEC_BODY_CODED_BITS = sisl_fec.coded_length(
     HAIL_FEC_BODY_PAYLOAD_BITS)                              # 2048
 HAIL_FEC_TOTAL_BITS = HAIL_FEC_HEADER_BITS + HAIL_FEC_BODY_CODED_BITS  # 2096
 
+# ── Block interleaver for FEC body bits ────────────────────────────────────
+#
+# A burst of interference (e.g., a WiFi frame at 2.4 GHz) wipes out a
+# contiguous run of symbols. Without interleaving, those errors hit
+# adjacent coded bits and exceed Viterbi's burst-correction capability.
+# A block interleaver writes bits row-wise into a matrix and reads them
+# column-wise (or vice versa), spreading any contiguous burst across the
+# entire codeword so Viterbi sees scattered single-bit errors instead.
+#
+# Matrix dimensions: 32 rows × 64 columns = 2048 bits = HAIL_FEC_BODY_CODED_BITS.
+# A 64-symbol burst (65 ms at 1 Mcps) becomes 64 single-bit errors
+# spaced 32 symbols apart — well within Viterbi's correction capability
+# (d_free = 12, can correct ~6 adjacent errors per constraint length).
+
+_INTERLEAVE_ROWS = 32
+_INTERLEAVE_COLS = HAIL_FEC_BODY_CODED_BITS // _INTERLEAVE_ROWS  # 64
+assert _INTERLEAVE_ROWS * _INTERLEAVE_COLS == HAIL_FEC_BODY_CODED_BITS
+
+# Pre-computed permutation indices (row-major write, column-major read)
+_INTERLEAVE_PERM = np.arange(HAIL_FEC_BODY_CODED_BITS).reshape(
+    _INTERLEAVE_ROWS, _INTERLEAVE_COLS
+).T.ravel()
+_DEINTERLEAVE_PERM = np.argsort(_INTERLEAVE_PERM)
+
+
+def _interleave_bits(bits: np.ndarray) -> np.ndarray:
+    """Block-interleave FEC coded body bits (uint8 array)."""
+    return bits[_INTERLEAVE_PERM]
+
+
+def _deinterleave_llrs(llrs: np.ndarray) -> np.ndarray:
+    """Undo block interleaving on soft LLR array (float32)."""
+    return llrs[_DEINTERLEAVE_PERM]
+
 
 # ── Key utilities ───────────────────────────────────────────────────────────
 
@@ -420,6 +454,10 @@ def encode_hail_fec(
     coded_body_bits = sisl_fec.encode(body_bits)
     assert len(coded_body_bits) == HAIL_FEC_BODY_CODED_BITS
 
+    # Interleave: spread burst errors across the codeword so Viterbi
+    # sees scattered single-bit errors instead of uncorrectable bursts.
+    coded_body_bits = _interleave_bits(coded_body_bits)
+
     # Differential encode the FEC body. Seed = last header bit so the
     # receiver can anchor the first body-bit differential decode on the
     # coherently-recovered last pilot symbol.
@@ -457,7 +495,7 @@ def decode_hail_fec_from_llrs(
     # + Poly1305 tag be the definitive integrity check. The header bytes
     # used below are the KNOWN canonical values, not the received bits.
 
-    coded_body_llrs = llrs[HAIL_FEC_HEADER_BITS:]
+    coded_body_llrs = _deinterleave_llrs(llrs[HAIL_FEC_HEADER_BITS:])
     body_bits = sisl_fec.decode(coded_body_llrs, HAIL_FEC_BODY_PAYLOAD_BITS)
     body_bytes = np.packbits(body_bits).tobytes()
     assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN

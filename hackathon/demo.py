@@ -523,8 +523,11 @@ def live_rx_decode(
         )
 
     # ── Auto-PPM calibration state ──
-    RECAL_INTERVAL = 30.0
-    SETTLED_THRESHOLD_HZ = 1000.0
+    # At 2.4 GHz, even 3 ppm of crystal drift = 7.2 kHz — enough to
+    # degrade the MF over a 30-second interval. Retune every 10 seconds
+    # even after settling, and use a tighter settling threshold.
+    RECAL_INTERVAL = 10.0
+    SETTLED_THRESHOLD_HZ = 500.0
     current_center_hz = float(center_hz)
     total_correction_hz = 0.0
     settled = False

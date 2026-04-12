@@ -114,7 +114,8 @@ class LlrAccumulator:
         """
         if self.n_copies == 0:
             return None
-        body_llrs_f32 = self.accumulated.astype(np.float32)
+        body_llrs_f32 = sc._deinterleave_llrs(
+            self.accumulated.astype(np.float32))
         body_bits = sisl_fec.decode(
             body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,
         )
@@ -305,7 +306,12 @@ def _acquire_and_track(
         return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
 
     periodic_ratio = float(np.median(test_peaks)) / peak_mag if peak_mag > 0 else 0.0
-    if periodic_ratio < 0.3:
+    # Lowered from 0.3 to 0.15: WiFi/BLE bursts at 2.4 GHz create
+    # non-periodic MF spikes that suppress the periodic ratio even
+    # when the DSSS signal is present underneath. The FEC + Poly1305
+    # tag is the real integrity gate — this check just saves wasted
+    # compute on pure-noise blocks.
+    if periodic_ratio < 0.15:
         return {
             "status": "no_signal",
             "peak_mag": peak_mag,
