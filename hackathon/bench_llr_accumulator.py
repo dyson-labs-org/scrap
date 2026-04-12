@@ -23,7 +23,7 @@ accumulator's behavior. The test isolates the accumulator by:
   4. Extract peak_values at deterministic symbol boundaries (we know
      the TX started at sample 0) — NO tracker, NO lock floor
   5. Run the real coherent decode pipeline
-     (sisl_framer.coherent_decode_from_pilot) to produce LLRs
+     (coherent decode pipeline) to produce LLRs
   6. Feed into LlrAccumulator.try_add / try_decrypt after each copy
 
 No mocks; uses the exact primitives the RX path uses, just without
@@ -45,6 +45,7 @@ import time
 import numpy as np
 
 import sisl_crypto as sc
+import sisl_rx
 import demo as dd
 import sisl_fec
 import sisl_framer as sf
@@ -159,7 +160,7 @@ def _coherent_decode_fec_bench(peaks: np.ndarray) -> "tuple | None":
     """Coherent BPSK decode of HAIL_FEC_TOTAL_BITS peaks for the FEC
     bench, with the per-symbol phase-drift parameter forced to zero.
 
-    The standard coherent_decode_from_pilot fits both θ₀ and Δθ from a
+    The standard coherent decode fits both θ₀ and Δθ from a
     48-bit pilot. At an output codeword length of 1064 bits this is
     fine, but at 2096 bits the Cramer-Rao slope uncertainty
     σ_Δθ ≈ sqrt(12 / (N(N²-1)·SNR)) accumulated over the longer
@@ -179,7 +180,7 @@ def _coherent_decode_fec_bench(peaks: np.ndarray) -> "tuple | None":
     if len(peaks) < n_bits:
         return None
     # Fit only θ₀; ignore the function's Δθ output.
-    fit = sf.fit_phase_from_known_bits(peaks, 0, dd._PILOT_BITS)
+    fit = sf.fit_phase_from_known_bits(peaks, 0, sisl_rx._PILOT_BITS)
     if fit is None:
         return None
     theta0, _delta, rms_residual = fit
@@ -215,7 +216,7 @@ def _decode_one_copy_fec(
         return {"status": "no_fit"}
     c_frame, c_soft, _c_theta0, _c_delta, c_rms = coherent
     c_bits_first32 = np.unpackbits(np.frombuffer(c_frame[:4], dtype=np.uint8))
-    c_asm_errs = int(np.sum(c_bits_first32 != dd._ASM_BITS))
+    c_asm_errs = int(np.sum(c_bits_first32 != sisl_rx._ASM_BITS))
 
     # Single-copy FEC decode probe (does THIS copy alone decrypt?).
     solo_decrypt = False
@@ -245,7 +246,7 @@ def _run_one_trial_fec(
     max_n: int,
     rng: np.random.Generator,
 ) -> dict:
-    accumulator = dd.LlrAccumulator(
+    accumulator = sisl_rx.LlrAccumulator(
         n_bits=sc.HAIL_FEC_TOTAL_BITS,
         max_copies=max_n * 2 + 1,
     )
@@ -379,7 +380,7 @@ def _check_clean_path_production_admission(
     """
     rng = np.random.default_rng(seed)
     responder_static = dd.demo_responder_key()
-    accumulator = dd.LlrAccumulator(
+    accumulator = sisl_rx.LlrAccumulator(
         n_bits=sc.HAIL_FEC_TOTAL_BITS, max_copies=n_copies * 2 + 1,
     )
     admitted = 0
@@ -391,7 +392,7 @@ def _check_clean_path_production_admission(
         prefix = int(rng.integers(20_000, 80_000))
         suffix = int(rng.integers(20_000, 80_000))
         block, _frame = _make_clean_block(prefix, suffix, rng)
-        result = dd._decode_one_hail_in_block(block, responder_static)
+        result = sisl_rx._decode_one_hail_in_block(block, responder_static)
         if result.get("status") != "decrypt_ok":
             return {
                 "ok": False,

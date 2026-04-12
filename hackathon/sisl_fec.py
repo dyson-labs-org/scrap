@@ -27,7 +27,7 @@ produce 2·TAIL_BITS = 16 coded output bits. The total coded length is
                             = 2*n_payload + 16
 
 **LLR sign convention** (critical — must match
-sisl_framer.coherent_decode_from_pilot's c_soft return):
+the coherent decode pipeline's c_soft return):
 
     Positive LLR ⇒ bit = 0 (BPSK +1 symbol favored)
     Negative LLR ⇒ bit = 1 (BPSK −1 symbol favored)

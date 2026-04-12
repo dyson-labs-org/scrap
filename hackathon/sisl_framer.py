@@ -33,7 +33,7 @@ CHIPS_PER_SYMBOL = 1023
 
 
 def code_from_seed(seed: bytes, length: int = CHIPS_PER_SYMBOL) -> np.ndarray:
-    return np.array(sd.generate_dsss_code(seed, length=length), dtype=np.int8)
+    return sd.generate_dsss_code(seed, length=length)
 
 
 DEFAULT_PUBLIC_CODE: np.ndarray = code_from_seed(sd.hail_code_seed())
@@ -687,49 +687,6 @@ def refine_freq_from_pilot(
     return f_residual_hz, theta0, rms_residual
 
 
-def coherent_decode_from_pilot(
-    peak_values,
-    pilot_bit_offset: int,
-    pilot_bits: np.ndarray,
-    n_data_bits: int,
-) -> tuple[bytes, np.ndarray, float, float, float | None]:
-    """Coherent BPSK decode using pilot-fitted θ₀ + k·Δθ phase model.
-
-    Derotates each peak by the expected phase; sign of real part is the
-    hard decision, magnitude is the soft LLR. Returns
-    (frame_bytes, soft_bits, theta0, delta_theta, rms_residual) or None.
-    """
-    fit = fit_phase_from_known_bits(
-        peak_values, pilot_bit_offset, pilot_bits,
-    )
-    if fit is None:
-        return None
-    theta0, delta_theta, rms_residual = fit
-
-    total = len(peak_values)
-    if n_data_bits < 8 or n_data_bits > total:
-        n_data_bits = min(n_data_bits, total)
-    if n_data_bits < 8:
-        return None
-
-    peaks_arr = np.array(peak_values[:n_data_bits], dtype=np.complex128)
-    k_arr = np.arange(n_data_bits, dtype=np.float64)
-    # Derotate each peak by -(θ₀ + k·Δθ)
-    rot = np.exp(-1j * (theta0 + k_arr * delta_theta))
-    derotated = peaks_arr * rot
-    # Real part carries the bit info (positive → 0, negative → 1)
-    soft = derotated.real.astype(np.float32)
-    bits = (soft < 0).astype(np.uint8)
-
-    # Pad to byte boundary if needed
-    pad = (-n_data_bits) % 8
-    if pad:
-        bits = np.concatenate([bits, np.zeros(pad, dtype=np.uint8)])
-    frame_bytes = np.packbits(bits).tobytes()
-
-    return frame_bytes, soft, theta0, delta_theta, rms_residual
-
-
 def estimate_drift_per_symbol(
     peak_values,
     pilot_bits: np.ndarray | None = None,
@@ -829,7 +786,7 @@ def dbpsk_decode_from_pilot(
     coherent_sum = complex(np.sum(aligned))
     theta0 = float(np.angle(coherent_sum))
 
-    # rms residual is the same metric coherent_decode_from_pilot reports
+    # rms residual is Gaussian phase-jitter equivalent
     # (Gaussian phase-jitter equivalent).
     coherent_mag = abs(coherent_sum)
     incoherent_mag = float(np.sum(np.abs(aligned)))

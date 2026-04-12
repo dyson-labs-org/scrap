@@ -536,49 +536,6 @@ def test_fit_phase_from_known_bits_with_offset():
     assert abs(delta - delta_true) < 5e-4
 
 
-def test_coherent_decode_from_pilot_clean():
-    rng = np.random.default_rng(seed=13)
-    n_bits = 133 * 8
-    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
-    # Force first 32 bits to a known ASM-like pattern
-    asm_bits = rng.integers(0, 2, size=32).astype(np.uint8)
-    bits[:32] = asm_bits
-    peaks = _synth_peaks(bits, theta0=0.3, delta=0.01)
-    result = sf.coherent_decode_from_pilot(peaks, 0, asm_bits, n_bits)
-    assert result is not None
-    frame_bytes, soft, theta0, delta, rms = result
-    # Reconstruct bits and compare
-    decoded_bits = sf.bytes_to_bits(frame_bytes)[:n_bits]
-    assert np.array_equal(decoded_bits, bits)
-    assert rms < 1e-2
-
-
-def test_coherent_decode_from_pilot_noisy():
-    """Coherent decode works at moderate SNR with small residual drift.
-
-    Note: at ~10 dB SNR with only 32 pilot bits, the slope estimate has
-    high variance, and a delta error ~0.003 rad/symbol accumulates over
-    1000+ bits to flip nearly half the later bits. In practice the chip
-    tracker supplies a good drift estimate, so the coherent decoder only
-    needs to refine a small residual; for this unit test we use low
-    residual drift + modest noise to exercise the clean coherent path.
-    """
-    rng = np.random.default_rng(seed=14)
-    n_bits = 133 * 8
-    bits = rng.integers(0, 2, size=n_bits).astype(np.uint8)
-    asm_bits = rng.integers(0, 2, size=32).astype(np.uint8)
-    bits[:32] = asm_bits
-    peaks = _synth_peaks(bits, theta0=-0.5, delta=0.0,
-                          noise_std=0.08, seed=15)
-    result = sf.coherent_decode_from_pilot(peaks, 0, asm_bits, n_bits)
-    assert result is not None
-    frame_bytes, _, _, _, rms = result
-    decoded_bits = sf.bytes_to_bits(frame_bytes)[:n_bits]
-    ber = float(np.mean(decoded_bits != bits))
-    assert ber < 0.02, f"BER too high: {ber}"
-    assert rms < 0.3
-
-
 def test_fit_phase_from_known_bits_large_slope_no_pi_ambiguity():
     """The old unwrap+polyfit estimator fails at slope ≈ π/symbol
     (the π ambiguity boundary). The new ML estimator must work here.
