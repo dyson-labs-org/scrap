@@ -99,16 +99,10 @@ def test_elligator_stub_rejects_wrong_length():
 
 # ── 4. Hail round-trip ─────────────────────────────────────────────────────
 
-def _test_body(caller_static_pub: bytes | None = None) -> sc.HailBody:
-    if caller_static_pub is not None:
-        return make_test_hail_body(caller_static_pub=caller_static_pub)
-    return make_test_hail_body()
-
-
 def test_hail_roundtrip():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
-    body = _test_body()
+    body = make_test_hail_body()
 
     frame = sc.encode_hail(caller_eph, responder_static.public_key(), body)
     assert len(frame) == sc.HAIL_FRAME_LEN
@@ -127,7 +121,7 @@ def test_hail_wrong_receiver_rejected():
     caller_eph = sc.Ephemeral()
 
     frame = sc.encode_hail(
-        caller_eph, target_static.public_key(), _test_body()
+        caller_eph, target_static.public_key(), make_test_hail_body()
     )
     # correct receiver
     assert sc.decode_hail(frame, target_static) is not None
@@ -139,7 +133,7 @@ def test_hail_corrupted_frame_rejected():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     frame = sc.encode_hail(
-        caller_eph, responder_static.public_key(), _test_body()
+        caller_eph, responder_static.public_key(), make_test_hail_body()
     )
     # flip one bit in the ciphertext (body starts at offset 70)
     corrupted = frame[:72] + bytes([frame[72] ^ 0x01]) + frame[73:]
@@ -150,7 +144,7 @@ def test_hail_wrong_asm_rejected():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     frame = sc.encode_hail(
-        caller_eph, responder_static.public_key(), _test_body()
+        caller_eph, responder_static.public_key(), make_test_hail_body()
     )
     bad = b"\x00\x00\x00\x00" + frame[4:]
     assert sc.decode_hail(bad, responder_static) is None
@@ -174,7 +168,7 @@ def test_hail_fec_encode_returns_correct_shape_and_dtype():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(
-        caller_eph, responder_static.public_key(), _test_body()
+        caller_eph, responder_static.public_key(), make_test_hail_body()
     )
     assert isinstance(bits, np.ndarray)
     assert bits.dtype == np.uint8
@@ -192,7 +186,7 @@ def test_hail_fec_round_trip_noiseless():
     """Encode → bits → ±10 LLRs → decode_from_llrs → DecodedHail."""
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
-    body = _test_body()
+    body = make_test_hail_body()
     bits = sc.encode_hail_fec(
         caller_eph, responder_static.public_key(), body
     )
@@ -226,7 +220,7 @@ def test_hail_fec_round_trip_with_awgn():
     bench_fec.py."""
     import numpy as np
     responder_static = sc.generate_keypair()
-    body = _test_body()
+    body = make_test_hail_body()
     successes = 0
     n_trials = 5
     for seed in range(n_trials):
@@ -251,7 +245,7 @@ def test_hail_fec_wrong_receiver_rejected():
     other_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(
-        caller_eph, target_static.public_key(), _test_body()
+        caller_eph, target_static.public_key(), make_test_hail_body()
     )
     post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
     llrs = bits_to_hard_llrs(post_dbpsk_bits)
@@ -264,7 +258,7 @@ def test_hail_fec_truncated_input_rejected():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(
-        caller_eph, responder_static.public_key(), _test_body()
+        caller_eph, responder_static.public_key(), make_test_hail_body()
     )
     post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
     truncated = bits_to_hard_llrs(post_dbpsk_bits)[: sc.HAIL_FEC_TOTAL_BITS // 2]
@@ -280,7 +274,7 @@ def test_hail_fec_corrupted_header_still_decrypts_via_fec():
     responder_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(
-        caller_eph, responder_static.public_key(), _test_body()
+        caller_eph, responder_static.public_key(), make_test_hail_body()
     )
     post_dbpsk_bits = encoded_fec_bits_to_post_dbpsk(bits)
     llrs = bits_to_hard_llrs(post_dbpsk_bits)
@@ -298,7 +292,7 @@ def test_ack_roundtrip():
     caller_eph = sc.Ephemeral()
     caller_eph_priv_ref = caller_eph._priv   # peek for test purposes
 
-    body = _test_body(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
     )
     hail_frame = sc.encode_hail(
@@ -341,7 +335,7 @@ def test_ack_wrong_caller_static_priv_rejected():
     caller_eph = sc.Ephemeral()
     caller_eph_priv_ref = caller_eph._priv
 
-    body = _test_body(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
     )
     hail_frame = sc.encode_hail(
@@ -372,7 +366,7 @@ def test_ack_wrong_nonce_echo_rejected():
     caller_static = sc.generate_keypair()
     caller_eph = sc.Ephemeral()
     caller_eph_priv_ref = caller_eph._priv
-    body = _test_body(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
     )
     hail_frame = sc.encode_hail(
@@ -407,7 +401,7 @@ def test_hail_ack_session_key_derivation():
     caller_eph = sc.Ephemeral()
     caller_eph_priv = caller_eph._priv
 
-    body = _test_body(
+    body = make_test_hail_body(
         caller_static_pub=sc.pubkey_to_compressed(caller_static.public_key())
     )
     hail_frame = sc.encode_hail(
@@ -490,9 +484,9 @@ def test_encode_hail_consumes_ephemeral():
     """A second encode_hail with the same Ephemeral must fail."""
     responder_static = sc.generate_keypair()
     e = sc.Ephemeral()
-    sc.encode_hail(e, responder_static.public_key(), _test_body())
+    sc.encode_hail(e, responder_static.public_key(), make_test_hail_body())
     try:
-        sc.encode_hail(e, responder_static.public_key(), _test_body())
+        sc.encode_hail(e, responder_static.public_key(), make_test_hail_body())
     except RuntimeError:
         return
     raise AssertionError("expected RuntimeError on ephemeral reuse")

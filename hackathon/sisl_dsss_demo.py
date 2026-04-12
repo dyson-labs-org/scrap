@@ -1333,49 +1333,75 @@ def live_rx_decode(
         current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
         vga_min, vga_max = 0.0, 49.0
 
-    try:
-        while time.time() - t_start < duration_s:
+    def _set_rx_vga(gain: float) -> None:
+        if device_name == "hackrf":
+            device.setGain(SOAPY_SDR_RX, 0, "VGA", gain)
+        else:
+            device.setGain(SOAPY_SDR_RX, 0, gain)
+
+    # ── Background USB reader thread ──
+    # Continuously drain the SDR's USB buffer into a queue of numpy
+    # blocks so DSP processing on the main thread never causes USB
+    # overflows. Suppresses SoapySDR's bare "O" overflow print by
+    # redirecting C-level stdout to /dev/null in the reader thread.
+    import threading
+    import queue as _queue
+
+    _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    _saved_stdout_fd = os.dup(1)
+    block_queue: _queue.Queue[Optional[np.ndarray]] = _queue.Queue(maxsize=4)
+    reader_stop = threading.Event()
+    overflow_count_at_last_check = 0
+
+    def _reader_thread():
+        os.dup2(_devnull_fd, 1)  # suppress "O" in this thread
+        local_buf = np.empty(block_samples, dtype=np.complex64)
+        while not reader_stop.is_set():
             filled = 0
-            overflow = False
-            while filled < block_samples:
+            while filled < block_samples and not reader_stop.is_set():
                 sr = device.readStream(
-                    stream,
-                    [buf[filled:]],
-                    block_samples - filled,
-                    timeoutUs=1_000_000,
+                    stream, [local_buf[filled:]],
+                    block_samples - filled, timeoutUs=500_000,
                 )
                 if sr.ret > 0:
                     filled += sr.ret
-                elif sr.ret == -1:              # SOAPY_SDR_TIMEOUT
-                    break
-                elif sr.ret == -4:              # SOAPY_SDR_OVERFLOW
-                    overflow = True
-                    break
-                else:
-                    print(f"  readStream error {sr.ret}")
-                    break
-
-            if filled < block_samples // 2:
-                if overflow:
+                elif sr.ret == -1:
+                    continue
+                elif sr.ret == -4:
                     stats["overflows"] += 1
-                    # Immediate gain reduction on ADC overflow — the most
-                    # destructive condition for phase quality.
-                    if current_vga > vga_min + 6:
-                        current_vga -= 6.0
-                        if device_name == "hackrf":
-                            device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
-                        else:
-                            device.setGain(SOAPY_SDR_RX, 0, current_vga)
-                        print(f"  AGC: overflow → gain {current_vga:.0f} dB")
+                    continue
+                else:
+                    break
+            if filled >= block_samples // 2 and not reader_stop.is_set():
+                try:
+                    block_queue.put(local_buf[:filled].copy(), timeout=2.0)
+                except _queue.Full:
+                    pass
+                local_buf = np.empty(block_samples, dtype=np.complex64)
+        block_queue.put(None)
+
+    reader = threading.Thread(target=_reader_thread, daemon=True)
+    reader.start()
+
+    try:
+        while time.time() - t_start < duration_s:
+            try:
+                block_data = block_queue.get(timeout=2.0)
+            except _queue.Empty:
+                continue
+            if block_data is None:
+                break
+            filled = len(block_data)
+            if filled < block_samples // 2:
                 continue
 
             stats["blocks_processed"] += 1
 
             if save_file is not None:
-                buf[:filled].tofile(save_file)
+                block_data.tofile(save_file)
 
             result = _decode_one_hail_in_block(
-                buf[:filled], responder_static,
+                block_data, responder_static,
                 samps_per_chip=samps_per_chip,
                 samp_hz=samp_hz,
                 signal_threshold=signal_threshold,
@@ -1433,10 +1459,7 @@ def live_rx_decode(
                     new_vga = max(vga_min, min(vga_max, current_vga + step_db))
                     if abs(new_vga - current_vga) >= 1.0:
                         current_vga = round(new_vga)
-                        if device_name == "hackrf":
-                            device.setGain(SOAPY_SDR_RX, 0, "VGA", current_vga)
-                        else:
-                            device.setGain(SOAPY_SDR_RX, 0, current_vga)
+                        _set_rx_vga(current_vga)
                         print(f"  AGC: peak={pk:.0f}, "
                               f"gain → {current_vga:.0f} dB")
 
@@ -1473,10 +1496,15 @@ def live_rx_decode(
     except KeyboardInterrupt:
         print("  interrupted")
     finally:
+        reader_stop.set()
+        reader.join(timeout=3.0)
         device.deactivateStream(stream)
         device.closeStream(stream)
         if save_file is not None:
             save_file.close()
+        os.dup2(_saved_stdout_fd, 1)
+        os.close(_saved_stdout_fd)
+        os.close(_devnull_fd)
 
     stats["elapsed_s"] = time.time() - t_start
     return stats

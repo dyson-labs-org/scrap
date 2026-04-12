@@ -372,9 +372,8 @@ def test_find_sisl_frame_soft_topk_empty_on_short():
 def _build_fec_result(responder_static, magnitude: float = 10.0,
                       noise_std: float = 0.0, seed: int = 0) -> dict:
     """Synthesize a result dict containing FEC channel LLRs for one
-    demo hail. Returns a dict with the keys LlrAccumulator
-    expects: llrs (length HAIL_FEC_TOTAL_BITS), c_frame, phase_rms,
-    asm_errs."""
+    demo hail. Returns a dict with the keys LlrAccumulator expects:
+    fec_llrs, phase_rms_residual_rad, asm_errs_in_coherent."""
     body = make_test_hail_body()
     eph = sc.Ephemeral()
     bits = sc.encode_hail_fec(eph, responder_static.public_key(), body)
