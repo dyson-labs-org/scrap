@@ -1511,11 +1511,8 @@ def _decode_one_hail_in_block(
         polarity_label = "fec"
 
         for cand_offset, cand_score, _cand_frame, cand_pts in topk:
-            # Need HAIL_FEC_TOTAL_BITS peaks starting at this offset.
             if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
                 continue
-            # Two-stage gate matching the non-FEC path:
-            #   absolute soft-score threshold + peak-to-sidelobe ratio.
             if abs(cand_score) <= 10.0 or cand_pts < 3.0:
                 continue
 
@@ -1524,13 +1521,8 @@ def _decode_one_hail_in_block(
             if fec_llrs_arr is None:
                 continue
 
-            # Try the FEC decrypt at this offset.
             attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
             if attempt is None:
-                # Try inverted polarity in case of BPSK 180° flip
-                # (DBPSK is locally invariant but the pilot fit can
-                # land on +π or -π depending on which side the noise
-                # pushes the angle estimator).
                 attempt = sc.decode_hail_fec_from_llrs(
                     -fec_llrs_arr, responder_static,
                 )
@@ -1548,10 +1540,13 @@ def _decode_one_hail_in_block(
                     "llr_diag": llr_diag,
                     "fec_llrs": fec_llrs_arr,
                 }
-                break  # success — stop searching
+                break
 
-            # Remember the highest-score failed attempt for diagnostics
-            if best_attempt is None:
+            # Track the highest-|score| failed attempt for diagnostics.
+            # Don't break — try the next candidate. The real ASM may
+            # be at a lower-scoring position while a false-positive
+            # body match took the top score.
+            if best_attempt is None or abs(cand_score) > abs(best_score):
                 best_attempt = {
                     "llr_diag": llr_diag,
                     "fec_llrs": fec_llrs_arr,
