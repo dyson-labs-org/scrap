@@ -1325,7 +1325,7 @@ def main() -> int:
         # 4s gives ~2.5 complete ACK frames for reliable decode.
         # gcd(9, T_respond) = 1 for most T_respond values.
         TX_DURATION = 5.0
-        RX_DURATION = 8.0  # must exceed min_block_sec (~5.4s for hail)
+        RX_DURATION = 8.0
         MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
 
         # Auto-PPM for ACK RX: learn Δf from track_lost/decrypt_fail
@@ -1338,6 +1338,18 @@ def main() -> int:
         print(f"  duty cycle:    TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
               f"(period {TX_DURATION+RX_DURATION:.0f}s)")
         print(f"  max rounds:    {MAX_ROUNDS}")
+
+        # ACK decode closure — defined once, captures immutable state
+        def _ack_decode_fn(block_data):
+            return sisl_rx.decode_one_ack_in_block(
+                block_data,
+                caller_static_priv=caller_static,
+                caller_eph_priv=caller_eph_priv,
+                dh1=dh1,
+                expected_nonce_echo=body.body_nonce,
+                samps_per_chip=active_samps_per_chip,
+                samp_hz=chip_rate_hz * 2,
+            )
 
         for round_num in range(1, MAX_ROUNDS + 1):
             # TX phase
@@ -1359,19 +1371,8 @@ def main() -> int:
 
             # RX phase — use live_rx_decode with ACK decode function.
             # Gets full AGC, PPM, background reader infrastructure.
-            def _ack_decode_fn(block_data):
-                return sisl_rx.decode_one_ack_in_block(
-                    block_data,
-                    caller_static_priv=caller_static,
-                    caller_eph_priv=caller_eph_priv,
-                    dh1=dh1,
-                    expected_nonce_echo=body.body_nonce,
-                    samps_per_chip=active_samps_per_chip,
-                    samp_hz=chip_rate_hz * 2,
-                )
-
             ack_stats = live_rx_decode(
-                duration_s=RX_DURATION + 10,  # extra margin for block fill
+                duration_s=RX_DURATION,
                 block_seconds=3.0,  # short blocks for ACK (1.52s frame)
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
