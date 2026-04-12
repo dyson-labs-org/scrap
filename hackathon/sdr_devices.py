@@ -40,8 +40,17 @@ DEVICE_PPM: dict[str, float] = {
 
 
 def get_device_ppm(serial: str) -> float:
-    """Look up the calibrated PPM for a device by serial number."""
-    return DEVICE_PPM.get(serial, 0.0)
+    """Look up the calibrated PPM for a device by serial number.
+
+    Strips leading zeros from the serial so both the full 32-char
+    SoapySDR format (0000000000000000930c64dc29144ac3) and the short
+    16-char format (930c64dc29144ac3) match the same entry.
+    """
+    serial = serial.lstrip("0") or "0"
+    for key, ppm in DEVICE_PPM.items():
+        if key.lstrip("0") == serial:
+            return ppm
+    return 0.0
 
 
 DEVICES: dict[str, DeviceInfo] = {
