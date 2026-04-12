@@ -376,6 +376,157 @@ def tx_to_file(message: bytes, path: str,
 
 
 
+import platform
+import queue as _queue
+import threading
+
+
+def _usb_reader_thread(
+    device,
+    stream,
+    block_samples: int,
+    block_queue: _queue.Queue,
+    stop_event: threading.Event,
+    stats: dict,
+) -> None:
+    """Background thread: drain SDR USB buffer into a queue of numpy blocks.
+
+    Continuously reads samples from the SDR and enqueues full blocks for
+    processing. If the main thread falls behind, the oldest queued block
+    is dropped rather than blocking the reader (a blocked reader causes
+    USB overflows and corrupted samples).
+    """
+    _is_windows = platform.system() == "Windows"
+    read_chunk = 32768 if _is_windows else 0
+
+    local_buf = np.empty(block_samples, dtype=np.complex64)
+    while not stop_event.is_set():
+        filled = 0
+        while filled < block_samples and not stop_event.is_set():
+            remain = block_samples - filled
+            want = min(read_chunk, remain) if read_chunk else remain
+            sr = device.readStream(
+                stream, [local_buf[filled:filled + want]],
+                want, timeoutUs=500_000,
+            )
+            if sr.ret > 0:
+                filled += sr.ret
+            elif sr.ret == -1:
+                continue
+            elif sr.ret == -4:
+                stats["overflows"] += 1
+                continue
+            else:
+                break
+        if filled >= block_samples // 2 and not stop_event.is_set():
+            blk = local_buf[:filled].copy()
+            while True:
+                try:
+                    block_queue.put_nowait(blk)
+                    break
+                except _queue.Full:
+                    try:
+                        block_queue.get_nowait()
+                        stats["dropped_blocks"] = \
+                            stats.get("dropped_blocks", 0) + 1
+                    except _queue.Empty:
+                        break
+            local_buf = np.empty(block_samples, dtype=np.complex64)
+    block_queue.put(None)
+
+
+class _AgcPpmState:
+    """Encapsulates AGC and PPM calibration state for live RX."""
+
+    RECAL_INTERVAL = 10.0
+    SETTLED_THRESHOLD_HZ = 500.0
+    AGC_TARGET = 200.0
+    AGC_MIN_PEAK = 50.0
+    AGC_MAX_PEAK = 400.0
+
+    def __init__(self, device_name: str, device, center_hz: float,
+                 vga_db: float, lna_db: float, amp_on: bool):
+        self._device_name = device_name
+        self._device = device
+        self._center_hz = float(center_hz)
+        self._nominal_center_hz = float(center_hz)
+        self._total_correction_hz = 0.0
+        self._settled = False
+        self._last_recal_t = time.time()
+        self._offset_history: list[float] = []
+
+        if device_name == "hackrf":
+            self._current_vga = float(vga_db)
+            self._vga_min, self._vga_max = 0.0, 62.0
+        else:
+            self._current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
+            self._vga_min, self._vga_max = 0.0, 49.0
+
+    def _set_rx_vga(self, gain: float) -> None:
+        from SoapySDR import SOAPY_SDR_RX
+        if self._device_name == "hackrf":
+            self._device.setGain(SOAPY_SDR_RX, 0, "VGA", gain)
+        else:
+            self._device.setGain(SOAPY_SDR_RX, 0, gain)
+
+    def on_block(self, result: dict, block_data: np.ndarray) -> None:
+        """Run AGC and PPM updates after decoding one block."""
+        from SoapySDR import SOAPY_SDR_RX
+        self._update_ppm(result)
+        self._update_agc(result, block_data)
+
+    def _update_ppm(self, result: dict) -> None:
+        from SoapySDR import SOAPY_SDR_RX
+        foff = result.get("freq_offset_hz")
+        now = time.time()
+        if foff is not None and abs(foff) > 0:
+            self._offset_history.append(foff)
+            do_retune = False
+            if not self._settled:
+                do_retune = len(self._offset_history) >= 2
+            elif now - self._last_recal_t >= self.RECAL_INTERVAL:
+                do_retune = True
+            if do_retune and self._offset_history:
+                correction = float(np.median(self._offset_history[-4:]))
+                self._center_hz += correction
+                self._total_correction_hz += correction
+                self._device.setFrequency(
+                    SOAPY_SDR_RX, 0, self._center_hz)
+                total_ppm = (self._total_correction_hz
+                             / self._nominal_center_hz * 1e6)
+                print(f"  AUTO-PPM: retune {correction:+.0f} Hz "
+                      f"(total {self._total_correction_hz:+.0f} Hz / "
+                      f"{total_ppm:+.1f} ppm, "
+                      f"center {self._center_hz/1e6:.6f} MHz)")
+                self._offset_history.clear()
+                self._last_recal_t = now
+                if abs(correction) < self.SETTLED_THRESHOLD_HZ:
+                    self._settled = True
+
+    def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
+        sample_p99 = float(np.percentile(np.abs(block_data), 99))
+        if sample_p99 > 0.5 and self._current_vga > self._vga_min:
+            reduce_db = max(3.0, 20.0 * np.log10(sample_p99 / 0.3))
+            self._current_vga = max(
+                self._vga_min, self._current_vga - reduce_db)
+            self._set_rx_vga(self._current_vga)
+            print(f"  AGC: ADC near saturation (p99={sample_p99:.2f}), "
+                  f"gain → {self._current_vga:.0f} dB")
+        else:
+            pk = result.get("peak_mag")
+            if pk is not None and pk > 1:
+                if pk < self.AGC_MIN_PEAK or pk > self.AGC_MAX_PEAK:
+                    step_db = 10.0 * np.log10(self.AGC_TARGET / pk)
+                    step_db = max(-6.0, min(6.0, step_db))
+                    new_vga = max(self._vga_min, min(
+                        self._vga_max, self._current_vga + step_db))
+                    if abs(new_vga - self._current_vga) >= 1.0:
+                        self._current_vga = round(new_vga)
+                        self._set_rx_vga(self._current_vga)
+                        print(f"  AGC: peak={pk:.0f}, "
+                              f"gain → {self._current_vga:.0f} dB")
+
+
 def live_rx_decode(
     duration_s: float = 10.0,
     block_seconds: float = 1.5,
@@ -456,15 +607,12 @@ def live_rx_decode(
     device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
 
     if device_name == "hackrf":
-        # Three independent gain stages. AMP is a two-state float (0 or 14).
         device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
         device.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
         device.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
         print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
               f"LNA={lna_db} dB VGA={vga_db} dB")
     elif device_name == "rtlsdr":
-        # Single tuner gain. Combine LNA+VGA so the operator has one
-        # knob that behaves intuitively: "bigger number = more gain".
         combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
         device.setGain(SOAPY_SDR_RX, 0, combined_db)
         print(f"  RX gain: TUNER={combined_db:.1f} dB "
@@ -475,86 +623,10 @@ def live_rx_decode(
     else:
         raise ValueError(f"unhandled device {device_name}")
 
-    # Request larger USB buffers to absorb processing jitter. The
-    # SoapySDR "bufflen" and "buffers" args map to the libusb transfer
-    # size and queue depth. Larger values give the reader thread more
-    # slack before the kernel drops samples.
     stream_args = {"bufflen": "262144", "buffers": "8"}
     stream = device.setupStream(
         SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], stream_args)
     device.activateStream(stream)
-
-    save_file = open(save_path, "wb") if save_path else None
-    block_samples = int(block_seconds * samp_hz)
-
-    stats = {
-        "ok": True,
-        "blocks_processed": 0,
-        "hails_detected": 0,     # frame header parsed (decrypt ok OR fail)
-        "hails_decrypted": 0,    # decrypt_ok only
-        "overflows": 0,
-        "combined_copies": 0,    # copies fed into LLR accumulator
-        "combined_decrypts": 0,  # decrypts from the accumulator
-    }
-    t_start = time.time()
-
-    # D4: LLR accumulator for multi-copy chase combining. Only active
-    # when combine_copies > 0; otherwise does nothing.
-    accumulator = None
-    if combine_copies > 0:
-        accumulator = sisl_rx.LlrAccumulator(
-            n_bits=sc.HAIL_FEC_TOTAL_BITS,
-            max_copies=combine_copies,
-        )
-
-    # ── Auto-PPM calibration state ──
-    # At 2.4 GHz, even 3 ppm of crystal drift = 7.2 kHz — enough to
-    # degrade the MF over a 30-second interval. Retune every 10 seconds
-    # even after settling, and use a tighter settling threshold.
-    RECAL_INTERVAL = 10.0
-    SETTLED_THRESHOLD_HZ = 500.0
-    current_center_hz = float(center_hz)
-    total_correction_hz = 0.0
-    settled = False
-    last_recal_t = t_start
-    offset_history: list[float] = []
-
-    # ── Auto-gain (AGC) state ──
-    # Target: peak matched-filter magnitude near AGC_TARGET. Uses
-    # proportional steps (converges in 2-3 blocks instead of 15+).
-    # Overflow events trigger an immediate 6 dB drop.
-    AGC_TARGET = 200.0
-    AGC_MIN_PEAK = 50.0
-    AGC_MAX_PEAK = 400.0
-    if device_name == "hackrf":
-        current_vga = float(vga_db)
-        vga_min, vga_max = 0.0, 62.0
-    else:
-        current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
-        vga_min, vga_max = 0.0, 49.0
-
-    def _set_rx_vga(gain: float) -> None:
-        if device_name == "hackrf":
-            device.setGain(SOAPY_SDR_RX, 0, "VGA", gain)
-        else:
-            device.setGain(SOAPY_SDR_RX, 0, gain)
-
-    # ── Background USB reader thread ──
-    # Continuously drain the SDR's USB buffer into a queue of numpy
-    # blocks so DSP processing on the main thread never causes USB
-    # overflows.
-    #
-    # Key design choices:
-    #   • readStream chunk size: Linux's USB stack has large kernel
-    #     buffers, so big reads are fine. Windows needs smaller reads
-    #     (32 K) to keep the USB pipeline fed across scheduler quanta.
-    #   • Queue overflow policy: if the main thread falls behind, DROP
-    #     the oldest queued block rather than blocking the reader. A
-    #     blocked reader → USB overflow → corrupted samples, which is
-    #     worse than losing one processing block.
-    import threading
-    import queue as _queue
-    import platform
 
     _is_windows = platform.system() == "Windows"
     _win_timer_set = False
@@ -566,54 +638,39 @@ def live_rx_decode(
         except Exception:
             pass
 
+    save_file = open(save_path, "wb") if save_path else None
+    block_samples = int(block_seconds * samp_hz)
+
+    stats: dict = {
+        "ok": True,
+        "blocks_processed": 0,
+        "hails_detected": 0,
+        "hails_decrypted": 0,
+        "overflows": 0,
+        "combined_copies": 0,
+        "combined_decrypts": 0,
+    }
+    t_start = time.time()
+
+    accumulator = None
+    if combine_copies > 0:
+        accumulator = sisl_rx.LlrAccumulator(
+            n_bits=sc.HAIL_FEC_TOTAL_BITS,
+            max_copies=combine_copies,
+        )
+
+    agc_ppm = _AgcPpmState(device_name, device, center_hz,
+                           vga_db, lna_db, amp_on)
+
     block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
     reader_stop = threading.Event()
     overflow_count_at_last_check = 0
-    # Linux kernel USB buffers are large — read the full remainder in
-    # one call to minimize Python GIL round-trips. Windows needs small
-    # reads to avoid inter-transfer gaps in the WinUSB/libusb backend.
-    READ_CHUNK = 32768 if _is_windows else 0  # 0 = no cap (read all)
 
-    def _reader_thread():
-        local_buf = np.empty(block_samples, dtype=np.complex64)
-        while not reader_stop.is_set():
-            filled = 0
-            while filled < block_samples and not reader_stop.is_set():
-                remain = block_samples - filled
-                want = min(READ_CHUNK, remain) if READ_CHUNK else remain
-                sr = device.readStream(
-                    stream, [local_buf[filled:filled + want]],
-                    want, timeoutUs=500_000,
-                )
-                if sr.ret > 0:
-                    filled += sr.ret
-                elif sr.ret == -1:
-                    continue
-                elif sr.ret == -4:
-                    stats["overflows"] += 1
-                    continue
-                else:
-                    break
-            if filled >= block_samples // 2 and not reader_stop.is_set():
-                blk = local_buf[:filled].copy()
-                # Non-blocking put: if the queue is full, drop the oldest
-                # block to keep the reader draining USB. A stalled reader
-                # is worse than a missed processing block.
-                while True:
-                    try:
-                        block_queue.put_nowait(blk)
-                        break
-                    except _queue.Full:
-                        try:
-                            block_queue.get_nowait()  # drop oldest
-                            stats["dropped_blocks"] = \
-                                stats.get("dropped_blocks", 0) + 1
-                        except _queue.Empty:
-                            break
-                local_buf = np.empty(block_samples, dtype=np.complex64)
-        block_queue.put(None)
-
-    reader = threading.Thread(target=_reader_thread, daemon=True)
+    reader = threading.Thread(
+        target=_usb_reader_thread,
+        args=(device, stream, block_samples, block_queue, reader_stop, stats),
+        daemon=True,
+    )
     reader.start()
 
     try:
@@ -630,7 +687,6 @@ def live_rx_decode(
 
             stats["blocks_processed"] += 1
 
-            # Report any overflows that occurred during this block
             current_overflows = stats["overflows"]
             if current_overflows > overflow_count_at_last_check:
                 n_new = current_overflows - overflow_count_at_last_check
@@ -657,77 +713,16 @@ def live_rx_decode(
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
 
-            # ── Auto-PPM: retune SDR to drive residual offset → 0 ──
-            foff = result.get("freq_offset_hz")
-            now = time.time()
-            if foff is not None and abs(foff) > 0:
-                offset_history.append(foff)
-                do_retune = False
-                if not settled:
-                    do_retune = len(offset_history) >= 2
-                elif now - last_recal_t >= RECAL_INTERVAL:
-                    do_retune = True
-                if do_retune and offset_history:
-                    correction = float(np.median(offset_history[-4:]))
-                    current_center_hz += correction
-                    total_correction_hz += correction
-                    device.setFrequency(SOAPY_SDR_RX, 0, current_center_hz)
-                    total_ppm = total_correction_hz / center_hz * 1e6
-                    print(f"  AUTO-PPM: retune {correction:+.0f} Hz "
-                          f"(total {total_correction_hz:+.0f} Hz / "
-                          f"{total_ppm:+.1f} ppm, "
-                          f"center {current_center_hz/1e6:.6f} MHz)")
-                    offset_history.clear()
-                    last_recal_t = now
-                    if abs(correction) < SETTLED_THRESHOLD_HZ:
-                        settled = True
+            agc_ppm.on_block(result, block_data)
 
-            # ── ADC saturation check: reduce gain if samples clip ──
-            sample_max = float(np.max(np.abs(block_data)))
-            sample_p99 = float(np.percentile(np.abs(block_data), 99))
-            # SoapySDR CF32 samples are normalized to [-1, 1]. Values
-            # above ~0.7 indicate the ADC is near saturation; intermod
-            # products from clipping destroy the spreading code's phase
-            # and corrupt R[1] frequency estimates, preventing PPM
-            # convergence. Must check p99 (not just max) because a few
-            # spikes are normal but sustained high amplitude is not.
-            if sample_p99 > 0.5 and current_vga > vga_min:
-                # Proportional reduction to target p99 ≈ 0.3
-                reduce_db = max(3.0, 20.0 * np.log10(sample_p99 / 0.3))
-                current_vga = max(vga_min, current_vga - reduce_db)
-                _set_rx_vga(current_vga)
-                print(f"  AGC: ADC near saturation (p99={sample_p99:.2f}), "
-                      f"gain → {current_vga:.0f} dB")
-            else:
-                # ── Auto-gain (AGC): proportional adjustment ──
-                pk = result.get("peak_mag")
-                if pk is not None and pk > 1:
-                    if pk < AGC_MIN_PEAK or pk > AGC_MAX_PEAK:
-                        step_db = 10.0 * np.log10(AGC_TARGET / pk)
-                        step_db = max(-6.0, min(6.0, step_db))
-                        new_vga = max(vga_min, min(vga_max,
-                                                    current_vga + step_db))
-                        if abs(new_vga - current_vga) >= 1.0:
-                            current_vga = round(new_vga)
-                            _set_rx_vga(current_vga)
-                            print(f"  AGC: peak={pk:.0f}, "
-                                  f"gain → {current_vga:.0f} dB")
-
-            # D4: LLR chase-combining. Feed ALL valid candidates' LLRs
-            # from this block into the accumulator (multi-frame extraction).
-            # The TX loops the same frame, so every candidate in the
-            # peak stream is a copy of the same data.
             if accumulator is not None:
-                # Primary candidate
                 added = accumulator.try_add(result)
                 if added:
                     stats["combined_copies"] += 1
-                # Extra candidates from the same block
                 for extra_llrs in result.get("extra_fec_llrs", []):
                     extra_result = {"fec_llrs": extra_llrs}
                     if accumulator.try_add(extra_result):
                         stats["combined_copies"] += 1
-                # Show progress and try decrypt
                 if accumulator.n_copies > 0:
                     acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
                     print(f"       +ACC n={accumulator.n_copies}  "
