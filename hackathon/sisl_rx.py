@@ -690,15 +690,24 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
     _GREEN = "\033[32m"
     _RESET = "\033[0m"
     if s == "decrypt_ok":
-        b = result["body"]
+        b = result.get("body")
+        pol = result.get("polarity", "?")
+        detail = ""
+        if b is not None and hasattr(b, "body_nonce"):
+            # HailBody
+            detail = (f"nonce={b.body_nonce.hex()}  "
+                      f"freq=+{b.center_freq_offset}MHz  "
+                      f"mode=0x{b.mode:02x}")
+        elif b is not None and hasattr(b, "nonce_echo"):
+            # AckBody
+            detail = (f"status={b.status}  "
+                      f"nonce_echo={b.nonce_echo.hex()}")
         print(f"{_GREEN}[{block_num:4d}] DECRYPTED  "
               f"asm@{result['asm_at_byte']}  "
               f"peak={pk:.3g}  {snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
-              f"pol={result.get('polarity', '?')}  "
-              f"nonce={b.body_nonce.hex()}  "
-              f"freq=+{b.center_freq_offset}MHz  "
-              f"mode=0x{b.mode:02x}{_RESET}")
+              f"pol={pol}  "
+              f"{detail}{_RESET}")
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
               f"asm@{result['asm_at_byte']}  "
