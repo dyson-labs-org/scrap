@@ -273,7 +273,8 @@ if _HAVE_GR:
                      tx_amp_on: bool = HACKRF_TX_AMP_ON,
                      center_hz: float = CENTER_FREQ_HZ,
                      hackrf_device: str = "hackrf=0",
-                     preamble_only: bool = False):
+                     preamble_only: bool = False,
+                     samps_per_chip: int = SAMPS_PER_CHIP):
             gr.top_block.__init__(self, "SISL DSSS Hidden Signal Demo")
 
             self.mode = mode
@@ -295,7 +296,7 @@ if _HAVE_GR:
                     chips, frame = build_demo_hail_fec_chips()
                     self.hail_frame = frame
                 # Repeat the hail indefinitely so the RX can lock at any time
-                samples = upsample_chips_to_samples(chips)
+                samples = upsample_chips_to_samples(chips, samps_per_chip)
                 self._src = blocks.vector_source_c(
                     samples.tolist(), repeat=True, vlen=1
                 )
@@ -403,6 +404,7 @@ def live_rx_decode(
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     combine_copies: int = 0,
+    samps_per_chip_override: int | None = None,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -449,7 +451,9 @@ def live_rx_decode(
         responder_static = demo_responder_key()
 
     samp_hz = info.samp_hz
-    samps_per_chip = info.samps_per_chip
+    samps_per_chip = (samps_per_chip_override
+                      if samps_per_chip_override is not None
+                      else info.samps_per_chip)
 
     print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
           f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
@@ -911,7 +915,41 @@ def main() -> int:
                              "at 2 Msps with a single tuner gain; "
                              "useful as a second observer on sub-GHz "
                              "bands. tx mode is always HackRF.")
+    parser.add_argument("--chip-rate", type=float, default=1.0,
+                        help="chip rate in Mcps (default 1.0). Higher rates "
+                             "shorten each symbol, reducing phase drift per "
+                             "symbol and allowing faster frame repetition. "
+                             "Must divide evenly into the device sample rate "
+                             "with quotient ≥ 2. E.g. at 8 Msps: 1.0 → 8 "
+                             "samp/chip, 2.0 → 4, 4.0 → 2. The occupied "
+                             "bandwidth equals the chip rate, so 2 Mcps "
+                             "occupies 2 MHz. TX and RX must use the same "
+                             "chip rate.")
     args = parser.parse_args()
+
+    # ── Resolve chip rate → samples per chip for the selected device ──
+    chip_rate_hz = int(args.chip_rate * 1e6)
+    device_info = DEVICES[args.device]
+    # TX always uses HackRF
+    tx_info = DEVICES["hackrf"]
+    if args.mode in ("tx", "tx-to-file"):
+        active_samp_hz = tx_info.samp_hz
+    else:
+        active_samp_hz = device_info.samp_hz
+    if active_samp_hz % chip_rate_hz != 0:
+        parser.error(
+            f"--chip-rate {args.chip_rate} Mcps ({chip_rate_hz} Hz) does not "
+            f"divide evenly into the device sample rate "
+            f"({active_samp_hz} Hz). Quotient would be "
+            f"{active_samp_hz / chip_rate_hz:.2f} — must be an integer ≥ 2."
+        )
+    active_samps_per_chip = active_samp_hz // chip_rate_hz
+    if active_samps_per_chip < 2:
+        parser.error(
+            f"--chip-rate {args.chip_rate} Mcps gives only "
+            f"{active_samps_per_chip} sample(s)/chip at "
+            f"{active_samp_hz/1e6:.0f} Msps — need ≥ 2."
+        )
 
     if args.mode == "tx-to-file":
         frame = build_demo_hail()
@@ -977,6 +1015,7 @@ def main() -> int:
             signal_threshold=args.signal_threshold,
             top_k_soft=args.top_k,
             combine_copies=args.combine,
+            samps_per_chip_override=active_samps_per_chip,
         )
         if not stats.get("ok", False):
             print(f"rx failed: {stats.get('error', 'unknown')}",
@@ -1012,6 +1051,7 @@ def main() -> int:
         tx_amp_on=args.tx_amp,
         center_hz=args.freq * 1e6,
         preamble_only=args.tx_preamble,
+        samps_per_chip=active_samps_per_chip,
     )
     frame = tb.hail_frame
     if args.tx_preamble:
@@ -1030,6 +1070,9 @@ def main() -> int:
         print(f"  asm:           {frame[0:4].hex()}")
         print(f"  version/type:  0x{frame[4]:02x} / 0x{frame[5]:02x}")
         print(f"  target key:    demo-responder (deterministic)")
+    print(f"  chip rate:     {chip_rate_hz/1e6:.1f} Mcps "
+          f"({active_samps_per_chip} samples/chip at "
+          f"{tx_info.samp_hz/1e6:.0f} Msps)")
     print(f"  TX gain:       VGA={args.tx_vga} dB "
           f"AMP={'on (+14 dB)' if args.tx_amp else 'off'}")
 
