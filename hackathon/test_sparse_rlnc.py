@@ -101,3 +101,72 @@ def test_fragment_padding():
             for f in frags:
                 assert len(f) == frag_size
             assert frag_size * K % 16 == 0
+
+
+def test_decoder_exact_K():
+    K = 16
+    payload = bytes(range(256))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    for comb_id in range(K * 3):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        if dec.add_symbol(comb_id, sym):
+            break
+    result = dec.decode()
+    assert result is not None
+    frags = sr.fragment_payload(payload, K)
+    expected = b''.join(frags)
+    assert result == expected
+
+
+def test_decoder_overhead():
+    K = 16
+    payload = bytes(range(256))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    for comb_id in range(K * 4):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        if dec.add_symbol(comb_id, sym):
+            break
+    assert dec.decode() is not None
+
+
+def test_decoder_insufficient():
+    K = 16
+    payload = bytes(range(256))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    for comb_id in range(K // 2):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        dec.add_symbol(comb_id, sym)
+    assert dec.decode() is None
+
+
+def test_decoder_roundtrip_various_payloads():
+    K = 16
+    for payload in (b'X', b'B' * 512, b'C' * 100):
+        enc = sr.RLNCEncoder(payload, K, PRK)
+        dec = sr.RLNCDecoder(K, PRK)
+        for comb_id in range(K * 3):
+            _, sym, _ = enc.encode_symbol(comb_id)
+            if dec.add_symbol(comb_id, sym):
+                break
+        result = dec.decode()
+        assert result is not None
+        frags = sr.fragment_payload(payload, K)
+        expected = b''.join(frags)
+        assert result == expected
+
+
+def test_decoder_add_symbol_returns_complete():
+    K = 16
+    payload = bytes(range(256))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    completed = False
+    for comb_id in range(K * 3):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        if dec.add_symbol(comb_id, sym):
+            completed = True
+            break
+    assert completed

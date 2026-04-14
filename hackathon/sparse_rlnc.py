@@ -93,3 +93,46 @@ class RLNCEncoder:
             for j in range(len(result)):
                 result[j] ^= f[j]
         return (comb_id, bytes(result), indices)
+
+
+class RLNCDecoder:
+    def __init__(self, K: int, session_prk: bytes):
+        self._K = K
+        self._prk = session_prk
+        self._symbols: list[tuple[list[int], bytearray]] = []
+        self._recovered: dict[int, bytes] = {}
+
+    def _peel(self) -> None:
+        changed = True
+        while changed and len(self._recovered) < self._K:
+            changed = False
+            for active_set, enc_bytes in self._symbols:
+                to_remove = [i for i in list(active_set) if i in self._recovered]
+                for i in to_remove:
+                    frag = self._recovered[i]
+                    for j in range(len(enc_bytes)):
+                        enc_bytes[j] ^= frag[j]
+                    active_set.remove(i)
+                if len(active_set) == 1:
+                    frag_idx = active_set[0]
+                    if frag_idx not in self._recovered:
+                        self._recovered[frag_idx] = bytes(enc_bytes)
+                        active_set.clear()
+                        changed = True
+
+    def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
+        indices = sample_coefficients(comb_id, self._K, self._prk)
+        self._symbols.append((indices, bytearray(encoded_bytes)))
+        self._peel()
+        return self.is_complete
+
+    def decode(self) -> bytes | None:
+        self._peel()
+        if len(self._recovered) < self._K:
+            return None
+        parts = [self._recovered[i] for i in range(self._K)]
+        return b''.join(parts)
+
+    @property
+    def is_complete(self) -> bool:
+        return len(self._recovered) == self._K
