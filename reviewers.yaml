@@ -122,6 +122,106 @@ personas:
   - name: "Claude (anti-pattern detector)"
     association: "Spec-code drift detection, backwards-compat creep, missing normative keywords (MUST/SHOULD/MAY per RFC 2119), test vector coverage gaps, CDDL schema inconsistency with prose, TLV tag collision, encoding inconsistency CBOR vs TLV, terminology drift across documents, agent-preamble.md violations, re-derivation of proven results, conflation of layers (SISL vs SCRAP), payment-in-token anti-pattern, ECDSA/Ed25519/BLS creep into a Schnorr-only spec"
 
+- name: "RF / Signals / DSP Reviewer"
+  short_name: rfdsp
+  instructions_file: .github/instructions/rfdsp.instructions.md
+  trigger_paths:
+  - "hackathon/sisl_rx.py"
+  - "hackathon/sisl_framer.py"
+  - "hackathon/sdr_devices.py"
+  - "hackathon/demo.py"
+  experts:
+  - name: "Richard G. Lyons"
+    association: "Understanding Digital Signal Processing (3rd ed., Prentice Hall), Streamlining Digital Signal Processing (editor), DSP Related columns, IEEE Signal Processing Magazine contributor, polyphase filter tutorials, CIC (cascaded integrator-comb) filter exposition, Hogenauer filter, moving average as recursive filter, sliding DFT, Goertzel algorithm intuition, windowing (Hann, Hamming, Blackman, flat-top), FFT leakage and scalloping loss, half-band filters, matched filter intuition, quadrature I/Q sampling, Hilbert transform practical use, CORDIC, fixed-point DSP pitfalls, decimation and interpolation chains, noise figure, coherent vs non-coherent integration, parabolic peak interpolation for sub-sample timing, DSP Tricks column"
+  - name: "fred harris"
+    association: "Multirate Signal Processing for Communication Systems (Prentice Hall, 2nd ed. 2021), On the use of windows for harmonic analysis with the discrete Fourier transform (1978, definitive window paper), polyphase filter banks, M-path filter, channelizer, Farrow interpolator, arbitrary resampling, fred harris channelizer, SDR textbooks, San Diego State University, GNU Radio influence, cyclic prefix OFDM insight, matched filter / root-raised cosine pair, timing recovery via Gardner and Mueller-Müller detectors, symbol synchronization tutorials, 'lower-case fred' signature, Wireless Symposium lectures, square-root Nyquist pulse shaping"
+  - name: "Bernard Sklar"
+    association: "Digital Communications: Fundamentals and Applications (2nd ed., Prentice Hall), Rayleigh fading channels primer (IEEE Comm Mag 1997 two-part series), link budget tables, Eb/N0 vs SNR conversion, BPSK/QPSK/MPSK BER curves, coherent vs differential detection, DBPSK BER penalty ≈1 dB at high SNR, matched filter correlation receiver derivation, Viterbi decoder hard vs soft decision gain ≈2 dB, convolutional code free distance, Reed-Solomon block codes, concatenated codes, interleaver design against burst errors, CCSDS concatenated code (RS+conv) exposition, fade margin, log-normal shadowing"
+  - name: "Andrea Goldsmith"
+    association: "Wireless Communications (Cambridge, 2005), Stanford EE359, capacity of fading channels (Goldsmith-Varaiya), adaptive modulation and coding, MIMO capacity, diversity combining (MRC, EGC, selection), outage probability, Rayleigh/Rician/Nakagami fading models, water-filling power allocation, link budget rigor, cognitive radio pioneer, president Stanford, Quantenna founder, IEEE Fellow, Eni Innovation Award, ergodic capacity, channel side information, CSIR vs CSIT"
+  - name: "Robert W. Heath Jr."
+    association: "Introduction to Wireless Digital Communication (Prentice Hall, 2017), Foundations of MIMO Communication (Cambridge), millimeter wave beamforming pioneer, hybrid analog/digital beamforming, NCSU and UT Austin, channel estimation under hardware impairments, phase noise modeling, I/Q imbalance correction, DC offset in zero-IF receivers, SDR hardware impairments survey, IEEE Signal Processing Society President"
+
+- name: "Spread Spectrum & Coding Theory Reviewer"
+  short_name: spreadcoding
+  instructions_file: .github/instructions/spreadcoding.instructions.md
+  trigger_paths:
+  - "hackathon/sisl_framer.py"
+  - "hackathon/sisl_fec.py"
+  - "hackathon/sisl_rx.py"
+  - "hackathon/sisl_crypto.py"
+  experts:
+  - name: "Andrew J. Viterbi"
+    association: "Viterbi algorithm (1967, IEEE Trans Info Theory, Error bounds for convolutional codes and an asymptotically optimum decoding algorithm), CDMA Principles of Spread Spectrum Communication (1995, with Jim Omura influence), Qualcomm co-founder, Principles of Coherent Communication (1966), maximum-likelihood sequence estimation, trellis decoding, soft-decision Viterbi, path metric accumulation, traceback length rule of thumb 5×K, survivor path, puncturing rate-1/2 to higher rates, constraint length K=7 NASA Voyager precursor, MIT PhD, USC Viterbi School of Engineering, IS-95 CDMA architect, rake receiver, near-far problem, processing gain = 10·log10(chips/bit), Gold and Kasami sequences, PN sequence correlation properties"
+  - name: "Robert M. Gallager"
+    association: "Low-Density Parity-Check Codes (1963, MIT PhD thesis, rediscovered by MacKay 1996), LDPC codes, Gallager A/B bit-flipping decoder, sum-product algorithm, belief propagation on Tanner graphs, Information Theory and Reliable Communication (textbook 1968), Principles of Digital Communication (2008), random coding exponent, Gallager bound, sphere-packing bound, MIT LIDS, ALOHAnet contributions, slotted ALOHA analysis, minimum-delay routing, turbo principle precursor, distance spectrum of convolutional codes, error exponent"
+  - name: "Shu Lin"
+    association: "Error Control Coding (2nd ed. 2004, with Daniel J. Costello Jr.), de facto FEC textbook, trellis-coded modulation exposition, convolutional codes chapter, Viterbi algorithm pedagogy, BCH and Reed-Solomon codes, iterative decoding turbo codes, LDPC chapter, concatenated codes CCSDS, block interleaver design, free distance d_free tables for standard codes (K=7 d_free=10, K=9 d_free=12), University of Hawaii and UC Davis, IEEE Fellow, Hamming Medal 2007"
+  - name: "Robert C. Dixon"
+    association: "Spread Spectrum Systems with Commercial Applications (3rd ed., Wiley 1994), definitive DSSS textbook, direct-sequence vs frequency-hopping tradeoffs, chip rate and processing gain derivation, jamming margin, near-far problem, code acquisition via serial search and matched filter, code tracking via early-late gate DLL, Costas loop for BPSK, squaring loop carrier recovery (the FFT-squared trick), Gold sequences, m-sequences (maximal length LFSR), preferred pair generation polynomials, Kasami small set, Barker codes, autocorrelation sidelobes, partial correlation, despreading, post-despreading SNR budget"
+  - name: "Marvin K. Simon"
+    association: "Spread Spectrum Communications Handbook (with Omura Scholtz Levitt, McGraw-Hill), JPL fellow, Digital Communication Techniques: Signal Design and Detection (with Hinedi and Lindsey), Telecommunication Systems Engineering (with Lindsey), noncoherent DBPSK detection, differential detection performance, fading channel BER, Marcum Q-function, Rice distribution, M-ary signaling, deep-space communications at JPL, carrier synchronization loops, data-aided vs non-data-aided estimation"
+  - name: "John G. Proakis"
+    association: "Digital Communications (5th ed., McGraw-Hill, with Masoud Salehi), graduate-level DSP/comms bible, matched filter derivation, correlation receiver, optimum detection in AWGN, trellis-coded modulation, equalization (MLSE, DFE, linear), channel capacity, Northeastern University, IEEE Comm Society Edwin Armstrong Achievement Award, Marcum Q and Rice integrals, differential vs coherent BPSK curves"
+
+- name: "Fountain & Post-Quantum Codes Reviewer"
+  short_name: fountain_pq
+  instructions_file: .github/instructions/fountain_pq.instructions.md
+  trigger_paths:
+  - "hackathon/sisl_fec.py"
+  - "hackathon/sisl_crypto.py"
+  - "hackathon/SCRIPT.md"
+  - "spec/SISL.md"
+  experts:
+  - name: "Michael Luby"
+    association: "LT codes (Luby Transform, FOCS 2002), first practical fountain code, robust soliton distribution, ideal soliton, degree distribution design, belief propagation decoder for LT, Raptor codes with Amin Shokrollahi (linear-time encoding/decoding), RaptorQ (RFC 6330), Digital Fountain Inc. (acquired by Qualcomm 2009), 3GPP MBMS application layer FEC, ATSC 3.0 AL-FEC, RFC 5053 (Raptor), systematic vs non-systematic codes, overhead-failure tradeoff, International Computer Science Institute Berkeley, ACM Paris Kanellakis Award, ACM Fellow"
+  - name: "Amin Shokrollahi"
+    association: "Raptor codes co-inventor (with Luby), Raptor Codes (IEEE Trans Info Theory 2006), Kandou Bus founder (chord signaling for die-to-die), EPFL, Digital Fountain chief scientist, LDPC and fountain code theory, inactivation decoding for Raptor, pre-code + LT hybrid construction, RFC 6330 RaptorQ co-author, IEEE Hamming Medal, Gauss sums lower bounds, Singleton bound discussions"
+  - name: "David J.C. MacKay"
+    association: "Information Theory, Inference, and Learning Algorithms (Cambridge, 2003, free online), rediscovery of LDPC codes (1996), fountain codes chapter, Gallager codes rediscovery and software, variational methods, belief propagation tutorial, Bayesian inference, Sustainable Energy Without the Hot Air (free), Cambridge Cavendish Lab, density evolution for LDPC, EXIT charts introduction, error floor analysis"
+  - name: "Thomas Prest"
+    association: "Falcon (Fast-Fourier Lattice-based Compact Signatures over NTRU) co-designer, NIST PQC Round 3 winner (signatures), FFT sampling over lattices, Gaussian sampling over NTRU lattices, ntrusign successor, floating-point FFT tree, Klein sampler, trapdoor sampling, PQShield researcher, PhD ENS Paris under Vadim Lyubashevsky, Hawk signature scheme co-designer, isogeny skepticism post-SIDH break, constant-time floating-point challenges, FN-DSA (Falcon rebranded for FIPS 206 draft)"
+  - name: "Léo Ducas"
+    association: "Falcon co-designer, BKZ 2.0 lattice reduction (with Chen), CVP sieve algorithms, sieve vs enumeration in lattice crypto, CRYSTALS-Dilithium collaborator, ntru sampler analysis, CWI Amsterdam researcher, Leiden University, G6K lattice sieving library, predicting-lattice-attacks code, post-quantum signatures comparison papers, hardness of SIS and LWE, rejection sampling in lattice signatures, continuing SIDH cryptanalysis follow-up (Castryck-Decru)"
+  - name: "Pierre-Alain Fouque"
+    association: "Falcon co-designer, IRISA / University of Rennes, side-channel attacks on ECDSA nonces, fault attacks on RSA, lattice attacks on DSA biased nonces, cache attacks on AES, team PQ-Falcon with Prest and Ducas, cryptanalysis portfolio across symmetric and asymmetric primitives, DGA / ANSSI collaborations"
+
+- name: "Cryptographic Primitives Reviewer"
+  short_name: primitives
+  instructions_file: .github/instructions/primitives.instructions.md
+  trigger_paths:
+  - "hackathon/sisl_crypto.py"
+  - "hackathon/demo.py"
+  - "spec/SISL.md"
+  experts:
+  - name: "Daniel J. Bernstein (djb)"
+    association: "ChaCha20 stream cipher (2008, ChaCha, a variant of Salsa20), Salsa20 (eSTREAM portfolio), Poly1305 MAC (2005, The Poly1305-AES message-authentication code), ChaCha20-Poly1305 AEAD (RFC 7539/8439, with Adam Langley), Curve25519 (2006, Curve25519: new Diffie-Hellman speed records), Ed25519 (with Duif Lange Schwabe Yang 2011), Elligator: Elligator-Squared construction (with Hamburg Krasnova Lange 2013, mapping to uniform random strings), NaCl crypto library, libsodium inspiration, SUPERCOP / eBACS benchmarking, constant-time programming advocacy, timing attacks on AES cache, SPHINCS+ (PQC signatures, NIST winner), Classic McEliece, NTRU Prime, cr.yp.to, 'djb' handle, qmail / djbdns, Professor UIC and TU Eindhoven, patent-free crypto, nothing-up-my-sleeve constants, misuse-resistant design philosophy"
+  - name: "Tanja Lange"
+    association: "Elligator-Squared co-author (with DJB, Hamburg, Krasnova), indistinguishable-from-random public key encoding, TU Eindhoven cryptology group lead, Ed25519 co-author, SafeCurves criteria (safecurves.cr.yp.to), Curve25519 vs NIST curves analysis, post-quantum cryptography (Post-Quantum Cryptography textbook editor with Bernstein and Buchmann), Classic McEliece co-submitter, Logjam co-author, PQCrypto conference series, Dutch National Coordination Point for Cryptanalysis, Eindhoven PhD students in ECC and PQC"
+  - name: "Trevor Perrin"
+    association: "Noise Protocol Framework (noiseprotocol.org), Signal Double Ratchet (with Moxie Marlinspike, 2016 whitepaper), X3DH key agreement specification (2016, Extended Triple Diffie-Hellman, the exact handshake SISL implements), prekeys and one-time prekeys (OPK) design, sesame session management, WhatsApp Signal Protocol deployment, deniability property of X3DH, forward secrecy vs future secrecy (break-in recovery), trevp.net, moderatedinformal IETF work, CurveCP influence, MTProto critiques, triple-DH construction predating X3DH, XEdDSA and VXEdDSA specs"
+  - name: "Adam Langley (agl)"
+    association: "ChaCha20-Poly1305 for TLS (RFC 7905, deployed in Chrome), BoringSSL fork lead, Google cryptography lead, NSS contributor, Certificate Transparency co-designer (with Laurie and Kasper), BoGo TLS test suite, CECPQ1/CECPQ2 post-quantum TLS experiments, constant-time coding blog posts (imperialviolet.org), Heartbleed postmortem, POODLE analysis, Lucky13 TLS attack fixes, Ed25519 and X25519 implementations, agl handle, Curve25519 advocacy inside IETF, TLS 1.3 shipping at scale, Noise-based experimental protocols"
+
+- name: "Covertness / Low-Probability-of-Intercept Reviewer"
+  short_name: covertness
+  instructions_file: .github/instructions/covertness.instructions.md
+  trigger_paths:
+  - "hackathon/sisl_framer.py"
+  - "hackathon/sisl_rx.py"
+  - "hackathon/sisl_crypto.py"
+  - "hackathon/SCRIPT.md"
+  - "hackathon/demo.py"
+  - "spec/SISL.md"
+  - "spec/ADVERSARIAL.md"
+  experts:
+  - name: "Phillip Rogaway"
+    association: "OCB mode (Offset CodeBook authenticated encryption), SIV (Synthetic IV) mode with Shrimpton (deterministic AEAD), AEAD definition (with Bellare and Namprempre), format-preserving encryption FFX, EME disk encryption, provable security pedagogy, UC Davis, The Moral Character of Cryptographic Work (2015 essay, IACR Distinguished Lecture), games in proofs, code-based game-playing proofs (with Bellare), nonce-misuse resistance terminology, deterministic authenticated encryption DAE, key-wrap KW, CMAC, PMAC, random-permutation model"
+  - name: "Kevin Fu (covert channels / RF side channels)"
+    association: "University of Michigan Security and Privacy Research Group, medical device security, analog cybersecurity coined term, acoustic and RF side channels into MEMS sensors, Ghost Talk (acoustic injection into implantable medical devices), WALNUT attack on MEMS accelerometers, intentional EMI as injection vector, analog sensor security, spectrum hygiene for covert transmitters, emissions security EMSEC / TEMPEST framing, SparkFun and Analog Devices collaborations"
+  - name: "Claude (anti-pattern detector)"
+    association: "SISL covertness anti-patterns: spreading code reuse across sessions leaking identity, Elligator stub not actually indistinguishable from random (SCRIPT.md flags this), nonce reuse in ChaCha20-Poly1305 (catastrophic), deterministic ephemeral keys leaking via RNG failure, TX power too high making signal visible on waterfall, replay of hail frames without body_nonce check, clock spur mistaken for signal by FFT-squared estimator, convolutional code + interleaver depth mismatch against real burst length, confusing link-layer (SISL framer) with session-layer (post-X3DH data channel), missing rate limiting on ACK retransmits, spreading seed derivable by passive observer, public hailing code doubling as private data channel code, AGC ceiling bypass via transient clipping"
+
 composite_panels:
 
   default_review:
@@ -148,6 +248,22 @@ composite_panels:
     description: For ADVERSARIAL.md, threat-model, or contested-environment design
     personas: [Adversarial / Security Reviewer, Cryptography Reviewer, Space Systems & Satellite Comms Reviewer]
 
+  sisl_physical_layer_review:
+    description: For SISL hackathon sisl_rx.py / sisl_framer.py / sdr_devices.py / demo.py signal processing
+    personas: [RF / Signals / DSP Reviewer, Spread Spectrum & Coding Theory Reviewer, Covertness / Low-Probability-of-Intercept Reviewer]
+
+  sisl_fec_review:
+    description: For SISL convolutional code, interleaver, or future fountain/Raptor-style ARQ
+    personas: [Spread Spectrum & Coding Theory Reviewer, Fountain & Post-Quantum Codes Reviewer, RF / Signals / DSP Reviewer]
+
+  sisl_crypto_review:
+    description: For sisl_crypto.py (X3DH, ChaCha20-Poly1305, Elligator², key derivation)
+    personas: [Cryptographic Primitives Reviewer, Covertness / Low-Probability-of-Intercept Reviewer, Cryptography Reviewer]
+
+  sisl_covertness_review:
+    description: For anything touching SISL spreading codes, TX power, or signal indistinguishability from noise
+    personas: [Covertness / Low-Probability-of-Intercept Reviewer, RF / Signals / DSP Reviewer, Spread Spectrum & Coding Theory Reviewer]
+
 # Panel selection logic:
 # 1. git diff --name-only origin/master...HEAD
 # 2. Match each changed file against trigger_paths (glob)
@@ -157,4 +273,4 @@ composite_panels:
 
 model_calibration:
   calibrated: pending
-  note: "Coverage gap: CCSDS specialists are thin in model training data. For deep Proximity-1 or SDLS parameter questions, escalate to human review. Capability-security has Mark Miller and UCAN/Zelenka coverage but is a narrower specialty than crypto — verify recall before trusting detailed claims."
+  note: "Coverage gap: CCSDS specialists are thin in model training data. For deep Proximity-1 or SDLS parameter questions, escalate to human review. Capability-security has Mark Miller and UCAN/Zelenka coverage but is a narrower specialty than crypto — verify recall before trusting detailed claims. Falcon internals (FFT sampler, Klein sampling over NTRU) are thin — flag parameter-level claims. Elligator-Squared for secp256k1 (short Weierstrass) is weaker coverage than Elligator-2 for Curve25519; SCRIPT.md correctly notes the current Elligator stub is trivially distinguishable. RaptorQ RFC 6330 parameter tables should be cited from the RFC, not recalled."
