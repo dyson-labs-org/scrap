@@ -456,11 +456,44 @@ def test_hail_ack_session_key_derivation():
     # Both sides must produce identical session keys
     assert caller_keys == responder_keys
 
-    # All 4 key fields exist and are 32 bytes each
-    expected_fields = ["p2p_tx_key", "p2p_rx_key", "spreading_seed", "reserved"]
-    for field in expected_fields:
+    # Key fields exist with correct sizes
+    for field in ["p2p_tx_key", "p2p_rx_key", "spreading_seed"]:
         assert field in caller_keys, f"missing field: {field}"
         assert len(caller_keys[field]) == 32, f"{field} is not 32 bytes"
+    assert len(caller_keys["session_id"]) == 16
+    assert len(caller_keys["reserved"]) == 16
+
+
+def test_rlnc_derivations():
+    caller_static = sc.generate_keypair()
+    responder_static = sc.generate_keypair()
+    caller_eph = sc.Ephemeral()
+    caller_eph_priv = caller_eph.consume()
+    responder_eph = sc.Ephemeral()
+    responder_eph_priv = responder_eph.consume()
+
+    caller_eph_canonical = sc.pubkey_to_compressed(caller_eph_priv.public_key())
+    responder_eph_canonical = sc.pubkey_to_compressed(responder_eph_priv.public_key())
+
+    dh1 = sc.ecdh(caller_eph_priv, responder_static.public_key())
+    dh2 = sc.ecdh(caller_static, responder_eph_priv.public_key())
+    dh3 = sc.ecdh(caller_eph_priv, responder_eph_priv.public_key())
+    keys = sc.derive_session_keys(dh1, dh2, dh3, caller_eph_canonical, responder_eph_canonical)
+
+    prk = sc.derive_session_prk(keys)
+    assert len(prk) == 32
+
+    iv0 = sc.derive_payload_iv(prk, 0)
+    iv1 = sc.derive_payload_iv(prk, 1)
+    assert len(iv0) == 12
+    assert len(iv1) == 12
+    assert iv0 != iv1
+
+    coef = sc.derive_coef_stream(prk, 0, 64)
+    assert len(coef) == 64
+
+    ack_iv = sc.derive_rlnc_ack_iv(prk)
+    assert len(ack_iv) == 12
 
 
 # ── 7. Ephemeral one-shot enforcement ──────────────────────────────────────

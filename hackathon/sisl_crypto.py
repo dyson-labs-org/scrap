@@ -762,5 +762,24 @@ def derive_session_keys(
         "p2p_tx_key": km[0:32],
         "p2p_rx_key": km[32:64],
         "spreading_seed": km[64:96],
-        "reserved": km[96:128],
+        "session_id": km[96:112],
+        "reserved": km[112:128],
     }
+
+
+def derive_session_prk(session_keys: dict) -> bytes:
+    ikm = (session_keys["p2p_tx_key"] + session_keys["p2p_rx_key"]
+           + session_keys["session_id"])
+    return hkdf_sha256(ikm, b"SISL-RLNC-v1", b"", 32)
+
+
+def derive_payload_iv(session_prk: bytes, comb_id: int) -> bytes:
+    return hkdf_sha256(session_prk, b"", b"sisl-payload-iv" + comb_id.to_bytes(4, 'big'), 12)
+
+
+def derive_coef_stream(session_prk: bytes, comb_id: int, length: int) -> bytes:
+    return hkdf_sha256(session_prk, b"", b"sisl-rlnc-coef" + comb_id.to_bytes(4, 'big'), length)
+
+
+def derive_rlnc_ack_iv(session_prk: bytes) -> bytes:
+    return hkdf_sha256(session_prk, b"", b"sisl-ack-iv", 12)
