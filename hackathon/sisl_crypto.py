@@ -43,7 +43,6 @@ import sisl_framer as sf  # for differential_encode_bits used in encode_hail_fec
 SISL_VERSION = 0x03
 MSG_HAIL = 0x01
 MSG_ACK = 0x02
-MSG_NACK = 0x03
 
 ASM = b"\x1A\xCF\xFC\x1D"
 
