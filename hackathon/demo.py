@@ -1276,7 +1276,7 @@ def main() -> int:
         print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
 
         ack_start = time.time()
-        ack_tx_duration = max(60.0, args.duration)  # at least 60s of ACK TX
+        ack_tx_duration = max(30.0, min(args.duration, 60.0))  # 30–60s of ACK TX
         ack_round = 0
         try:
             while time.time() - ack_start < ack_tx_duration:
@@ -1346,6 +1346,8 @@ def main() -> int:
                         return {"status": "decrypt_ok", "decoded_hail": True}
                 except ValueError:
                     pass
+                # Symbol received but not yet complete — don't signal exit.
+                return {**res, "status": "decrypt_fail"}
             return res
 
         rlnc_stats = live_rx_decode(

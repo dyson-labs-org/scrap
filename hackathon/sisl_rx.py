@@ -709,14 +709,14 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
             detail = (f"status={b.status}  "
                       f"nonce_echo={b.nonce_echo.hex()}")
         print(f"{_GREEN}[{block_num:4d}] DECRYPTED  "
-              f"asm@{result['asm_at_byte']}  "
+              f"asm@{result.get('asm_at_byte', '?')}  "
               f"peak={pk:.3g}  {snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={pol}  "
               f"{detail}{_RESET}")
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
-              f"asm@{result['asm_at_byte']}  "
+              f"asm@{result.get('asm_at_byte', '?')}  "
               f"{snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
@@ -771,7 +771,7 @@ def decode_one_payload_in_block(
     n_fec_bits = sc.payload_fec_total_bits(n_payload_bytes)
     acq = _acquire_and_track(
         samples, samps_per_chip, samp_hz, signal_threshold,
-        fec_total_bits=max(n_fec_bits, sc.HAIL_FEC_TOTAL_BITS),
+        fec_total_bits=n_fec_bits,
     )
     if acq["status"] != "acquired":
         return acq
