@@ -6,7 +6,7 @@ import bisect
 from sisl_crypto import derive_coef_stream
 
 
-def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.5) -> list[float]:
+def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> list[float]:
     rho = [0.0] * (K + 1)
     rho[1] = 1.0 / K
     for d in range(2, K + 1):
@@ -47,7 +47,7 @@ def sample_coefficients(
     K: int,
     session_prk: bytes,
     c: float = 0.1,
-    delta: float = 0.5,
+    delta: float = 0.1,
 ) -> list[int]:
     stream = derive_coef_stream(session_prk, comb_id, 2 + 4 * K)
 
@@ -123,10 +123,60 @@ class RLNCDecoder:
         indices = sample_coefficients(comb_id, self._K, self._prk)
         self._symbols.append((indices, bytearray(encoded_bytes)))
         self._peel()
+        if not self.is_complete:
+            self._gaussian_eliminate()
+            self._peel()
         return self.is_complete
+
+    def _gaussian_eliminate(self) -> None:
+        residual = [
+            (list(active_set), bytearray(enc_bytes))
+            for active_set, enc_bytes in self._symbols
+            if active_set
+        ]
+        if not residual:
+            return
+        frag_size = len(residual[0][1])
+        unknown = [i for i in range(self._K) if i not in self._recovered]
+        if not unknown:
+            return
+        idx_map = {frag: row for row, frag in enumerate(unknown)}
+        n = len(unknown)
+        rows: list[list[int]] = []
+        data: list[bytearray] = []
+        for active_set, enc_bytes in residual:
+            cols = sorted(idx_map[i] for i in active_set if i in idx_map)
+            if cols:
+                rows.append(cols)
+                data.append(bytearray(enc_bytes))
+        pivot_row: dict[int, int] = {}
+        row_idx = 0
+        for col in range(n):
+            found = None
+            for r in range(row_idx, len(rows)):
+                if col in rows[r]:
+                    found = r
+                    break
+            if found is None:
+                continue
+            rows[row_idx], rows[found] = rows[found], rows[row_idx]
+            data[row_idx], data[found] = data[found], data[row_idx]
+            pivot_row[col] = row_idx
+            for r in range(len(rows)):
+                if r != row_idx and col in rows[r]:
+                    rows[r] = sorted(set(rows[r]) ^ set(rows[row_idx]))
+                    for j in range(frag_size):
+                        data[r][j] ^= data[row_idx][j]
+            row_idx += 1
+        for col, pr in pivot_row.items():
+            if rows[pr] == [col]:
+                self._recovered[unknown[col]] = bytes(data[pr])
 
     def decode(self) -> bytes | None:
         self._peel()
+        if len(self._recovered) < self._K:
+            self._gaussian_eliminate()
+            self._peel()
         if len(self._recovered) < self._K:
             return None
         parts = [self._recovered[i] for i in range(self._K)]
