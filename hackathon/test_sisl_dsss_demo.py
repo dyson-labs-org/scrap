@@ -367,4 +367,99 @@ def test_llr_accumulator_fec_short_input_rejected():
     assert acc.n_copies == 0
 
 
+# ── RLNC payload loopback tests ─────────────────────────────────────────────
+
+def _rlnc_session_keys():
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from sisl_crypto import CURVE, ecdh, pubkey_to_compressed, derive_session_keys
+    caller_priv = ec.derive_private_key(int.from_bytes(bytes(range(32)), 'big'), CURVE)
+    resp_priv = ec.derive_private_key(int.from_bytes(bytes(range(1, 33)), 'big'), CURVE)
+    caller_pub = caller_priv.public_key()
+    resp_pub = resp_priv.public_key()
+    dh1 = ecdh(caller_priv, resp_pub)
+    dh2 = ecdh(resp_priv, caller_pub)
+    dh3 = dh1
+    return derive_session_keys(dh1, dh2, dh3, pubkey_to_compressed(caller_pub), pubkey_to_compressed(resp_pub))
+
+
+def _feed_symbols(session, n: int):
+    for _ in range(n):
+        frame = session.next_tx_frame()
+        if session.rx_frame(frame):
+            return True
+    return session._decoder.is_complete
+
+
+class TestRLNCPayloadLoopback:
+    def test_full_payload_roundtrip_k16(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256)) * 2
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 16, keys)
+        assert _feed_symbols(session, 16 + 10)
+        recovered = session.recovered_payload()
+        assert recovered is not None
+        assert recovered == payload
+
+    def test_full_payload_roundtrip_k32(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256)) * 2
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 32, keys)
+        assert _feed_symbols(session, 32 + 15)
+        recovered = session.recovered_payload()
+        assert recovered is not None
+        assert recovered == payload
+
+    def test_payload_with_erasures(self):
+        from sisl_payload_session import RLNCSession
+        from sisl_crypto import derive_session_prk
+        from sparse_rlnc import RLNCEncoder, RLNCDecoder
+        from sisl_payload import encode_payload_symbol, decode_payload_symbol
+        payload = bytes(range(256)) * 2
+        K = 16
+        keys = _rlnc_session_keys()
+        prk = derive_session_prk(keys)
+        session_id = keys["session_id"]
+        tx_key = keys["p2p_tx_key"]
+        enc = RLNCEncoder(payload, K, prk)
+        dec = RLNCDecoder(K, prk)
+        erased = {3, 7}
+        received = 0
+        for comb_id in range(K + 10):
+            if comb_id in erased:
+                continue
+            _, encoded_bytes, _ = enc.encode_symbol(comb_id)
+            frame = encode_payload_symbol(comb_id, encoded_bytes, tx_key, prk, session_id)
+            got_id, plain = decode_payload_symbol(frame, tx_key, prk, session_id)
+            dec.add_symbol(got_id, plain)
+            received += 1
+        assert dec.is_complete
+        raw = dec.decode()
+        assert raw[:len(payload)] == payload
+
+    def test_ack_flow(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256)) * 2
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 16, keys)
+        _feed_symbols(session, 16 + 10)
+        assert session.recovered_payload() is not None
+        ack = session.build_ack()
+        assert ack is not None
+        assert session.verify_ack(ack)
+
+    def test_min_symbols_varies_by_payload_size(self):
+        from sisl_payload_session import RLNCSession
+        keys = _rlnc_session_keys()
+        K = 16
+        for payload in [b"\x00", b"Hello SISL RLNC!" * 6 + b"!!", bytes(range(256)) * 2, bytes(range(250)) * 4]:
+            session = RLNCSession(payload, K, keys)
+            ok = _feed_symbols(session, K + 20)
+            assert ok, f"Failed to decode payload of size {len(payload)}"
+            recovered = session.recovered_payload()
+            assert recovered is not None
+            assert recovered == payload
+
+
 
