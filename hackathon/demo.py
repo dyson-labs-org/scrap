@@ -1352,9 +1352,12 @@ def main() -> int:
                 return {**res, "status": "decrypt_fail"}
             return res
 
+        # block_seconds=3.0 matches the caller's SYMBOL_TX_SEC so each
+        # block contains exactly one fully-repeated symbol — the signal
+        # dominates the FFT block and the estimator locks correctly.
         rlnc_stats = live_rx_decode(
-            duration_s=max(120.0, args.duration),
-            block_seconds=5.36,
+            duration_s=max(300.0, args.duration),
+            block_seconds=3.0,
             lna_db=args.rx_lna,
             vga_db=args.rx_vga,
             amp_on=args.rx_amp,
@@ -1544,23 +1547,28 @@ def main() -> int:
             #   Responder: TX ACK for 20 s, then enters RLNC RX.
             #   Caller: wait 30 s after session establishment, giving
             #   responder 10 s of quiet RX for AGC to settle, then TX.
+            #
+            # Each RLNC symbol is repeated for SYMBOL_TX_SEC seconds so the
+            # signal dominates the receiver's FFT block (same principle as the
+            # hail). Without this the FFT estimator locks onto noise spurs.
             RLNC_START_DELAY = 30.0
+            SYMBOL_TX_SEC = 3.0   # seconds per symbol TX — fills the RX block
+            PAYLOAD_ACK_BYTES = 48
+
+            n_fec_bits = sc.payload_fec_total_bits(n_sym_bytes)
+            sym_chips_per_frame = (n_fec_bits * 1)  # 1 chip/bit after spreading
+            sym_duration_s = sym_chips_per_frame / chip_rate_hz
+            sym_repeats = max(1, int(SYMBOL_TX_SEC / sym_duration_s))
+
             print(f"\n  phase 3: \033[33mRLNC payload TX\033[0m  "
-                  f"K={K}, payload={len(payload)}B, symbol={n_sym_bytes}B")
+                  f"K={K}, payload={len(payload)}B, symbol={n_sym_bytes}B "
+                  f"({sym_repeats} repeats/{SYMBOL_TX_SEC:.0f}s each)")
             print(f"  waiting {RLNC_START_DELAY:.0f}s for responder RX to settle...")
             time.sleep(RLNC_START_DELAY)
 
             prk = sc.derive_session_prk(session_keys)
             rx_key = session_keys["p2p_rx_key"]
             sess_id = session_keys["session_id"]
-
-            # Precompute symbol samples for each comb_id.
-            n_fec_bits = sc.payload_fec_total_bits(n_sym_bytes)
-            TX_BATCH = 8          # symbols per TX burst before RX check
-            PAYLOAD_ACK_BYTES = 48
-            rlnc_timeout = time.time() + max(180.0, args.duration)
-            rlnc_ack_received = False
-            comb_id = 0
 
             from sisl_payload import decode_ack as _decode_payload_ack
 
@@ -1577,31 +1585,32 @@ def main() -> int:
                         return {"status": "decrypt_ok", "decoded_hail": True}
                 return {**res, "status": "no_signal"}
 
-            while not rlnc_ack_received and time.time() < rlnc_timeout:
-                # TX batch
-                for _ in range(TX_BATCH):
-                    frame_bytes = session.next_tx_frame()
-                    sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
-                    sym_chips = sf.tx_bits_to_chips(sym_bits)
-                    sym_samples = upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP)
-                    print(f"  TX symbol {comb_id} "
-                          f"({n_fec_bits} bits)...", end="", flush=True)
-                    soapy_tx_burst(
-                        sym_samples, center_hz,
-                        samp_hz=SAMP_RATE_HZ,
-                        tx_vga_db=args.tx_vga,
-                        tx_amp_on=args.tx_amp,
-                        repeats=3,
-                        device_str=tx_device_str,
-                    )
-                    print(" done")
-                    comb_id += 1
+            rlnc_timeout = time.time() + max(300.0, args.duration)
+            rlnc_ack_received = False
+            comb_id = 0
 
-                # RX window: one block to check for payload ACK
-                print(f"  RX window: checking for payload ACK...")
+            while not rlnc_ack_received and time.time() < rlnc_timeout:
+                frame_bytes = session.next_tx_frame()
+                sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
+                sym_chips = sf.tx_bits_to_chips(sym_bits)
+                sym_samples = upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP)
+                print(f"  TX symbol {comb_id} ({sym_repeats}×{sym_duration_s*1000:.1f}ms"
+                      f" = {SYMBOL_TX_SEC:.0f}s)...", end="", flush=True)
+                soapy_tx_burst(
+                    sym_samples, center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=sym_repeats,
+                    device_str=tx_device_str,
+                )
+                print(" done")
+                comb_id += 1
+
+                # After each symbol, check briefly for payload ACK.
                 rlnc_ack_stats = live_rx_decode(
-                    duration_s=6.0,
-                    block_seconds=5.36,
+                    duration_s=SYMBOL_TX_SEC + 1.0,
+                    block_seconds=SYMBOL_TX_SEC,
                     lna_db=args.rx_lna,
                     vga_db=args.rx_vga,
                     amp_on=args.rx_amp,
