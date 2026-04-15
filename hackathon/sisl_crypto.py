@@ -43,6 +43,7 @@ import sisl_framer as sf  # for differential_encode_bits used in encode_hail_fec
 SISL_VERSION = 0x03
 MSG_HAIL = 0x01
 MSG_ACK = 0x02
+MSG_PAYLOAD = 0x03
 
 ASM = b"\x1A\xCF\xFC\x1D"
 
@@ -787,3 +788,55 @@ def derive_coef_stream(session_prk: bytes, comb_id: int, length: int) -> bytes:
 
 def derive_rlnc_ack_iv(session_prk: bytes) -> bytes:
     return _hkdf_expand(session_prk, b"sisl-ack-iv", 12)
+
+
+# ── RLNC payload FEC frame layout ────────────────────────────────────────────
+#
+# Each RLNC payload symbol is framed identically to hail/ACK:
+#   Header (uncoded, 6 B): ASM(4) + SISL_VERSION(1) + MSG_PAYLOAD(1)
+#   Body (FEC-coded, rate-1/2 convolutional): encode_payload_symbol() output
+#
+# n_payload_bytes = len(encode_payload_symbol(...)) = 4 + frag_size + 16
+# PAYLOAD_FEC_HEADER_BITS = 48 (same as hail/ACK)
+
+PAYLOAD_HEADER_LEN = 6
+PAYLOAD_FEC_HEADER_BITS = PAYLOAD_HEADER_LEN * 8  # 48
+
+
+def payload_fec_total_bits(n_payload_bytes: int) -> int:
+    """Total channel bits for one RLNC payload symbol frame."""
+    return PAYLOAD_FEC_HEADER_BITS + sisl_fec.coded_length(n_payload_bytes * 8)
+
+
+def encode_payload_symbol_fec(payload_symbol_bytes: bytes) -> np.ndarray:
+    """Produce FEC-coded channel bits for one RLNC payload symbol.
+
+    payload_symbol_bytes — output of sisl_payload.encode_payload_symbol().
+    Returns uint8 ndarray of payload_fec_total_bits(len(payload_symbol_bytes)) bits.
+    """
+    header = ASM + bytes([SISL_VERSION, MSG_PAYLOAD])
+    header_bits = np.unpackbits(np.frombuffer(header, dtype=np.uint8))
+    body_bits = np.unpackbits(np.frombuffer(payload_symbol_bytes, dtype=np.uint8))
+    coded_body = sisl_fec.encode(body_bits)
+    seed = int(header_bits[-1])
+    diff_body = sf.differential_encode_bits(coded_body, seed=seed)
+    return np.concatenate([header_bits, diff_body]).astype(np.uint8)
+
+
+def decode_payload_symbol_fec_from_llrs(
+    llrs: np.ndarray,
+    n_payload_bytes: int,
+) -> bytes | None:
+    """FEC-decode RLNC payload symbol from per-bit LLRs.
+
+    n_payload_bytes — expected output length (= 4 + frag_size + 16).
+    Returns raw payload_symbol_bytes on success, None on FEC failure
+    (caller is responsible for AEAD verify).
+    """
+    n_fec_bits = payload_fec_total_bits(n_payload_bytes)
+    if len(llrs) < n_fec_bits:
+        return None
+    llrs = np.asarray(llrs[:n_fec_bits], dtype=np.float32)
+    body_llrs = llrs[PAYLOAD_FEC_HEADER_BITS:]
+    body_bits = sisl_fec.decode(body_llrs, n_payload_bytes * 8)
+    return np.packbits(body_bits).tobytes()[:n_payload_bytes]

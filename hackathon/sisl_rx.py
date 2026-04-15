@@ -746,3 +746,85 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"\u0394f={foff:+.0f}Hz{extra}")
     elif s == "short_block":
         print(f"[{block_num:4d}] short block (processing gap)")
+
+
+_PAYLOAD_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_PAYLOAD])
+_PAYLOAD_PILOT_BITS = np.unpackbits(
+    np.frombuffer(_PAYLOAD_PILOT_BYTES, dtype=np.uint8)
+).astype(np.uint8)
+
+
+def decode_one_payload_in_block(
+    samples: np.ndarray,
+    n_payload_bytes: int,
+    samps_per_chip: int = 2,
+    samp_hz: float = 2_000_000.0,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
+) -> dict:
+    """Process one block, try to decode one RLNC payload symbol.
+
+    n_payload_bytes — expected encode_payload_symbol() output length.
+    Returns dict with status and payload_frame_bytes on decrypt_ok.
+    Caller must call sisl_payload.decode_payload_symbol() to AEAD-verify.
+    """
+    n_fec_bits = sc.payload_fec_total_bits(n_payload_bytes)
+    acq = _acquire_and_track(
+        samples, samps_per_chip, samp_hz, signal_threshold,
+        fec_total_bits=max(n_fec_bits, sc.HAIL_FEC_TOTAL_BITS),
+    )
+    if acq["status"] != "acquired":
+        return acq
+
+    peak_values = acq["peak_values"]
+    positions = acq["positions"]
+    base = {
+        "peak_mag": acq["peak_mag"],
+        "median_mag": acq["median_mag"],
+        "rad_per_sample": acq["rad_per_sample"],
+        "freq_offset_hz": acq["freq_hz"],
+        "start_sample": positions[0] if positions else 0,
+    }
+
+    if len(peak_values) < n_fec_bits:
+        return {"status": "track_lost", **base}
+
+    topk = find_sisl_frame_soft_topk(peak_values, n_payload_bytes + sc.PAYLOAD_HEADER_LEN, k=top_k_soft)
+    best_bytes = None
+    best_offset = -1
+    best_score = 0.0
+
+    for cand_offset, cand_score, cand_pts in topk:
+        if cand_offset + n_fec_bits > len(peak_values):
+            continue
+        if abs(cand_score) <= 5.0:
+            continue
+
+        aligned = peak_values[int(cand_offset):]
+        if len(aligned) < n_fec_bits:
+            continue
+
+        dbpsk = sf.dbpsk_decode_from_pilot(aligned, _PAYLOAD_PILOT_BITS, n_fec_bits)
+        if dbpsk is None:
+            continue
+
+        _, fec_soft, _, _, _ = dbpsk
+        for polarity in (1.0, -1.0):
+            raw = sc.decode_payload_symbol_fec_from_llrs(polarity * fec_soft, n_payload_bytes)
+            if raw is not None and len(raw) == n_payload_bytes:
+                if best_bytes is None or abs(cand_score) > abs(best_score):
+                    best_bytes = raw
+                    best_offset = int(cand_offset)
+                    best_score = float(cand_score)
+                break
+
+    if best_bytes is None:
+        return {"status": "decrypt_fail", **base}
+
+    return {
+        "status": "decrypt_ok",
+        "payload_frame_bytes": best_bytes,
+        "asm_at_byte": f"soft-bit{best_offset}",
+        "soft_score": best_score,
+        **base,
+    }

@@ -56,6 +56,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 import sisl_crypto as sc
 import sisl_fec
 import sisl_rx
+from sisl_payload import decode_payload_symbol
+from sisl_payload_session import RLNCSession
 
 try:
     from gnuradio import analog, blocks, gr
@@ -1065,6 +1067,14 @@ def main() -> int:
                              "at 2 Msps with a single tuner gain; "
                              "useful as a second observer on sub-GHz "
                              "bands. tx mode is always HackRF.")
+    parser.add_argument("--payload", type=str, default=None,
+                        help="file path to send as RLNC payload after session "
+                             "establishment (call mode). Responder saves "
+                             "received payload to /tmp/sisl_rlnc_payload.bin. "
+                             "Defaults to a built-in demo string.")
+    parser.add_argument("--rlnc-k", type=int, default=16,
+                        help="RLNC source block count K (default 16). "
+                             "Both call and respond must use the same value.")
     parser.add_argument("--chip-rate", type=float, default=1.0,
                         help="chip rate in Mcps (default 1.0). Higher rates "
                              "shorten each symbol, reducing phase drift per "
@@ -1247,6 +1257,16 @@ def main() -> int:
         # The caller cycles TX 5s / RX 2s. Keep retransmitting so the
         # caller's RX window catches the ACK regardless of timing.
         responder_eph = sc.Ephemeral()
+        # Derive session keys BEFORE encode_ack_fec consumes the ephemeral.
+        resp_eph_priv_peek = responder_eph.peek()
+        dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
+        dh3_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_eph_pub)
+        resp_eph_pub_can = sc.pubkey_to_compressed(responder_eph.pub)
+        session_keys = sc.derive_session_keys(
+            decoded_hail.dh1, dh2_sess, dh3_sess,
+            decoded_hail.caller_eph_pub_canonical, resp_eph_pub_can,
+        )
+
         ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
         ack_chips = sf.tx_bits_to_chips(ack_bits)
         ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
@@ -1261,7 +1281,6 @@ def main() -> int:
         try:
             while time.time() - ack_start < ack_tx_duration:
                 ack_round += 1
-                # TX one burst of 10 repeats (~15s), then brief pause
                 burst_repeats = 10
                 print(f"  ACK burst {ack_round} "
                       f"({burst_repeats} repeats)...", end="", flush=True)
@@ -1279,6 +1298,96 @@ def main() -> int:
         print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
         print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
         print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+
+        # ── Phase 3: RLNC payload RX ──────────────────────────────────────
+        K = args.rlnc_k
+        prk = sc.derive_session_prk(session_keys)
+        tx_key = session_keys["p2p_tx_key"]
+        rx_key = session_keys["p2p_rx_key"]
+        sess_id = session_keys["session_id"]
+        from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
+        from sisl_payload import encode_ack as encode_payload_ack
+
+        # We don't know payload size yet — use a fixed demo payload length
+        # matching the caller's default. For file-based payloads the size
+        # must be agreed out-of-band; demo uses 80 bytes.
+        _DEMO_PAYLOAD = (
+            b"SISL RLNC fountain code over DSSS steganographic link "
+            b"-- hackathon demo payload v1"
+        )
+        expected_payload_len = len(_DEMO_PAYLOAD)
+        frags = _frag(_DEMO_PAYLOAD, K)
+        frag_size = len(frags[0])
+        n_sym_bytes = 4 + frag_size + 16  # encode_payload_symbol output size
+
+        decoder = RLNCDecoder(K, prk)
+        print(f"\n  phase 3: \033[36mRLNC payload RX\033[0m  "
+              f"K={K}, expected={expected_payload_len}B, symbol={n_sym_bytes}B")
+        print(f"  listening for payload symbols...")
+
+        received_count = [0]
+
+        def _payload_sym_fn(block_data):
+            res = sisl_rx.decode_one_payload_in_block(
+                block_data, n_sym_bytes,
+                samps_per_chip=2,
+                samp_hz=chip_rate_hz * 2,
+                signal_threshold=args.signal_threshold,
+            )
+            if res.get("status") == "decrypt_ok":
+                raw = res["payload_frame_bytes"]
+                try:
+                    comb_id, plain = decode_payload_symbol(raw, tx_key, prk, sess_id)
+                    complete = decoder.add_symbol(comb_id, plain)
+                    received_count[0] += 1
+                    print(f"  symbol {comb_id} received "
+                          f"({received_count[0]} total), complete={complete}")
+                    if complete:
+                        return {"status": "decrypt_ok", "decoded_hail": True}
+                except ValueError:
+                    pass
+            return res
+
+        rlnc_stats = live_rx_decode(
+            duration_s=max(120.0, args.duration),
+            block_seconds=5.36,
+            lna_db=args.rx_lna,
+            vga_db=args.rx_vga,
+            amp_on=args.rx_amp,
+            center_hz=center_hz,
+            device_name=args.device,
+            signal_threshold=args.signal_threshold,
+            samps_per_chip=active_samps_per_chip,
+            exit_on_decrypt=True,
+            decode_fn=_payload_sym_fn,
+        )
+
+        recovered = decoder.decode()
+        if recovered is not None:
+            payload_out = recovered[:expected_payload_len]
+            out_path = "/tmp/sisl_rlnc_payload.bin"
+            with open(out_path, "wb") as _f:
+                _f.write(payload_out)
+            print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
+            print(f"  content: {payload_out[:80]}")
+
+            # TX payload ACK back to caller
+            ack_frame = encode_payload_ack(payload_out, rx_key, prk, sess_id)
+            ack_bits_p = np.unpackbits(np.frombuffer(ack_frame, dtype=np.uint8))
+            ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
+            ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
+            ack_sym_samples = upsample_chips_to_samples(ack_sym_chips, SAMPS_PER_CHIP)
+            print(f"  TX payload ACK ({len(ack_frame)}B)...", end="", flush=True)
+            soapy_tx_burst(
+                ack_sym_samples, center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=args.tx_vga,
+                tx_amp_on=args.tx_amp,
+                repeats=5,
+            )
+            print(" done")
+        else:
+            print(f"  payload decode incomplete ({received_count[0]} symbols received)")
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -1403,6 +1512,94 @@ def main() -> int:
             print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
             print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
             print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+
+            # ── Phase 3: RLNC payload TX ──────────────────────────────────
+            # Derive session keys from completed X3DH exchange.
+            dh2_sess = sc.ecdh(caller_static, dh.responder_eph_pub)
+            resp_eph_pub_can = sc.pubkey_to_compressed(dh.responder_eph_pub)
+            caller_eph_pub_can = sc.pubkey_to_compressed(caller_eph_priv.public_key())
+            session_keys = sc.derive_session_keys(
+                dh1, dh2_sess, dh.dh3,
+                caller_eph_pub_can, resp_eph_pub_can,
+            )
+            K = args.rlnc_k
+            if args.payload:
+                with open(args.payload, "rb") as _f:
+                    payload = _f.read()
+            else:
+                payload = (
+                    b"SISL RLNC fountain code over DSSS steganographic link "
+                    b"-- hackathon demo payload v1"
+                )
+            session = RLNCSession(payload, K, session_keys)
+            n_sym_bytes = len(session.next_tx_frame())
+            # Rebuild session (next_tx_frame advanced comb_id, reset)
+            session = RLNCSession(payload, K, session_keys)
+
+            print(f"\n  phase 3: \033[33mRLNC payload TX\033[0m  "
+                  f"K={K}, payload={len(payload)}B, symbol={n_sym_bytes}B")
+
+            # TX symbols continuously until responder ACKs.
+            # Each encoded symbol is FEC+DSSS framed and burst-transmitted.
+            n_fec_bits = sc.payload_fec_total_bits(n_sym_bytes)
+            rlnc_ack_received = False
+            MAX_RLNC_ROUNDS = K * 4
+            for rlnc_round in range(MAX_RLNC_ROUNDS):
+                frame_bytes = session.next_tx_frame()
+                sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
+                sym_chips = sf.tx_bits_to_chips(sym_bits)
+                sym_samples = upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP)
+                print(f"  TX symbol {rlnc_round} "
+                      f"({n_fec_bits} bits, {len(sym_chips)} chips)...",
+                      end="", flush=True)
+                soapy_tx_burst(
+                    sym_samples, center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=3,
+                    device_str=tx_device_str,
+                )
+                print(" done")
+
+            # RX phase: listen for payload ACK (RLNC decode confirmation)
+            print(f"\n  phase 3 RX: listening for payload ACK...")
+            prk = sc.derive_session_prk(session_keys)
+            rx_key = session_keys["p2p_rx_key"]
+            sess_id = session_keys["session_id"]
+
+            def _payload_ack_fn(block_data):
+                from sisl_payload import decode_ack as decode_payload_ack
+                res = sisl_rx.decode_one_payload_in_block(
+                    block_data, 48,  # 48B = RLNC payload ACK frame
+                    samps_per_chip=2,
+                    samp_hz=chip_rate_hz * 2,
+                    signal_threshold=args.signal_threshold,
+                )
+                if res.get("status") == "decrypt_ok":
+                    raw = res["payload_frame_bytes"]
+                    ok = decode_payload_ack(raw, payload, rx_key, prk, sess_id)
+                    if ok:
+                        return {"status": "decrypt_ok", "decoded_hail": True}
+                return res
+
+            rlnc_ack_stats = live_rx_decode(
+                duration_s=30.0,
+                block_seconds=5.36,
+                lna_db=args.rx_lna,
+                vga_db=args.rx_vga,
+                amp_on=args.rx_amp,
+                center_hz=center_hz,
+                device_name=args.device,
+                signal_threshold=args.signal_threshold,
+                samps_per_chip=active_samps_per_chip,
+                exit_on_decrypt=True,
+                decode_fn=_payload_ack_fn,
+            )
+            if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
+                print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
+                return 0
+            print(f"  payload ACK not received (decode may have succeeded at responder)")
             return 0
 
         print(f"\n  timeout — no ACK received")
