@@ -170,3 +170,14 @@ def test_decoder_add_symbol_returns_complete():
             completed = True
             break
     assert completed
+
+
+def test_decoder_k_minus_one_insufficient():
+    K = 16
+    payload = bytes(range(128))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    for comb_id in range(K - 1):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        dec.add_symbol(comb_id, sym)
+    assert dec.decode() is None

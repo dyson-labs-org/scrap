@@ -98,3 +98,21 @@ def test_frame_sizes(session):
     assert len(frame) == 4 + len(data) + 16
     ack = encode_ack(b"payload", keys["p2p_rx_key"], prk, keys["session_id"])
     assert len(ack) == 48
+
+
+def test_prk_key_order_sensitivity():
+    keys = _make_session_keys()
+    prk_normal = derive_session_prk(keys)
+    swapped = dict(keys)
+    swapped["p2p_tx_key"], swapped["p2p_rx_key"] = keys["p2p_rx_key"], keys["p2p_tx_key"]
+    prk_swapped = derive_session_prk(swapped)
+    assert prk_normal != prk_swapped
+
+
+def test_decode_ack_cross_session_replay(session):
+    keys, prk = session
+    payload = b"secret message"
+    ack_frame = encode_ack(payload, keys["p2p_rx_key"], prk, keys["session_id"])
+    different_session_id = bytes(b ^ 0xFF for b in keys["session_id"])
+    result = decode_ack(ack_frame, payload, keys["p2p_rx_key"], prk, different_session_id)
+    assert not result
