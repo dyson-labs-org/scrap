@@ -32,7 +32,7 @@ import numpy as np
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 import sisl_fec
 import sisl_framer as sf  # for differential_encode_bits used in encode_hail_fec
@@ -773,13 +773,17 @@ def derive_session_prk(session_keys: dict) -> bytes:
     return hkdf_sha256(ikm, b"SISL-RLNC-v1", b"", 32)
 
 
+def _hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
+    return HKDFExpand(algorithm=hashes.SHA256(), length=length, info=info).derive(prk)
+
+
 def derive_payload_iv(session_prk: bytes, comb_id: int) -> bytes:
-    return hkdf_sha256(session_prk, b"", b"sisl-payload-iv" + comb_id.to_bytes(4, 'big'), 12)
+    return _hkdf_expand(session_prk, b"sisl-payload-iv" + comb_id.to_bytes(4, 'big'), 12)
 
 
 def derive_coef_stream(session_prk: bytes, comb_id: int, length: int) -> bytes:
-    return hkdf_sha256(session_prk, b"", b"sisl-rlnc-coef" + comb_id.to_bytes(4, 'big'), length)
+    return _hkdf_expand(session_prk, b"sisl-rlnc-coef" + comb_id.to_bytes(4, 'big'), length)
 
 
 def derive_rlnc_ack_iv(session_prk: bytes) -> bytes:
-    return hkdf_sha256(session_prk, b"", b"sisl-ack-iv", 12)
+    return _hkdf_expand(session_prk, b"sisl-ack-iv", 12)

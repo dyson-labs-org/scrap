@@ -49,21 +49,20 @@ def sample_coefficients(
     c: float = 0.1,
     delta: float = 0.5,
 ) -> list[int]:
-    length = 4 + 4 * K
-    stream = derive_coef_stream(session_prk, comb_id, length)
+    stream = derive_coef_stream(session_prk, comb_id, 2 + 4 * K)
 
     cdf = robust_soliton_cdf(K, c, delta)
     u = int.from_bytes(stream[0:2], 'big') / 65536.0
     d = sample_degree(cdf, u)
 
-    indices = []
+    indices: list[int] = []
     pos = 2
-    while len(indices) < d:
-        if pos >= len(stream):
-            stream = derive_coef_stream(session_prk, comb_id, pos + 4 * K)
-        byte_val = stream[pos]
+    attempts = 0
+    max_attempts = 4 * K
+    while len(indices) < d and attempts < max_attempts:
+        idx = stream[pos % len(stream)] % K
         pos += 1
-        idx = byte_val % K
+        attempts += 1
         if idx not in indices:
             indices.append(idx)
 
