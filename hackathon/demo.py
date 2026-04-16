@@ -765,6 +765,9 @@ class _AgcPpmState:
         # signal. After PPM calibration the real signal should be within
         # ±50 kHz; a 100 kHz gate prevents spur-locked estimates from
         # corrupting the median and causing runaway AUTO-PPM drift.
+        # NOTE: at 5+ GHz the inter-device PPM spread (~35 PPM = 183 kHz)
+        # exceeds this gate. Fix: pass --ppm to pre-correct the larger
+        # of the two device offsets before running at 5 GHz.
         MAX_FOFF_HZ = 100_000.0
         if foff is not None and abs(foff) > 0 and abs(foff) <= MAX_FOFF_HZ:
             self._offset_history.append(foff)
