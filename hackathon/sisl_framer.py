@@ -468,11 +468,22 @@ def decode_with_freq_tracking(
     lock_threshold_frac: float = 0.1,
     freq_offset_rad_per_sample: float | None = None,
     precomputed_corr: np.ndarray | None = None,
+    start_pos: int | None = None,
+    peak_hint: float | None = None,
 ) -> dict | None:
     """Full-stack decoder: R[1] freq correction → complex MF → symbol tracking.
 
     Returns dict with bytes, positions, rad_per_sample, peak_magnitude,
     ref_angle_rad, drift_per_symbol_rad, peak_values, etc. or None on failure.
+
+    start_pos: optional sample index into the MF output to begin tracking.
+    When provided, the tracker starts near this position rather than the global
+    MF peak.  Useful when the global peak is a WiFi/BT spike that is not
+    phase-aligned with the DSSS periodic peaks.
+
+    peak_hint: optional expected DSSS peak magnitude.  When provided, used
+    instead of mag[start_pos] to compute lock_floor.  Required when start_pos
+    is the true DSSS phase but the MF amplitude there is spike-inflated.
     """
     if code is None:
         code = DEFAULT_PUBLIC_CODE
@@ -508,17 +519,27 @@ def decode_with_freq_tracking(
         return None
 
     # ── 3. Find first peak and its reference phase ────────────────────
-    high_threshold = 0.9 * global_peak
-    first_candidate = int(np.argmax(mag >= high_threshold))
-    if mag[first_candidate] < high_threshold:
-        return None
+    if start_pos is not None:
+        # Caller pre-computed the DSSS chip phase; find the highest peak
+        # within one search window of start_pos.  Avoids being misled by a
+        # WiFi/BT spike that happens to be the global max but is not
+        # phase-aligned with the periodic DSSS peaks.
+        first_candidate = int(np.clip(start_pos, 0, len(mag) - 1))
+    else:
+        high_threshold = 0.9 * global_peak
+        first_candidate = int(np.argmax(mag >= high_threshold))
+        if mag[first_candidate] < high_threshold:
+            return None
     lo = max(0, first_candidate - search_half_samples)
     hi = min(len(mag), first_candidate + search_half_samples + 1)
     local_idx = int(np.argmax(mag[lo:hi]))
     pos = lo + local_idx
-    initial_peak = float(mag[pos])
+    initial_peak = float(peak_hint if peak_hint is not None else mag[pos])
     # Lock floor: max(2× median noise, softened fraction of initial peak).
     # Re-anchored on median of first BOOTSTRAP peaks below.
+    # When peak_hint is supplied the caller has pre-computed the true DSSS
+    # peak amplitude (e.g. from the periodic phase average), preventing a
+    # WiFi/BT spike at mag[pos] from inflating lock_floor above the DSSS level.
     median_mag = float(np.median(mag))
     length_softening = max(1.0, float(np.sqrt(n_bits / 256.0)))
     lock_floor = max(

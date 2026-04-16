@@ -290,12 +290,22 @@ def _acquire_and_track(
             "freq_offset_hz": freq_hz,
         }
 
-    first_peak_pos = int(np.argmax(mag))
     samples_per_symbol = sf.CHIPS_PER_SYMBOL * samps_per_chip
+
+    # Chip-phase estimation: average MF magnitude at each phase offset
+    # across the whole block.  A WiFi/BT spike dominates argmax(mag) but
+    # is non-periodic, so the column mean of the reshaped magnitude array
+    # suppresses it and peaks at the true DSSS chip phase.
+    n_full = (len(mag) // samples_per_symbol) * samples_per_symbol
+    phase_avgs = mag[:n_full].reshape(-1, samples_per_symbol).mean(axis=0)
+    chip_phase = int(np.argmax(phase_avgs))
+    chip_phase_peak = float(phase_avgs[chip_phase])
+
+    # Periodicity check using chip-phase aligned peaks (not spike-biased argmax).
     search_half = samples_per_symbol // 4
     test_peaks: list[float] = []
     for k in range(16):
-        pos_k = first_peak_pos + k * samples_per_symbol
+        pos_k = chip_phase + k * samples_per_symbol
         if pos_k + search_half >= len(mag):
             break
         lo = max(0, pos_k - search_half)
@@ -329,6 +339,8 @@ def _acquire_and_track(
         n_bytes=target_bytes,
         freq_offset_rad_per_sample=rad_per_sample,
         precomputed_corr=corr_c,
+        start_pos=chip_phase,
+        peak_hint=chip_phase_peak,
     )
     if track_result is None:
         fallback_bytes = (fec_total_bits + 7) // 8
@@ -338,6 +350,8 @@ def _acquire_and_track(
             n_bytes=fallback_bytes,
             freq_offset_rad_per_sample=rad_per_sample,
             precomputed_corr=corr_c,
+            start_pos=chip_phase,
+            peak_hint=chip_phase_peak,
         )
         if track_result is None:
             return {
@@ -713,21 +727,21 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
               f"peak={pk:.3g}  {snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={pol}  "
-              f"{detail}{_RESET}")
+              f"{detail}{_RESET}", flush=True)
     elif s == "decrypt_fail":
         print(f"[{block_num:4d}] FRAME FOUND  "
               f"asm@{result.get('asm_at_byte', '?')}  "
               f"{snr_str}  "
               f"\u0394f={foff:+.0f}Hz  "
               f"pol={result.get('polarity', '?')}  "
-              f"\u2014 DECRYPT FAILED")
+              f"\u2014 DECRYPT FAILED", flush=True)
     elif s == "track_lost":
         p = result.get("peak_mag", 0)
         m = result.get("median_mag", 0)
         r = p / m if m > 0 else float("inf")
         print(f"[{block_num:4d}] TRACK LOST: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"\u0394f={foff:+.0f}Hz")
+              f"\u0394f={foff:+.0f}Hz", flush=True)
     elif quiet:
         return
     elif s == "no_signal":
@@ -743,9 +757,9 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
                 extra += f" ({note})"
         print(f"[{block_num:4d}] no signal: "
               f"peak={p:.3g}, median={m:.3g}, ratio={r:.1f}, "
-              f"\u0394f={foff:+.0f}Hz{extra}")
+              f"\u0394f={foff:+.0f}Hz{extra}", flush=True)
     elif s == "short_block":
-        print(f"[{block_num:4d}] short block (processing gap)")
+        print(f"[{block_num:4d}] short block (processing gap)", flush=True)
 
 
 _PAYLOAD_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_PAYLOAD])
@@ -828,3 +842,175 @@ def decode_one_payload_in_block(
         "soft_score": best_score,
         **base,
     }
+
+
+def decode_all_payload_in_block(
+    samples: np.ndarray,
+    n_payload_bytes: int,
+    samps_per_chip: int = 2,
+    samp_hz: float = 2_000_000.0,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    max_symbols_per_block: int = 8,
+    freq_offset_hz: float | None = None,
+) -> list[dict]:
+    """Process one block and decode every RLNC payload symbol found in it.
+
+    Unlike decode_one_payload_in_block, this function bypasses the
+    _acquire_and_track periodicity gate (which was designed for repeated hail
+    frames and rejects continuous unique-symbol streams).  Instead it does a
+    direct MF + sliding ASM correlator over the full block.
+
+    Each symbol boundary is identified by the fixed 48-bit header
+    (ASM + SISL_VERSION + MSG_PAYLOAD) that encode_payload_symbol_fec
+    prepends to every coded symbol — no additional sync markers required.
+
+    freq_offset_hz: pre-seeded carrier offset (Hz) from the hail/ACK decode.
+    When provided, frequency correction uses this value instead of estimating
+    it from the block.  Recommended when disable_auto_ppm=True so the estimate
+    matches the actual signal frequency.
+
+    Returns a list of result dicts (one per found symbol).  Empty list if
+    no signal or no ASM candidates pass the score gate.  Callers must call
+    sisl_payload.decode_payload_symbol() to AEAD-verify each result.
+    """
+    n_fec_bits = sc.payload_fec_total_bits(n_payload_bytes)
+
+    if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 4:
+        return [{"status": "short_block", "peak_mag": 0.0, "median_mag": 0.0}]
+
+    # ── 1. Frequency correction ───────────────────────────────────────────
+    samples = (samples - samples.mean()).astype(np.complex64)
+    if freq_offset_hz is not None:
+        rad_per_sample = float(freq_offset_hz) * 2.0 * np.pi / samp_hz
+    else:
+        rad_per_sample = sf._estimate_freq_fft_squared(samples)
+    freq_hz = rad_per_sample * samp_hz / (2.0 * np.pi)
+    samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
+
+    # ── 2. Matched filter ─────────────────────────────────────────────────
+    corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
+    if len(corr_c) == 0:
+        return [{"status": "short_block", "peak_mag": 0.0, "median_mag": 0.0}]
+
+    mag = np.abs(corr_c).astype(np.float32)
+    peak_mag = float(mag.max())
+    median_mag = float(np.median(mag))
+
+    # ── 3. Cheap signal-presence gate (peak/median ratio) ────────────────
+    # DSSS MF output peaks once per PN period (~1 ms = 2046 samples at
+    # 2 Msps), so the peaks occupy <0.1% of all samples.  The p95 of the
+    # magnitude always falls at the noise floor regardless of signal
+    # presence.  Use peak/median instead.  WiFi spikes that lift peak/median
+    # without a real DSSS signal will be rejected by find_sisl_frame_soft_topk
+    # (the 31-bit ASM correlator score gate) and the FEC/Poly1305 check.
+    if peak_mag == 0 or peak_mag < signal_threshold * median_mag:
+        return [{"status": "no_signal", "peak_mag": peak_mag,
+                 "median_mag": median_mag, "freq_offset_hz": freq_hz}]
+
+    base = {
+        "peak_mag": peak_mag,
+        "median_mag": median_mag,
+        "rad_per_sample": rad_per_sample,
+        "freq_offset_hz": freq_hz,
+    }
+
+    samps_per_symbol = sf.CHIPS_PER_SYMBOL * samps_per_chip
+    if len(corr_c) < n_fec_bits * samps_per_symbol:
+        return [{**base, "status": "short_block"}]
+
+    # ── 4. Symbol-rate tracking (handles TX/RX clock mismatch) ───────────
+    # Simple static decimation (corr_c[phase::samps_per_symbol]) fails
+    # because the TX and RX HackRF clocks differ by up to ±30 ppm.
+    # Over 640 symbols (one RLNC frame) that's ~77 samples of drift —
+    # enough to miss the 2-sample-wide MF peak entirely by mid-frame.
+    #
+    # decode_with_freq_tracking tracks the MF peak per-symbol, handling
+    # this drift.  We set n_bytes to cover the full block so we get
+    # symbol-rate peak_values for every PN period in the block.
+    # We bypass only the periodicity check (which rejects unique symbols).
+    # Leave one symbol of margin so the tracking loop does not run off
+    # the end of the buffer.  decode_with_freq_tracking returns None (not
+    # break) when lo > hi, so an over-run discards all collected data.
+    n_block_symbols = max(1, (len(corr_c) - samps_per_symbol) // samps_per_symbol)
+    n_track_bytes = n_block_symbols // 8  # floor: n_bits = n_track_bytes*8 ≤ n_block_symbols
+    if n_track_bytes < 1:
+        return [{**base, "status": "short_block"}]
+
+    # ── 4a. DSSS chip-phase estimation ───────────────────────────────────
+    # The global MF peak may be a WiFi/BT spike that is not phase-aligned
+    # with the periodic DSSS peaks (every samps_per_symbol samples).
+    # Average the MF magnitude at each phase offset across the whole block.
+    # This exploits the periodicity of DSSS to identify the true chip phase
+    # and suppress non-periodic spikes (WiFi/BT).
+    n_full = (len(mag) // samps_per_symbol) * samps_per_symbol
+    phase_avgs = mag[:n_full].reshape(-1, samps_per_symbol).mean(axis=0)
+    chip_phase = int(np.argmax(phase_avgs))
+
+    import sys as _sys3
+    print(f"  [DBG] decode_all: n_block_sym={n_block_symbols} n_track_bytes={n_track_bytes} corr_len={len(corr_c)} peak={peak_mag:.0f} chip_phase={chip_phase}", file=_sys3.stderr, flush=True)
+    track = sf.decode_with_freq_tracking(
+        samples_corr, samps_per_chip,
+        n_bytes=n_track_bytes,
+        freq_offset_rad_per_sample=0.0,   # already applied above
+        precomputed_corr=corr_c,
+        start_pos=chip_phase,
+        peak_hint=float(phase_avgs[chip_phase]),  # avg DSSS peak, not spike
+    )
+    print(f"  [DBG] decode_all: track={'None' if track is None else len(track.get('peak_values',[]))}", file=_sys3.stderr, flush=True)
+    if track is None:
+        return [{**base, "status": "track_lost"}]
+    peak_values = track["peak_values"]
+    print(f"  [DBG] decode_all: peak_values={len(peak_values)} n_fec_bits={n_fec_bits}", file=_sys3.stderr, flush=True)
+
+    # ── 5. Sliding ASM search across full block ───────────────────────────
+    frame_len_bytes = n_payload_bytes + sc.PAYLOAD_HEADER_LEN
+    topk = find_sisl_frame_soft_topk(
+        peak_values, frame_len_bytes,
+        k=max_symbols_per_block,
+        min_separation=n_fec_bits // 2,
+    )
+
+    results = []
+    for cand_offset, cand_score, _ in topk:
+        if abs(cand_score) <= 5.0:
+            continue
+        if cand_offset + n_fec_bits > len(peak_values):
+            continue
+
+        aligned = peak_values[int(cand_offset):]
+        if len(aligned) < n_fec_bits:
+            continue
+
+        dbpsk = sf.dbpsk_decode_from_pilot(aligned, _PAYLOAD_PILOT_BITS, n_fec_bits)
+        if dbpsk is None:
+            continue
+
+        _, fec_soft, theta0, delta_theta, rms_res = dbpsk
+        import sys as _sys4
+        print(f"  [DBG] cand={cand_offset} score={cand_score:.1f} "
+              f"theta0={theta0:.3f} dtheta={delta_theta:.2e} rms={rms_res:.3f} "
+              f"llr_mean={fec_soft.mean():.1f} llr_std={fec_soft.std():.1f} "
+              f"llr_absmax={np.abs(fec_soft).max():.1f} "
+              f"fec_soft[:8]={fec_soft[:8].tolist()}",
+              file=_sys4.stderr, flush=True)
+        for polarity in (1.0, -1.0):
+            raw = sc.decode_payload_symbol_fec_from_llrs(
+                polarity * fec_soft, n_payload_bytes,
+            )
+            if raw is not None and len(raw) == n_payload_bytes:
+                import struct as _struct
+                comb_id_guess = _struct.unpack(">I", raw[:4])[0]
+                print(f"  [DBG] pol={polarity:+.0f} comb_id_guess={comb_id_guess} raw[:8]={raw[:8].hex()}",
+                      file=_sys4.stderr, flush=True)
+                results.append({
+                    "status": "decrypt_ok",
+                    "payload_frame_bytes": raw,
+                    "asm_at_byte": f"soft-bit{int(cand_offset)}",
+                    "soft_score": float(cand_score),
+                    **base,
+                })
+                break
+
+    if not results:
+        return [{**base, "status": "decrypt_fail"}]
+    return results

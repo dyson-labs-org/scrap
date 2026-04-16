@@ -47,6 +47,7 @@ import os
 import platform
 import sys
 import time
+from typing import Any
 from types import SimpleNamespace
 
 import numpy as np
@@ -260,6 +261,118 @@ def upsample_chips_to_samples(chips: np.ndarray,
     return rep.astype(np.complex64)
 
 
+# ── SoapySDR persistent device handle ───────────────────────────────────────
+
+class SoapyDevice:
+    """Context manager for a persistent SoapySDR device handle.
+
+    Opens the device once, applies PPM calibration to center_hz, and
+    exposes the corrected frequency as ``center_hz``.  The device is closed
+    only in ``__exit__`` / ``close()``.  All stream open/close cycles
+    (setupStream … closeStream) are left to callers; this class manages only
+    the device lifetime.
+
+    Usage::
+
+        with SoapyDevice("hackrf", center_hz=2437e6) as sdr:
+            live_rx_decode(..., device=sdr.device, center_hz=sdr.center_hz)
+            soapy_tx_burst(..., device=sdr.device, center_hz=sdr.center_hz)
+    """
+
+    def __init__(
+        self,
+        device_name: str = "hackrf",
+        center_hz: float = CENTER_FREQ_HZ,
+        device_str: str | None = None,
+        open_attempts: int = 10,
+    ) -> None:
+        import SoapySDR as _SoapySDR
+        self._SoapySDR = _SoapySDR
+        if device_name not in DEVICES:
+            raise ValueError(
+                f"unknown device {device_name!r}; choices: {list(DEVICES.keys())}")
+        self.device_name = device_name
+        info = DEVICES[device_name]
+        if device_str is None:
+            device_str = info.driver
+        self._device_str = device_str
+        self._info = info
+
+        self.device: Any = None
+        for attempt in range(open_attempts):
+            try:
+                self.device = _SoapySDR.Device(device_str)
+                break
+            except RuntimeError:
+                if attempt == open_attempts - 1:
+                    raise
+                time.sleep(3.0)
+
+        serial = self._read_serial()
+        self.serial = serial
+        cal_ppm = _get_device_ppm(serial)
+        self._cal_ppm = cal_ppm
+        if cal_ppm != 0.0:
+            ppm_offset_hz = center_hz * cal_ppm / 1e6
+            center_hz += ppm_offset_hz
+            short_serial = serial.lstrip("0") or serial
+            print(f"  PPM cal: device {short_serial} → {cal_ppm:+.1f} ppm "
+                  f"({ppm_offset_hz:+.0f} Hz)")
+        self.center_hz: float = center_hz  # PPM-corrected; use this in all calls.
+
+    def _read_serial(self) -> str:
+        serial = ""
+        try:
+            hw_dict = dict(self.device.getHardwareInfo())
+            serial = hw_dict.get("serial", "")
+        except Exception:
+            pass
+        if not serial:
+            try:
+                found = self._SoapySDR.Device.enumerate(self._device_str)
+                if found:
+                    serial = str(dict(found[0]).get("serial", ""))
+            except Exception:
+                pass
+        return serial
+
+    def close(self) -> None:
+        dev = self.device
+        if dev is not None:
+            self.device = None  # type: ignore[assignment]
+            try:
+                dev.close()
+            except Exception:
+                pass
+
+    def reopen(self) -> None:
+        """Close and reopen the device handle.
+
+        Workaround for hackrf#1570: deactivateStream does not reliably
+        cancel in-flight USB transfers, leaving reader threads blocked in
+        readStream indefinitely.  Closing the device terminates all USB
+        transfers immediately (libusb cancels them), which unblocks any
+        stuck reader thread.  After the reader exits, a fresh handle is
+        opened for the next phase.
+        """
+        self.close()
+        time.sleep(0.3)  # brief pause for USB to settle after libusb teardown
+        for attempt in range(10):
+            try:
+                self.device = self._SoapySDR.Device(self._device_str)
+                return
+            except RuntimeError:
+                if attempt == 9:
+                    raise
+                time.sleep(3.0)
+
+    def __enter__(self) -> "SoapyDevice":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+
 # ── SoapySDR TX burst (for ACK, no GnuRadio) ────────────────────────────────
 
 def soapy_tx_burst(
@@ -270,40 +383,87 @@ def soapy_tx_burst(
     tx_amp_on: bool = HACKRF_TX_AMP_ON,
     repeats: int = 1,
     device_str: str = "driver=hackrf",
+    device=None,
 ) -> None:
     """Transmit a finite sample buffer via SoapySDR (no GnuRadio).
 
-    Opens a HackRF for TX, writes the samples `repeats` times, then
-    closes. Used for ACK transmission in the listen-after-talk handshake.
+    If `device` is provided (a pre-opened SoapySDR.Device), it is used
+    directly and NOT closed on return — the caller owns its lifetime.
+    Otherwise a device is opened via `device_str`, used, and closed.
     """
     import SoapySDR
     from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
 
-    device = SoapySDR.Device(device_str)
+    _owns_device = device is None
+    if _owns_device:
+        for _open_attempt in range(10):
+            try:
+                device = SoapySDR.Device(device_str)
+                break
+            except RuntimeError:
+                if _open_attempt == 9:
+                    raise
+                import time as _time_tx
+                _time_tx.sleep(3.0)
+    assert device is not None
     device.setSampleRate(SOAPY_SDR_TX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_TX, 0, center_hz)
     device.setGain(SOAPY_SDR_TX, 0, "VGA", float(tx_vga_db))
     device.setGain(SOAPY_SDR_TX, 0, "AMP", 14.0 if tx_amp_on else 0.0)
 
+    import time as _time_tx2, sys as _sys_tx
+    t_setup = _time_tx2.time()
     stream = device.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CF32)
+    print(f"  [DBG tx] setupStream {_time_tx2.time()-t_setup:.2f}s", file=_sys_tx.stderr, flush=True)
+    t_act = _time_tx2.time()
     device.activateStream(stream)
+    print(f"  [DBG tx] activateStream {_time_tx2.time()-t_act:.2f}s", file=_sys_tx.stderr, flush=True)
 
     full = np.tile(samples, repeats) if repeats > 1 else samples
     offset = 0
     chunk = 65536
-    while offset < len(full):
-        end = min(offset + chunk, len(full))
+    last_end = len(full)
+    t_write = _time_tx2.time()
+    _chk = last_end // 6
+    while offset < last_end:
+        end = min(offset + chunk, last_end)
+        is_last = (end == last_end)
+        flags = SoapySDR.SOAPY_SDR_END_BURST if is_last else 0
         sr = device.writeStream(stream, [full[offset:end]], end - offset,
-                                timeoutUs=1_000_000)
+                                flags, timeoutUs=1_000_000)
         if sr.ret > 0:
             offset += sr.ret
-        elif sr.ret == -1:  # timeout
+            if offset >= _chk:
+                print(f"  [DBG tx] {offset/8e6:.0f}s written in {_time_tx2.time()-t_write:.1f}s", file=_sys_tx.stderr, flush=True)
+                _chk += last_end // 6
+        elif sr.ret == SoapySDR.SOAPY_SDR_TIMEOUT:
             continue
         else:
             break
+    print(f"  [DBG tx] loop done {_time_tx2.time()-t_write:.2f}s", file=_sys_tx.stderr, flush=True)
 
-    device.deactivateStream(stream)
-    device.closeStream(stream)
+    # Drain USB TX FIFO before deactivating.
+    # hackrf#1570: deactivateStream → hackrf_stop_tx → pthread_join hangs on
+    # Linux when a USB bulk transfer is still in-flight.  The fix is to wait
+    # for the FIFO to drain naturally: HackRF's TX FIFO is ≤ 131072 samples;
+    # at 8 Msps that's ≤ 16 ms.  We sleep 300 ms to be safe.  Once the FIFO
+    # is empty the USB transfer thread exits on its own, and pthread_join in
+    # deactivateStream returns immediately.
+    _time_tx2.sleep(0.3)
+    t_deact = _time_tx2.time()
+    try:
+        device.deactivateStream(stream)
+    except Exception:
+        pass
+    print(f"  [DBG tx] deactivateStream {_time_tx2.time()-t_deact:.3f}s", file=_sys_tx.stderr, flush=True)
+    t_cs = _time_tx2.time()
+    try:
+        device.closeStream(stream)
+    except Exception:
+        pass
+    print(f"  [DBG tx] closeStream {_time_tx2.time()-t_cs:.3f}s", file=_sys_tx.stderr, flush=True)
+    if _owns_device:
+        device.close()
 
 
 # ── GR top-block ────────────────────────────────────────────────────────────
@@ -459,7 +619,7 @@ def _usb_reader_thread(
             want = min(read_chunk, remain) if read_chunk else remain
             sr = device.readStream(
                 stream, [local_buf[filled:filled + want]],
-                want, timeoutUs=500_000,
+                want, timeoutUs=50_000,
             )
             if sr.ret > 0:
                 filled += sr.ret
@@ -496,36 +656,70 @@ class _AgcPpmState:
     AGC_MAX_PEAK = 400.0
 
     def __init__(self, device_name: str, device, center_hz: float,
-                 vga_db: float, lna_db: float):
+                 vga_db: float, lna_db: float,
+                 initial_vga_db: float | None = None,
+                 disable_auto_ppm: bool = False):
         self._device_name = device_name
         self._device = device
         self._center_hz = float(center_hz)
         self._nominal_center_hz = float(center_hz)
         self._total_correction_hz = 0.0
-        self._settled = False
         self._last_recal_t = time.time()
         self._offset_history: collections.deque[float] = collections.deque(maxlen=8)
-        # Suppress PPM updates for the first few blocks while the AGC
-        # stabilizes. At startup the gain may be wildly wrong (too low
-        # → weak signal → FFT locks onto spurs → PPM diverges; too high
-        # → ADC clips → corrupted freq estimates → PPM diverges). Let
-        # AGC settle for AGC_WARMUP_BLOCKS before enabling auto-PPM.
-        self._agc_warmup_blocks = 3
-        self._blocks_seen = 0
-        self._agc_stable = False  # True once gain hasn't changed for 1 block
-        self._clip_count = 0     # consecutive clipping blocks
+        self._disable_auto_ppm = disable_auto_ppm
 
         if device_name == "hackrf":
-            self._current_vga = float(vga_db)
             self._vga_min, self._vga_max = 0.0, 62.0
         else:
-            self._current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
             self._vga_min, self._vga_max = 0.0, 49.0
+
+        if initial_vga_db is not None:
+            # Pre-seeded from a prior converged RX session — freeze VGA.
+            # After the hail decodes we know the exact received signal level;
+            # _converged_vga is adjusted to place our signal at AGC_TARGET.
+            # Both p99 and peak-based AGC are frozen: at 2.4 GHz, WiFi
+            # saturates the ADC (p99 > 0.9) and drives the peak-based AGC
+            # into continuous walk-down even though DSSS correlation is fine
+            # (30 dB processing gain rejects narrowband interference).
+            # Locking VGA prevents this feedback loop from destroying the gain.
+            self._current_vga = float(initial_vga_db)
+            self._agc_warmup_blocks = 0
+            self._blocks_seen = 0
+            self._agc_stable = True
+            self._settled = True
+            self._clip_count = 0
+            self._disable_clip_agc = True
+            self._freeze_vga = True
+        else:
+            # Cold start: AGC walks from the requested starting gain.
+            # Suppress PPM updates for the first few blocks while the AGC
+            # stabilizes. At startup the gain may be wildly wrong (too low
+            # → weak signal → FFT locks onto spurs → PPM diverges; too high
+            # → ADC clips → corrupted freq estimates → PPM diverges). Let
+            # AGC settle for AGC_WARMUP_BLOCKS before enabling auto-PPM.
+            if device_name == "hackrf":
+                self._current_vga = float(vga_db)
+            else:
+                self._current_vga = max(0.0, min(49.0, float(lna_db + vga_db)))
+            self._agc_warmup_blocks = 3
+            self._blocks_seen = 0
+            self._agc_stable = False
+            self._settled = False
+            self._clip_count = 0
+            self._disable_clip_agc = False
+            self._freeze_vga = False
+
         self._prev_vga = self._current_vga
         # Ceiling starts at max; lowered by ADC saturation detection.
-        # The proportional AGC respects this ceiling so it can't ramp
-        # back into the clipping zone.
         self._vga_ceiling = self._vga_max
+
+    @property
+    def final_vga_db(self) -> float:
+        return self._current_vga
+
+    @property
+    def final_center_hz(self) -> float:
+        return self._center_hz
 
     def _set_rx_vga(self, gain: float) -> None:
         from SoapySDR import SOAPY_SDR_RX
@@ -534,20 +728,26 @@ class _AgcPpmState:
         else:
             self._device.setGain(SOAPY_SDR_RX, 0, gain)
 
-    def on_block(self, result: dict, block_data: np.ndarray) -> None:
-        """Run AGC and PPM updates after decoding one block."""
+    def on_block(self, result: dict) -> None:
+        """Run AGC and PPM updates after decoding one block.
+
+        result must contain "sample_p99" (computed by the decode worker
+        before calling decode_fn so the raw block array is not needed here).
+        """
         self._blocks_seen += 1
         # AGC runs every block. PPM is suppressed until the AGC has
         # stabilized (gain unchanged for 1 block after warmup period).
         # This prevents the frequency estimator from chasing spurs
         # while the signal level is still changing.
-        self._update_agc(result, block_data)
+        self._update_agc(result)
+        if self._disable_auto_ppm:
+            return
         gain_changed = (self._current_vga != self._prev_vga)
         self._prev_vga = self._current_vga
         if not self._agc_stable:
             if self._blocks_seen >= self._agc_warmup_blocks and not gain_changed:
                 self._agc_stable = True
-                print("       AGC stable — enabling auto-PPM")
+                print("       AGC stable — static PPM cal (no auto-PPM)")
         if self._agc_stable:
             self._update_ppm(result)
 
@@ -561,7 +761,12 @@ class _AgcPpmState:
             return
         foff = result.get("freq_offset_hz")
         now = time.time()
-        if foff is not None and abs(foff) > 0:
+        # Ignore extreme offsets (> 100 kHz) — these are spurs, not the
+        # signal. After PPM calibration the real signal should be within
+        # ±50 kHz; a 100 kHz gate prevents spur-locked estimates from
+        # corrupting the median and causing runaway AUTO-PPM drift.
+        MAX_FOFF_HZ = 100_000.0
+        if foff is not None and abs(foff) > 0 and abs(foff) <= MAX_FOFF_HZ:
             self._offset_history.append(foff)
             do_retune = False
             if not self._settled:
@@ -584,9 +789,12 @@ class _AgcPpmState:
                 if abs(correction) < self.SETTLED_THRESHOLD_HZ:
                     self._settled = True
 
-    def _update_agc(self, result: dict, block_data: np.ndarray) -> None:
-        sample_p99 = float(np.percentile(np.abs(block_data), 99))
-        if sample_p99 > 0.9 and self._current_vga > self._vga_min:
+    def _update_agc(self, result: dict) -> None:
+        if self._freeze_vga:
+            return
+        sample_p99 = float(result.get("sample_p99", 0.0))
+        if (not self._disable_clip_agc
+                and sample_p99 > 0.9 and self._current_vga > self._vga_min):
             self._clip_count += 1
             # Only set the ceiling after 2 consecutive clipping blocks.
             # A single WiFi burst at 2.4 GHz can spike p99 > 0.9 for one
@@ -638,8 +846,20 @@ def live_rx_decode(
     samps_per_chip: int | None = None,
     exit_on_decrypt: bool = False,
     decode_fn=None,
+    device=None,
+    initial_vga_db: float | None = None,
+    disable_auto_ppm: bool = False,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
+
+    If `device` is a pre-opened SoapySDR.Device it is used directly —
+    the caller is responsible for configuring sample rate, frequency, and
+    initial gain before calling, and for closing the device afterward.
+    The stats dict includes ``final_vga_db`` and ``final_center_hz`` so
+    the caller can pre-seed the next phase (optimizations B and C).
+
+    `initial_vga_db`: skip AGC warmup, start at this VGA gain (dB).
+    `disable_auto_ppm`: skip auto-PPM updates; use static cal only (C).
 
     `device_name` ∈ DEVICES.keys(). HackRF uses three gain stages
     (AMP/LNA/VGA); RTL-SDR has a single tuner gain, so when device_name
@@ -698,60 +918,90 @@ def live_rx_decode(
     # Clamp to device limits
     samp_hz = max(2_000_000, min(info.samp_hz, samp_hz))
 
-    print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
-          f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
-          f"(processing ~{int(block_seconds*samp_hz*8/1e6)} MB/block, "
-          f"{samps_per_chip} samples/chip)")
-
-    try:
-        device = SoapySDR.Device(info.driver)
-    except RuntimeError as e:
-        return {
-            "ok": False,
-            "error": _format_device_open_error(SoapySDR, info, e),
-        }
-
-    # Auto-load calibrated PPM correction from the device serial.
-    serial = ""
-    try:
-        hw_dict = dict(device.getHardwareInfo())
-        serial = hw_dict.get("serial", "")
-    except Exception:
-        pass
-    if not serial:
+    _owns_device = device is None
+    if _owns_device:
+        print(f"opening {info.name} at {center_hz/1e6:.1f} MHz, "
+              f"{samp_hz/1e6:.3f} Msps, block={block_seconds}s "
+              f"(processing ~{int(block_seconds*samp_hz*8/1e6)} MB/block, "
+              f"{samps_per_chip} samples/chip)")
         try:
-            found = SoapySDR.Device.enumerate(info.driver)
-            if found:
-                serial = str(dict(found[0]).get("serial", ""))
+            device = SoapySDR.Device(info.driver)
+        except RuntimeError as e:
+            return {
+                "ok": False,
+                "error": _format_device_open_error(SoapySDR, info, e),
+            }
+
+        # Auto-load calibrated PPM correction from the device serial.
+        serial = ""
+        try:
+            hw_dict = dict(device.getHardwareInfo())
+            serial = hw_dict.get("serial", "")
         except Exception:
             pass
-    cal_ppm = _get_device_ppm(serial)
-    short_serial = serial.lstrip("0") or serial
-    if cal_ppm != 0.0:
-        ppm_offset_hz = center_hz * cal_ppm / 1e6
-        center_hz += ppm_offset_hz
-        print(f"  PPM cal: device {short_serial} → {cal_ppm:+.1f} ppm "
-              f"({ppm_offset_hz:+.0f} Hz)")
+        if not serial:
+            try:
+                found = SoapySDR.Device.enumerate(info.driver)
+                if found:
+                    serial = str(dict(found[0]).get("serial", ""))
+            except Exception:
+                pass
+        cal_ppm = _get_device_ppm(serial)
+        short_serial = serial.lstrip("0") or serial
+        if cal_ppm != 0.0:
+            ppm_offset_hz = center_hz * cal_ppm / 1e6
+            center_hz += ppm_offset_hz
+            print(f"  PPM cal: device {short_serial} → {cal_ppm:+.1f} ppm "
+                  f"({ppm_offset_hz:+.0f} Hz)")
 
-    device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
-    device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
+        device.setSampleRate(SOAPY_SDR_RX, 0, samp_hz)
+        device.setFrequency(SOAPY_SDR_RX, 0, center_hz)
 
-    if device_name == "hackrf":
-        device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
-        device.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
-        device.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
-        print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
-              f"LNA={lna_db} dB VGA={vga_db} dB")
-    elif device_name == "rtlsdr":
-        combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
-        device.setGain(SOAPY_SDR_RX, 0, combined_db)
-        print(f"  RX gain: TUNER={combined_db:.1f} dB "
-              f"(from --rx-lna {lna_db} + --rx-vga {vga_db}; "
-              f"clamped to [0, 49])")
-        if amp_on:
-            print("  NOTE: --rx-amp ignored — RTL-SDR has no AMP stage")
+        if device_name == "hackrf":
+            device.setGain(SOAPY_SDR_RX, 0, "AMP", 14.0 if amp_on else 0.0)
+            device.setGain(SOAPY_SDR_RX, 0, "LNA", float(lna_db))
+            device.setGain(SOAPY_SDR_RX, 0, "VGA", float(vga_db))
+            print(f"  RX gain: AMP={'on' if amp_on else 'off'} "
+                  f"LNA={lna_db} dB VGA={vga_db} dB")
+        elif device_name == "rtlsdr":
+            combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
+            device.setGain(SOAPY_SDR_RX, 0, combined_db)
+            print(f"  RX gain: TUNER={combined_db:.1f} dB "
+                  f"(from --rx-lna {lna_db} + --rx-vga {vga_db}; "
+                  f"clamped to [0, 49])")
+            if amp_on:
+                print("  NOTE: --rx-amp ignored — RTL-SDR has no AMP stage")
+        else:
+            raise ValueError(f"unhandled device {device_name}")
     else:
-        raise ValueError(f"unhandled device {device_name}")
+        # Pre-opened device: reconfigure RX parameters without reopening.
+        # PPM correction was already applied at SoapyDevice open time so
+        # center_hz is already the corrected value.
+        from SoapySDR import SOAPY_SDR_RX as _SOAPY_RX
+        device.setSampleRate(_SOAPY_RX, 0, samp_hz)
+        device.setFrequency(_SOAPY_RX, 0, center_hz)
+        if device_name == "hackrf":
+            device.setGain(_SOAPY_RX, 0, "AMP", 14.0 if amp_on else 0.0)
+            device.setGain(_SOAPY_RX, 0, "LNA", float(lna_db))
+            vga_start = float(initial_vga_db) if initial_vga_db is not None else float(vga_db)
+            device.setGain(_SOAPY_RX, 0, "VGA", vga_start)
+            print(f"reusing open {info.name}: "
+                  f"AMP={'on' if amp_on else 'off'} LNA={lna_db} dB "
+                  f"VGA={vga_start:.0f} dB, {samp_hz/1e6:.3f} Msps, "
+                  f"block={block_seconds}s "
+                  f"(~{int(block_seconds*samp_hz*8/1e6)} MB/block)")
+        elif device_name == "rtlsdr":
+            combined_db = max(0.0, min(49.0, float(lna_db + vga_db)))
+            device.setGain(_SOAPY_RX, 0, combined_db)
+            print(f"reusing open {info.name}: TUNER={combined_db:.1f} dB, "
+                  f"block={block_seconds}s")
+        else:
+            raise ValueError(f"unhandled device {device_name}")
+        if initial_vga_db is not None:
+            print(f"  pre-seeded VGA={initial_vga_db:.0f} dB  "
+                  f"{'auto-PPM disabled (static cal)' if disable_auto_ppm else 'auto-PPM enabled'}")
+
+    assert device is not None
 
     stream_args = {"bufflen": "262144", "buffers": "8"}
     stream = device.setupStream(
@@ -791,43 +1041,36 @@ def live_rx_decode(
         )
 
     agc_ppm = _AgcPpmState(device_name, device, center_hz,
-                           vga_db, lna_db)
+                           vga_db, lna_db,
+                           initial_vga_db=initial_vga_db,
+                           disable_auto_ppm=disable_auto_ppm)
 
-    block_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=4)
+    # 3-stage pipeline: USB reader → raw_queue → decode worker → result_queue → main.
+    # Decode worker computes sample_p99 before decode so main thread never
+    # needs the raw block array (AGC reads p99 from result dict).
+    raw_queue: _queue.Queue[np.ndarray | None] = _queue.Queue(maxsize=2)
+    result_queue: _queue.Queue = _queue.Queue(maxsize=1)
     reader_stop = threading.Event()
+    decode_stop = threading.Event()
     overflow_count_at_last_check = 0
 
-    reader = threading.Thread(
-        target=_usb_reader_thread,
-        args=(device, stream, block_samples, block_queue, reader_stop, stats),
-        daemon=True,
-    )
-    reader.start()
+    _save_file_ref = save_file  # captured by worker closure
 
-    try:
-        while time.time() - t_start < duration_s:
+    def _decode_worker() -> None:
+        import os as _os
+        _os.environ.setdefault("OMP_NUM_THREADS", "2")
+        while not decode_stop.is_set():
             try:
-                block_data = block_queue.get(timeout=2.0)
+                block_data = raw_queue.get(timeout=1.0)
             except _queue.Empty:
                 continue
             if block_data is None:
-                break
-            filled = len(block_data)
-            if filled < block_samples // 2:
-                continue
-
-            stats["blocks_processed"] += 1
-
-            current_overflows = stats["overflows"]
-            if current_overflows > overflow_count_at_last_check:
-                n_new = current_overflows - overflow_count_at_last_check
-                overflow_count_at_last_check = current_overflows
-                print(f"       [{n_new} overflow(s) during block, "
-                      f"total {current_overflows}]")
-
-            if save_file is not None:
-                block_data.tofile(save_file)
-
+                result_queue.put(None)
+                return
+            # Compute p99 here so main thread doesn't need block_data for AGC.
+            sample_p99 = float(np.percentile(np.abs(block_data), 99))
+            if _save_file_ref is not None:
+                block_data.tofile(_save_file_ref)
             if decode_fn is not None:
                 result = decode_fn(block_data)
             else:
@@ -838,6 +1081,36 @@ def live_rx_decode(
                     signal_threshold=signal_threshold,
                     top_k_soft=top_k_soft,
                 )
+            result["sample_p99"] = sample_p99
+            result_queue.put(result)
+
+    reader = threading.Thread(
+        target=_usb_reader_thread,
+        args=(device, stream, block_samples, raw_queue, reader_stop, stats),
+        daemon=True,
+    )
+    decode_thread = threading.Thread(target=_decode_worker, daemon=True)
+    reader.start()
+    decode_thread.start()
+
+    try:
+        while time.time() - t_start < duration_s:
+            try:
+                result = result_queue.get(timeout=2.0)
+            except _queue.Empty:
+                continue
+            if result is None:
+                break
+
+            stats["blocks_processed"] += 1
+
+            current_overflows = stats["overflows"]
+            if current_overflows > overflow_count_at_last_check:
+                n_new = current_overflows - overflow_count_at_last_check
+                overflow_count_at_last_check = current_overflows
+                print(f"       [{n_new} overflow(s) during block, "
+                      f"total {current_overflows}]")
+
             sisl_rx._print_live_event(stats["blocks_processed"], result)
 
             s = result["status"]
@@ -848,12 +1121,14 @@ def live_rx_decode(
                 if "_decoded_hail" not in stats:
                     stats["_decoded_hail"] = (result.get("decoded_hail")
                                               or result.get("decoded_ack"))
+                    stats["_decode_peak_mag"] = result.get("peak_mag")
                 if exit_on_decrypt:
+                    decode_stop.set()
                     break
             elif s == "decrypt_fail":
                 stats["hails_detected"] += 1
 
-            agc_ppm.on_block(result, block_data)
+            agc_ppm.on_block(result)
 
             if accumulator is not None:
                 # Only feed the accumulator when the frequency estimate
@@ -895,14 +1170,35 @@ def live_rx_decode(
     except KeyboardInterrupt:
         print("  interrupted")
     finally:
-        # Deactivate the stream FIRST — this unblocks any pending
-        # readStream call in the reader thread, which otherwise hangs
-        # for up to 500 ms on Windows while USB buffers overflow and
-        # SoapySDR prints "O" to stdout for each one.
+        # Stop decode thread before reader — decode_stop lets the worker exit
+        # its get() loop cleanly without waiting for a None sentinel.
+        decode_stop.set()
         reader_stop.set()
-        device.deactivateStream(stream)
+        # hackrf#1570: on Linux, deactivateStream does NOT cancel in-flight
+        # USB transfers, so it blocks indefinitely (observed: 40+ seconds).
+        # Fix: close the device FIRST to cancel all USB transfers, then call
+        # deactivateStream (which returns immediately on a closed device).
+        # CRITICAL ordering: closeStream frees stream memory; never call it
+        # while the reader is still inside readStream → SIGSEGV.
+        # device.close() unblocks readStream with an error, letting reader exit.
+        _reader_forced_close = False
+        if _owns_device:
+            try:
+                device.close()
+            except Exception:
+                pass
+            _reader_forced_close = True
+        try:
+            device.deactivateStream(stream)
+        except Exception:
+            pass
         reader.join(timeout=3.0)
-        device.closeStream(stream)
+        decode_thread.join(timeout=5.0)
+        if not _reader_forced_close:
+            try:
+                device.closeStream(stream)
+            except Exception:
+                pass
         if save_file is not None:
             save_file.close()
         if _win_timer_set:
@@ -912,6 +1208,21 @@ def live_rx_decode(
                 pass
 
     stats["elapsed_s"] = time.time() - t_start
+    # Capture converged AGC/PPM state before releasing — callers use these
+    # to pre-seed the next RX phase (optimization B).
+    stats["final_vga_db"] = agc_ppm.final_vga_db
+    stats["final_center_hz"] = agc_ppm.final_center_hz
+    del agc_ppm  # drop reference before device close
+    if _owns_device and not _reader_forced_close:
+        # Explicitly close the device here so __del__ fires while still inside
+        # live_rx_decode (device.__del__ → device.close() was causing exit after
+        # function return in CPython 3.14 / libhackrf interaction).
+        # Skip if already closed above to unblock the stuck reader (hackrf#1570).
+        try:
+            device.close()
+        except Exception:
+            pass
+        del device
     return stats
 
 
@@ -966,7 +1277,7 @@ def main() -> int:
                         required=True)
     parser.add_argument("--capture", default="/tmp/sisl_rx.cfile",
                         help="capture file (input for offline, output for tx-to-file)")
-    parser.add_argument("--duration", type=float, default=10.0,
+    parser.add_argument("--duration", type=float, default=600.0,
                         help="seconds to run tx or rx")
     parser.add_argument("--prefix-ms", type=float, default=0.0,
                         help="tx-to-file: leading silence in ms")
@@ -1001,6 +1312,11 @@ def main() -> int:
                         help=f"tx: HackRF TX VGA (IF gain, baseband "
                              f"amplification before upconversion, 0..47 dB "
                              f"in 1 dB steps) (default {HACKRF_TX_VGA_DB})")
+    parser.add_argument("--rlnc-tx-vga", type=int, default=None,
+                        help="tx: HackRF TX VGA for RLNC payload symbols only "
+                             "(overrides --tx-vga for Phase 3; useful when "
+                             "hail/ACK needs full power but RLNC needs lower "
+                             "power to avoid close-range AGC clipping)")
     parser.add_argument("--tx-amp", action="store_true",
                         help="tx: enable HackRF TX AMP (switchable 14 dB RF "
                              "power amplifier after the upconverter; off by "
@@ -1213,188 +1529,224 @@ def main() -> int:
             print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
-    # ── mode == "respond": listen for hail → TX ACK → print session keys ──
+    # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
         responder_static = demo_responder_key()
-        center_hz = args.freq * 1e6
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
 
-        # Listen-after-talk: coprime periods T_respond=3s (2s TX, 1s gap)
-        # Responder listens continuously until hail received, then TX ACK
         block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
-        decoded_hail = None
-
-        # Phase 1: listen for hail — exit immediately on first decrypt.
-        # Use a long listen duration so AGC and PPM have time to converge.
-        # exit_on_decrypt=True breaks out as soon as a hail decrypts.
         listen_duration = max(600.0, args.duration)
-        while decoded_hail is None:
-            stats = live_rx_decode(
-                duration_s=listen_duration,
-                block_seconds=block_sec,
-                responder_static=responder_static,
-                lna_db=args.rx_lna, vga_db=args.rx_vga,
-                amp_on=args.rx_amp, center_hz=center_hz,
+
+        with SoapyDevice(args.device, center_hz=args.freq * 1e6) as sdr:
+            # ── Phase 1: hail RX ──────────────────────────────────────────
+            # Single device handle is shared across all three phases.
+            # libhackrf ≥ 2026.01.3 fixed the setupStream deadlock so
+            # RX → TX → RX cycles on one handle are safe.
+            decoded_hail = None
+            stream_errors = 0
+            while decoded_hail is None:
+                hail_stats = live_rx_decode(
+                    duration_s=listen_duration,
+                    block_seconds=block_sec,
+                    responder_static=responder_static,
+                    lna_db=args.rx_lna, vga_db=args.rx_vga,
+                    amp_on=args.rx_amp, center_hz=sdr.center_hz,
+                    device_name=args.device,
+                    signal_threshold=args.signal_threshold,
+                    top_k_soft=args.top_k,
+                    combine_copies=args.combine,
+                    samps_per_chip=active_samps_per_chip,
+                    exit_on_decrypt=True,
+                    device=sdr.device,
+                )
+                dh = hail_stats.get("_decoded_hail")
+                if dh is not None:
+                    decoded_hail = dh
+                    print(f"\n\033[32m  HAIL RECEIVED — preparing ACK\033[0m")
+                    break
+                if not hail_stats.get("ok", True):
+                    stream_errors += 1
+                    print(f"RX error ({stream_errors}/3): "
+                          f"{hail_stats.get('error')}", file=sys.stderr)
+                    if stream_errors >= 3:
+                        return 2
+                    time.sleep(1.0)
+
+            # B: carry converged AGC gain into RLNC RX — skip warmup blocks.
+            # Adjust from hail-decode peak to AGC target so RLNC RX starts
+            # stable: if hail peak >> AGC_TARGET the gain was still settling
+            # when the hail decoded; walking it down to AGC_TARGET avoids
+            # the burst of peak-AGC corrections that lose the first symbols.
+            _converged_vga = hail_stats.get("final_vga_db", float(args.rx_vga))
+            _hail_peak = hail_stats.get("_decode_peak_mag")
+            if _hail_peak and _hail_peak > _AgcPpmState.AGC_TARGET:
+                import math
+                _adj_db = 10.0 * math.log10(_AgcPpmState.AGC_TARGET / _hail_peak)
+                _converged_vga = max(0.0, _converged_vga + _adj_db)
+
+            # ── Phase 2: TX ACK ───────────────────────────────────────────
+            responder_eph = sc.Ephemeral()
+            resp_eph_priv_peek = responder_eph.peek()
+            dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
+            dh3_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_eph_pub)
+            resp_eph_pub_can = sc.pubkey_to_compressed(responder_eph.pub)
+            session_keys = sc.derive_session_keys(
+                decoded_hail.dh1, dh2_sess, dh3_sess,
+                decoded_hail.caller_eph_pub_canonical, resp_eph_pub_can,
+            )
+
+            ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
+            ack_chips = sf.tx_bits_to_chips(ack_bits)
+            ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
+            ack_frame_sec = len(ack_chips) / chip_rate_hz
+            print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits "
+                  f"({ack_frame_sec:.1f}s/frame), repeating until timeout")
+            print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
+
+            ACK_TX_WINDOW = 50.0  # must overlap caller's Phase 2 start (≥ 30s hail + margin)
+            ack_start = time.time()
+            ack_round = 0
+            try:
+                while time.time() - ack_start < ACK_TX_WINDOW:
+                    ack_round += 1
+                    burst_repeats = 5
+                    print(f"  ACK burst {ack_round} "
+                          f"({burst_repeats} repeats)...", end="", flush=True)
+                    soapy_tx_burst(
+                        ack_samples, sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        repeats=burst_repeats,
+                        device=sdr.device,
+                    )
+                    print(" done")
+            except KeyboardInterrupt:
+                print("  interrupted")
+            print()
+            print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
+            print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
+            print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+
+            # ── Phase 3: RLNC payload RX ──────────────────────────────────
+            K = args.rlnc_k
+            prk = sc.derive_session_prk(session_keys)
+            tx_key = session_keys["p2p_tx_key"]
+            rx_key = session_keys["p2p_rx_key"]
+            sess_id = session_keys["session_id"]
+            from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
+            from sisl_payload import encode_ack as encode_payload_ack
+
+            _DEMO_PAYLOAD = (
+                b"SISL RLNC fountain code over DSSS steganographic link "
+                b"-- hackathon demo payload v1"
+            )
+            expected_payload_len = len(_DEMO_PAYLOAD)
+            frags = _frag(_DEMO_PAYLOAD, K)
+            frag_size = len(frags[0])
+            n_sym_bytes = 4 + frag_size + 16
+
+            decoder = RLNCDecoder(K, prk)
+            print(f"\n  phase 3: \033[36mRLNC payload RX\033[0m  "
+                  f"K={K}, expected={expected_payload_len}B, symbol={n_sym_bytes}B")
+            print(f"  pre-seeded VGA={_converged_vga:.0f} dB, "
+                  f"static PPM (no auto-retune)")
+
+            received_count = [0]
+
+            def _payload_sym_fn(block_data):
+                # Decode every RLNC symbol found in this block (continuous stream).
+                sym_results = sisl_rx.decode_all_payload_in_block(
+                    block_data, n_sym_bytes,
+                    samps_per_chip=2,
+                    samp_hz=chip_rate_hz * 2,
+                    signal_threshold=args.signal_threshold,
+                    max_symbols_per_block=8,
+                )
+                # sym_results may be: [] (truly empty), a sentinel acq-fail
+                # dict wrapped in a list, or a list of decoded symbols.
+                # Separate diagnostic sentinels (no payload_frame_bytes) from
+                # real symbol results so the acq peak fields reach _print_live_event.
+                acq_sentinel = None
+                complete = False
+                n_decoded = 0
+                for res in sym_results:
+                    if "payload_frame_bytes" not in res:
+                        acq_sentinel = res  # acquisition failure diagnostic
+                        continue
+                    try:
+                        comb_id, plain = decode_payload_symbol(
+                            res["payload_frame_bytes"], tx_key, prk, sess_id)
+                        complete = decoder.add_symbol(comb_id, plain)
+                        received_count[0] += 1
+                        n_decoded += 1
+                        print(f"  symbol {comb_id} received "
+                              f"({received_count[0]} total), complete={complete}")
+                    except ValueError as _e:
+                        raw = res["payload_frame_bytes"]
+                        import struct as _s
+                        _cid = _s.unpack(">I", raw[:4])[0]
+                        print(f"  [AEAD FAIL] comb_id={_cid} "
+                              f"tx_key[:4]={tx_key[:4].hex()} "
+                              f"prk[:4]={prk[:4].hex()} "
+                              f"sess_id[:4]={sess_id[:4].hex()} "
+                              f"frame[:8]={raw[:8].hex()}",
+                              flush=True)
+                if complete:
+                    return {"status": "decrypt_ok", "decoded_hail": True}
+                # Return a result with real peak diagnostics for _print_live_event.
+                base = acq_sentinel or (sym_results[0] if sym_results else {})
+                status = ("no_signal" if (not sym_results or acq_sentinel)
+                          else ("decrypt_fail" if n_decoded == 0 else "no_signal"))
+                return {**base, "status": status}
+
+            # B+C: pre-seeded VGA (no AGC warmup), static PPM (no wander).
+            # Shared device handle — no reopen between ACK TX and RLNC RX.
+            rlnc_stats = live_rx_decode(
+                duration_s=max(300.0, args.duration),
+                block_seconds=3.0,
+                lna_db=args.rx_lna,
+                vga_db=args.rx_vga,
+                amp_on=args.rx_amp,
+                center_hz=sdr.center_hz,
                 device_name=args.device,
                 signal_threshold=args.signal_threshold,
-                top_k_soft=args.top_k,
-                combine_copies=args.combine,
                 samps_per_chip=active_samps_per_chip,
                 exit_on_decrypt=True,
+                decode_fn=_payload_sym_fn,
+                initial_vga_db=_converged_vga,
+                disable_auto_ppm=True,
+                device=sdr.device,
             )
-            # Check if any hail was decrypted — pull DecodedHail from stats
-            dh = stats.get("_decoded_hail")
-            if dh is not None:
-                decoded_hail = dh
-                print(f"\n\033[32m  HAIL RECEIVED — preparing ACK\033[0m")
-                break
-            if not stats.get("ok", True):
-                print(f"RX error: {stats.get('error')}", file=sys.stderr)
-                return 2
 
-        # Phase 2: TX ACK on repeat until duration expires.
-        # The caller cycles TX 5s / RX 2s. Keep retransmitting so the
-        # caller's RX window catches the ACK regardless of timing.
-        responder_eph = sc.Ephemeral()
-        # Derive session keys BEFORE encode_ack_fec consumes the ephemeral.
-        resp_eph_priv_peek = responder_eph.peek()
-        dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
-        dh3_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_eph_pub)
-        resp_eph_pub_can = sc.pubkey_to_compressed(responder_eph.pub)
-        session_keys = sc.derive_session_keys(
-            decoded_hail.dh1, dh2_sess, dh3_sess,
-            decoded_hail.caller_eph_pub_canonical, resp_eph_pub_can,
-        )
+            recovered = decoder.decode()
+            if recovered is not None:
+                payload_out = recovered[:expected_payload_len]
+                out_path = "/tmp/sisl_rlnc_payload.bin"
+                with open(out_path, "wb") as _f:
+                    _f.write(payload_out)
+                print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
+                print(f"  content: {payload_out[:80]}")
 
-        ack_bits = sc.encode_ack_fec(responder_eph, decoded_hail, status=1)
-        ack_chips = sf.tx_bits_to_chips(ack_bits)
-        ack_samples = upsample_chips_to_samples(ack_chips, SAMPS_PER_CHIP)
-        ack_frame_sec = len(ack_chips) / chip_rate_hz
-        print(f"  TX ACK: {sc.ACK_FEC_TOTAL_BITS} channel bits "
-              f"({ack_frame_sec:.1f}s/frame), repeating until timeout")
-        print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
-
-        # ACK TX window: 20 s fixed.  Caller waits 30 s before RLNC TX,
-        # giving responder 10 s of quiet RX for AGC to settle.
-        ACK_TX_WINDOW = 20.0
-        ack_start = time.time()
-        ack_round = 0
-        try:
-            while time.time() - ack_start < ACK_TX_WINDOW:
-                ack_round += 1
-                burst_repeats = 5
-                print(f"  ACK burst {ack_round} "
-                      f"({burst_repeats} repeats)...", end="", flush=True)
+                ack_frame = encode_payload_ack(payload_out, rx_key, prk, sess_id)
+                ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
+                ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
+                ack_sym_samples = upsample_chips_to_samples(ack_sym_chips, SAMPS_PER_CHIP)
+                print(f"  TX payload ACK ({len(ack_frame)}B)...", end="", flush=True)
                 soapy_tx_burst(
-                    ack_samples, center_hz,
+                    ack_sym_samples, sdr.center_hz,
                     samp_hz=SAMP_RATE_HZ,
                     tx_vga_db=args.tx_vga,
                     tx_amp_on=args.tx_amp,
-                    repeats=burst_repeats,
+                    repeats=5,
+                    device=sdr.device,
                 )
                 print(" done")
-        except KeyboardInterrupt:
-            print("  interrupted")
-        print()
-        print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
-        print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
-        print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
-
-        # ── Phase 3: RLNC payload RX ──────────────────────────────────────
-        K = args.rlnc_k
-        prk = sc.derive_session_prk(session_keys)
-        tx_key = session_keys["p2p_tx_key"]
-        rx_key = session_keys["p2p_rx_key"]
-        sess_id = session_keys["session_id"]
-        from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
-        from sisl_payload import encode_ack as encode_payload_ack
-
-        # We don't know payload size yet — use a fixed demo payload length
-        # matching the caller's default. For file-based payloads the size
-        # must be agreed out-of-band; demo uses 80 bytes.
-        _DEMO_PAYLOAD = (
-            b"SISL RLNC fountain code over DSSS steganographic link "
-            b"-- hackathon demo payload v1"
-        )
-        expected_payload_len = len(_DEMO_PAYLOAD)
-        frags = _frag(_DEMO_PAYLOAD, K)
-        frag_size = len(frags[0])
-        n_sym_bytes = 4 + frag_size + 16  # encode_payload_symbol output size
-
-        decoder = RLNCDecoder(K, prk)
-        print(f"\n  phase 3: \033[36mRLNC payload RX\033[0m  "
-              f"K={K}, expected={expected_payload_len}B, symbol={n_sym_bytes}B")
-        print(f"  listening for payload symbols...")
-
-        received_count = [0]
-
-        def _payload_sym_fn(block_data):
-            res = sisl_rx.decode_one_payload_in_block(
-                block_data, n_sym_bytes,
-                samps_per_chip=2,
-                samp_hz=chip_rate_hz * 2,
-                signal_threshold=args.signal_threshold,
-            )
-            if res.get("status") == "decrypt_ok":
-                raw = res["payload_frame_bytes"]
-                try:
-                    comb_id, plain = decode_payload_symbol(raw, tx_key, prk, sess_id)
-                    complete = decoder.add_symbol(comb_id, plain)
-                    received_count[0] += 1
-                    print(f"  symbol {comb_id} received "
-                          f"({received_count[0]} total), complete={complete}")
-                    if complete:
-                        return {"status": "decrypt_ok", "decoded_hail": True}
-                except ValueError:
-                    pass
-                # Symbol received but not yet complete — don't signal exit.
-                return {**res, "status": "decrypt_fail"}
-            return res
-
-        # block_seconds=3.0 matches the caller's SYMBOL_TX_SEC so each
-        # block contains exactly one fully-repeated symbol — the signal
-        # dominates the FFT block and the estimator locks correctly.
-        rlnc_stats = live_rx_decode(
-            duration_s=max(300.0, args.duration),
-            block_seconds=3.0,
-            lna_db=args.rx_lna,
-            vga_db=args.rx_vga,
-            amp_on=args.rx_amp,
-            center_hz=center_hz,
-            device_name=args.device,
-            signal_threshold=args.signal_threshold,
-            samps_per_chip=active_samps_per_chip,
-            exit_on_decrypt=True,
-            decode_fn=_payload_sym_fn,
-        )
-
-        recovered = decoder.decode()
-        if recovered is not None:
-            payload_out = recovered[:expected_payload_len]
-            out_path = "/tmp/sisl_rlnc_payload.bin"
-            with open(out_path, "wb") as _f:
-                _f.write(payload_out)
-            print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
-            print(f"  content: {payload_out[:80]}")
-
-            # TX payload ACK back to caller
-            ack_frame = encode_payload_ack(payload_out, rx_key, prk, sess_id)
-            ack_bits_p = np.unpackbits(np.frombuffer(ack_frame, dtype=np.uint8))
-            ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
-            ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
-            ack_sym_samples = upsample_chips_to_samples(ack_sym_chips, SAMPS_PER_CHIP)
-            print(f"  TX payload ACK ({len(ack_frame)}B)...", end="", flush=True)
-            soapy_tx_burst(
-                ack_sym_samples, center_hz,
-                samp_hz=SAMP_RATE_HZ,
-                tx_vga_db=args.tx_vga,
-                tx_amp_on=args.tx_amp,
-                repeats=5,
-            )
-            print(" done")
-        else:
-            print(f"  payload decode incomplete ({received_count[0]} symbols received)")
+            else:
+                print(f"  payload decode incomplete "
+                      f"({received_count[0]} symbols received)")
+        # sdr.__exit__ closes device here
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -1403,16 +1755,13 @@ def main() -> int:
         responder_static_pub = demo_responder_key().public_key()
         center_hz = args.freq * 1e6
 
-        # Pin to a specific HackRF for TX by probing which one we get.
-        # This prevents device bouncing when multiple HackRFs are attached.
-        import SoapySDR as _soapy_probe
-        _probe = _soapy_probe.Device("driver=hackrf")
-        _probe_hw = dict(_probe.getHardwareInfo())
-        tx_serial = _probe_hw.get("serial", "")
-        del _probe
-        tx_device_str = (f"driver=hackrf,serial={tx_serial}"
-                         if tx_serial else "driver=hackrf")
-        print(f"call: pinned to HackRF {tx_serial.lstrip('0')[:16]} for TX")
+        # Open one device handle for the entire call session.
+        # libhackrf ≥ 2026.01.3: RX→TX→RX stream cycles on a single handle
+        # are stable; no close/reopen needed between phases.
+        # The handle is grabbed here so Phase 1 TX, Phase 2 ACK RX, Phase 3
+        # RLNC TX, and Phase 4 payload ACK RX all share one USB session.
+        call_sdr = SoapyDevice(args.device, center_hz=center_hz)
+        print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
 
         # Build the hail — retain ephemeral key for ACK decode
         caller_eph = sc.Ephemeral()
@@ -1426,41 +1775,14 @@ def main() -> int:
             body_nonce=os.urandom(8),
             flags=0x03,
         )
-        # Compute DH1 for later ACK verification
         dh1 = sc.ecdh(caller_eph_priv, responder_static_pub)
 
-        hail_bits = sc.encode_hail_fec(
-            caller_eph, responder_static_pub, body)
+        hail_bits = sc.encode_hail_fec(caller_eph, responder_static_pub, body)
         hail_chips = sf.tx_bits_to_chips(hail_bits)
-        hail_samples = upsample_chips_to_samples(
-            hail_chips, SAMPS_PER_CHIP)
+        hail_samples = upsample_chips_to_samples(hail_chips, SAMPS_PER_CHIP)
 
-        # Listen-after-talk: coprime periods
-        # Caller: TX 5s, RX 4s → period T₁=9s
-        # RX must be ≥ 1 ACK frame (1.52s) + device overhead + FFT time.
-        # 4s gives ~2.5 complete ACK frames for reliable decode.
-        # gcd(9, T_respond) = 1 for most T_respond values.
-        INITIAL_TX_DURATION = 30.0  # continuous TX before alternating
-        TX_DURATION = 5.0
-        RX_DURATION = 12.0  # 5s block + AGC warmup + reader startup
-        MAX_ROUNDS = int(args.duration / (TX_DURATION + RX_DURATION))
+        INITIAL_TX_DURATION = 30.0
 
-        # Auto-PPM for ACK RX: learn Δf from track_lost/decrypt_fail
-        # blocks and apply as a cumulative retune. Same principle as the
-        # hail RX auto-PPM, just applied to the caller's ACK listen.
-        ack_rx_correction_hz = 0.0
-
-        print(f"call: hailing on {args.freq:.1f} MHz")
-        print(f"  nonce:         {body.body_nonce.hex()}")
-        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s "
-              f"(continuous, no RX)")
-        print(f"  phase 2:       TX {TX_DURATION:.0f}s / RX {RX_DURATION:.0f}s "
-              f"(period {TX_DURATION+RX_DURATION:.0f}s)")
-        print(f"  max rounds:    {MAX_ROUNDS}")
-
-        # ACK decode closure — defined once, captures immutable state.
-        # samps_per_chip MUST be 2 (matching the RX sample rate of
-        # chip_rate*2), NOT active_samps_per_chip (which is 8 for TX).
         def _ack_decode_fn(block_data):
             return sisl_rx.decode_one_ack_in_block(
                 block_data,
@@ -1472,59 +1794,87 @@ def main() -> int:
                 samp_hz=chip_rate_hz * 2,
             )
 
-        # Phase 1: TX hail continuously for INITIAL_TX_DURATION seconds.
-        # This gives the responder enough uninterrupted signal to converge
-        # AGC and decrypt the hail. Without this, the 5s TX / 12s RX
-        # duty cycle only provides signal 29% of the time, delaying the
-        # responder's AGC convergence to ~74 seconds.
-        initial_repeats = max(1, int(
-            INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
-        print(f"\n  phase 1: \033[33mTX hail\033[0m "
-              f"({initial_repeats} repeats, "
-              f"{INITIAL_TX_DURATION:.0f}s continuous)...",
-              end="", flush=True)
-        soapy_tx_burst(
-            hail_samples, center_hz,
-            samp_hz=SAMP_RATE_HZ,
-            tx_vga_db=args.tx_vga,
-            tx_amp_on=args.tx_amp,
-            repeats=initial_repeats,
-            device_str=tx_device_str,
-        )
-        print(" done")
+        print(f"call: hailing on {args.freq:.1f} MHz")
+        print(f"  nonce:         {body.body_nonce.hex()}")
+        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
+        print(f"  phase 2:       RX listening for ACK")
+        print(f"  max rounds:    {int(args.duration / (5+12))}")
 
-        # Phase 2: listen for ACK continuously. No more TX/RX alternation
-        # — the responder has had 30s of uninterrupted hail to decrypt and
-        # is now TX'ing ACK continuously. Keep listening until we get it.
-        # Use the full live_rx_decode infrastructure (AGC, PPM, reader)
-        # so the gain converges properly over multiple blocks.
-        print(f"\n  phase 2: \033[36mRX listening for ACK "
-              f"(up to {args.duration:.0f}s)\033[0m")
-        ack_stats = live_rx_decode(
-            duration_s=args.duration,
-            block_seconds=5.36,  # same as hail path (proven to work)
-            lna_db=args.rx_lna,
-            vga_db=args.rx_vga,
-            amp_on=args.rx_amp,
-            center_hz=center_hz,
-            device_name=args.device,
-            signal_threshold=args.signal_threshold,
-            samps_per_chip=active_samps_per_chip,
-            exit_on_decrypt=True,
-            decode_fn=_ack_decode_fn,
-        )
-        dh = ack_stats.get("_decoded_hail")
-        if ack_stats.get("hails_decrypted", 0) > 0 and dh is not None:
+        with call_sdr:
+            # ── Phase 1: TX hail ──────────────────────────────────────────
+            phase1_start_time = time.time()
+            initial_repeats = max(1, int(
+                INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
+            print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                  f"({initial_repeats} repeats, "
+                  f"{INITIAL_TX_DURATION:.0f}s continuous)...",
+                  end="", flush=True)
+            print(f"  [DBG phase1] call_sdr.device={call_sdr.device!r}", flush=True)
+            soapy_tx_burst(
+                hail_samples, call_sdr.center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=args.tx_vga,
+                tx_amp_on=args.tx_amp,
+                repeats=initial_repeats,
+                device=call_sdr.device,
+            )
+            print(" done", flush=True)
+            # ── Phase 2: RX listen for ACK ────────────────────────────────
+            # Reuse call_sdr.device for RX — avoids the close/reopen USB
+            # cycle that destabilises HackRF after a long TX.  live_rx_decode
+            # with _owns_device=False cleans up via deactivateStream +
+            # closeStream (fast for RX since HackRF streams continuously).
+            _phase2_center_hz = call_sdr.center_hz
+
+            print(f"\n  phase 2: \033[36mRX listening for ACK "
+                  f"(up to {args.duration:.0f}s)\033[0m", flush=True)
+            ack_stats = live_rx_decode(
+                duration_s=args.duration,
+                block_seconds=5.36,
+                lna_db=args.rx_lna,
+                vga_db=args.rx_vga,
+                amp_on=args.rx_amp,
+                center_hz=_phase2_center_hz,
+                device_name=args.device,
+                device=call_sdr.device,
+                signal_threshold=args.signal_threshold,
+                samps_per_chip=active_samps_per_chip,
+                exit_on_decrypt=True,
+                decode_fn=_ack_decode_fn,
+            )
+            dh = ack_stats.get("_decoded_hail")
+            if not (ack_stats.get("hails_decrypted", 0) > 0 and dh is not None):
+                print(f"\n  timeout — no ACK received")
+                return 1
+
             print()
             print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
             print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
-            print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
+            print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m",
+                  flush=True)
 
             # ── Phase 3: RLNC payload TX ──────────────────────────────────
-            # Derive session keys from completed X3DH exchange.
+            # Delay Phase 3 TX until responder's ACK TX window has expired.
+            # Do this BEFORE call_sdr.reopen() because reopen() can block for
+            # 10-15 seconds on Linux USB re-enumeration, consuming the window.
+            # The responder keeps sending ACKs for ACK_TX_WINDOW seconds from
+            # when it decoded the hail (could be as early as Phase 1 start).
+            # If we start RLNC TX before that, the responder is still
+            # transmitting ACKs and not listening → payload is missed entirely.
+            _ACK_TX_WINDOW = 50.0  # must match responder ACK_TX_WINDOW
+            _phase3_ready_at = phase1_start_time + _ACK_TX_WINDOW
+            _phase3_delay = _phase3_ready_at - time.time()
+            print(f"  [phase3 timing] phase1_start={phase1_start_time:.1f} "
+                  f"now={time.time():.1f} delay={_phase3_delay:.1f}s", flush=True)
+            if _phase3_delay > 0:
+                print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
+                      flush=True)
+                time.sleep(_phase3_delay)
+
             dh2_sess = sc.ecdh(caller_static, dh.responder_eph_pub)
             resp_eph_pub_can = sc.pubkey_to_compressed(dh.responder_eph_pub)
-            caller_eph_pub_can = sc.pubkey_to_compressed(caller_eph_priv.public_key())
+            caller_eph_pub_can = sc.pubkey_to_compressed(
+                caller_eph_priv.public_key())
             session_keys = sc.derive_session_keys(
                 dh1, dh2_sess, dh.dh3,
                 caller_eph_pub_can, resp_eph_pub_can,
@@ -1540,35 +1890,29 @@ def main() -> int:
                 )
             session = RLNCSession(payload, K, session_keys)
             n_sym_bytes = len(session.next_tx_frame())
-            # Rebuild session (next_tx_frame advanced comb_id, reset)
-            session = RLNCSession(payload, K, session_keys)
+            session = RLNCSession(payload, K, session_keys)  # reset comb_id
 
-            # Protocol timing:
-            #   Responder: TX ACK for 20 s, then enters RLNC RX.
-            #   Caller: wait 30 s after session establishment, giving
-            #   responder 10 s of quiet RX for AGC to settle, then TX.
-            #
-            # Each RLNC symbol is repeated for SYMBOL_TX_SEC seconds so the
-            # signal dominates the receiver's FFT block (same principle as the
-            # hail). Without this the FFT estimator locks onto noise spurs.
-            RLNC_START_DELAY = 30.0
-            SYMBOL_TX_SEC = 3.0   # seconds per symbol TX — fills the RX block
             PAYLOAD_ACK_BYTES = 48
 
             n_fec_bits = sc.payload_fec_total_bits(n_sym_bytes)
-            sym_chips_per_frame = (n_fec_bits * 1)  # 1 chip/bit after spreading
+            sym_chips_per_frame = n_fec_bits * sf.CHIPS_PER_SYMBOL
             sym_duration_s = sym_chips_per_frame / chip_rate_hz
-            sym_repeats = max(1, int(SYMBOL_TX_SEC / sym_duration_s))
+            # 1 repeat per symbol — receiver uses multi-ASM sliding-window
+            # decode, so no repetition is needed for alignment.
+            sym_repeats = 1
 
             print(f"\n  phase 3: \033[33mRLNC payload TX\033[0m  "
                   f"K={K}, payload={len(payload)}B, symbol={n_sym_bytes}B "
-                  f"({sym_repeats} repeats/{SYMBOL_TX_SEC:.0f}s each)")
-            print(f"  waiting {RLNC_START_DELAY:.0f}s for responder RX to settle...")
-            time.sleep(RLNC_START_DELAY)
+                  f"(continuous stream, {sym_duration_s*1000:.0f}ms/symbol)",
+                  flush=True)
 
             prk = sc.derive_session_prk(session_keys)
+            _tx_key_caller = session_keys["p2p_tx_key"]
             rx_key = session_keys["p2p_rx_key"]
             sess_id = session_keys["session_id"]
+            print(f"  [KEY DBG caller] tx_key[:4]={_tx_key_caller[:4].hex()} "
+                  f"prk[:4]={prk[:4].hex()} sess_id[:4]={sess_id[:4].hex()}",
+                  flush=True)
 
             from sisl_payload import decode_ack as _decode_payload_ack
 
@@ -1585,53 +1929,85 @@ def main() -> int:
                         return {"status": "decrypt_ok", "decoded_hail": True}
                 return {**res, "status": "no_signal"}
 
-            rlnc_timeout = time.time() + max(300.0, args.duration)
-            rlnc_ack_received = False
-            comb_id = 0
+            rlnc_tx_vga = (args.rlnc_tx_vga
+                           if args.rlnc_tx_vga is not None
+                           else args.tx_vga)
 
-            while not rlnc_ack_received and time.time() < rlnc_timeout:
+            # Continuous single-stream TX: keep the TX stream open for all
+            # symbols so the chip clock is phase-coherent across the entire
+            # RLNC block.  Closing/reopening the stream between symbols resets
+            # the HackRF chip clock to a random phase, making multi-symbol
+            # sliding-ASM decode impossible at the receiver.
+            #
+            # We pre-encode all symbols (2 warmup + K+8 coded) and feed them
+            # through one writeStream loop before closing the stream.
+            #
+            # TX duration: 2 warmup + K coded + 8 extra for erasures, all
+            # back-to-back in a single USB stream session.
+            N_WARMUP = 2
+            N_CODED = K + 120  # K required + 120 extra: ~89s TX; gives responder ~20 processed blocks even with 50% drop rate
+            print(f"  Pre-encoding {N_WARMUP} warmup + {N_CODED} coded symbols...",
+                  end="", flush=True)
+            all_symbol_samples: list[np.ndarray] = []
+            # warmup: 2 copies of the first coded frame (receiver locks chip sync)
+            warmup_frame = session.next_tx_frame()
+            warmup_bits = sc.encode_payload_symbol_fec(warmup_frame)
+            warmup_chips = sf.tx_bits_to_chips(warmup_bits)
+            warmup_samples_1 = upsample_chips_to_samples(warmup_chips, SAMPS_PER_CHIP)
+            all_symbol_samples.extend([warmup_samples_1] * N_WARMUP)
+            for _ in range(N_CODED):
                 frame_bytes = session.next_tx_frame()
                 sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
                 sym_chips = sf.tx_bits_to_chips(sym_bits)
-                sym_samples = upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP)
-                print(f"  TX symbol {comb_id} ({sym_repeats}×{sym_duration_s*1000:.1f}ms"
-                      f" = {SYMBOL_TX_SEC:.0f}s)...", end="", flush=True)
-                soapy_tx_burst(
-                    sym_samples, center_hz,
-                    samp_hz=SAMP_RATE_HZ,
-                    tx_vga_db=args.tx_vga,
-                    tx_amp_on=args.tx_amp,
-                    repeats=sym_repeats,
-                    device_str=tx_device_str,
-                )
-                print(" done")
-                comb_id += 1
+                all_symbol_samples.append(
+                    upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP))
+            print(" done")
 
-                # After each symbol, check briefly for payload ACK.
-                rlnc_ack_stats = live_rx_decode(
-                    duration_s=SYMBOL_TX_SEC + 1.0,
-                    block_seconds=SYMBOL_TX_SEC,
-                    lna_db=args.rx_lna,
-                    vga_db=args.rx_vga,
-                    amp_on=args.rx_amp,
-                    center_hz=center_hz,
-                    device_name=args.device,
-                    signal_threshold=args.signal_threshold,
-                    samps_per_chip=active_samps_per_chip,
-                    exit_on_decrypt=True,
-                    decode_fn=_payload_ack_fn,
-                )
-                if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
-                    rlnc_ack_received = True
+            # Concatenate into one contiguous buffer so the TX stream never
+            # closes between symbols.
+            all_samples = np.concatenate(all_symbol_samples)
+            total_sym = N_WARMUP + N_CODED
+            total_dur_s = total_sym * sym_duration_s
+            print(f"  TX {total_sym} symbols ({total_dur_s:.0f}s continuous)...",
+                  end="", flush=True)
+            soapy_tx_burst(
+                all_samples, call_sdr.center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=rlnc_tx_vga,
+                tx_amp_on=args.tx_amp,
+                repeats=1,
+                device=call_sdr.device,
+            )
+            print(" done")
+            comb_id = N_CODED
 
-            if rlnc_ack_received:
-                print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
-            else:
-                print(f"  timeout — payload ACK not received after {comb_id} symbols TX'd")
-            return 0
+            # ── Phase 4: RX payload ACK ───────────────────────────────────
+            # Reuse call_sdr.device — same as Phase 2, avoids close/reopen
+            # USB destabilization (hackrf#1570).
+            print(f"  TX complete ({comb_id} symbols). "
+                  f"Listening for payload ACK...")
+            rlnc_ack_stats = live_rx_decode(
+                duration_s=max(60.0, args.duration),
+                block_seconds=3.0,
+                lna_db=args.rx_lna,
+                vga_db=args.rx_vga,
+                amp_on=args.rx_amp,
+                center_hz=call_sdr.center_hz,
+                device_name=args.device,
+                device=call_sdr.device,
+                signal_threshold=args.signal_threshold,
+                samps_per_chip=active_samps_per_chip,
+                exit_on_decrypt=True,
+                decode_fn=_payload_ack_fn,
+            )
+        # call_sdr.__exit__ closes device here
 
-        print(f"\n  timeout — no ACK received")
-        return 1
+        if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
+            print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
+        else:
+            print(f"  timeout — payload ACK not received "
+                  f"after {comb_id} symbols TX'd")
+        return 0
 
     # mode == "tx"
     if not _HAVE_GR:

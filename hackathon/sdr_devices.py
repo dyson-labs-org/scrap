@@ -32,7 +32,7 @@ class DeviceInfo:
 # target device, read the converged Δf from the first DECRYPTED block:
 #   ppm = Δf_hz / 915e6 * 1e6
 DEVICE_PPM: dict[str, float] = {
-    "930c64dc279e7bc3": 0.0,      # HackRF #0 — TX reference
+    "930c64dc279e7bc3": +16.2,    # HackRF #0 — measured: uncal Δf=+39.6kHz, need +16.2ppm to null
     "78d063dc2b6d2267": -19.1,    # HackRF #1
     "930c64dc29144ac3": +16.6,    # HackRF #2
     "00000001":         -22.2,    # Nooelec SMArt XTR v5 (RTL-SDR)

@@ -656,9 +656,13 @@ def decode_ack(
     ciphertext = frame[70:79]                       # 9 B
     tag = frame[79:95]
 
+    import os as _os
+    _ACK_DEBUG = _os.environ.get("SISL_ACK_DEBUG")
     try:
         responder_eph_pub = decode_ephemeral_pub(resp_eph_enc)
-    except Exception:
+    except Exception as _e:
+        if _ACK_DEBUG:
+            print(f"  [ACK_DEBUG] decode_ephemeral_pub failed: {_e}", flush=True)
         return None
 
     # Full X3DH — caller side
@@ -678,11 +682,18 @@ def decode_ack(
         plaintext = ChaCha20Poly1305(ack_key).decrypt(
             ack_iv, ciphertext + tag, aad
         )
-    except Exception:
+    except Exception as _e:
+        if _ACK_DEBUG:
+            print(f"  [ACK_DEBUG] Poly1305 failed: {_e}", flush=True)
+            print(f"  [ACK_DEBUG] resp_eph_enc[:8]={resp_eph_enc[:8].hex()} "
+                  f"cipher={ciphertext.hex()} tag[:4]={tag[:4].hex()}", flush=True)
         return None
 
     body = AckBody.unpack(plaintext)
     if not secrets.compare_digest(body.nonce_echo, expected_nonce_echo):
+        if _ACK_DEBUG:
+            print(f"  [ACK_DEBUG] nonce mismatch: got={body.nonce_echo.hex()} "
+                  f"expected={expected_nonce_echo.hex()}", flush=True)
         return None                                 # replay / wrong hail
 
     return DecodedAck(body=body, responder_eph_pub=responder_eph_pub, dh3=dh3)
@@ -728,6 +739,8 @@ def decode_ack_fec_from_llrs(
     expected_nonce_echo: bytes,
 ) -> DecodedAck | None:
     """Trial-decrypt a FEC-coded ACK from per-bit LLRs."""
+    import os as _os
+    _ACK_DEBUG = _os.environ.get("SISL_ACK_DEBUG")
     if len(llrs) < ACK_FEC_TOTAL_BITS:
         return None
     llrs = np.asarray(llrs[:ACK_FEC_TOTAL_BITS], dtype=np.float32)
@@ -736,6 +749,13 @@ def decode_ack_fec_from_llrs(
     body_bits = sisl_fec.decode(coded_body_llrs, ACK_FEC_BODY_PAYLOAD_BITS)
     body_bytes = np.packbits(body_bits).tobytes()
     assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
+
+    if _ACK_DEBUG:
+        # Check how many LLR bits have low confidence (near zero)
+        low_conf = int(np.sum(np.abs(llrs[ACK_FEC_HEADER_BITS:]) < 1.0))
+        print(f"  [ACK_DEBUG] FEC decode: {ACK_FEC_BODY_PAYLOAD_BITS} payload bits, "
+              f"low-conf LLRs={low_conf}/{ACK_FEC_BODY_CODED_BITS}, "
+              f"body[0:4]={body_bytes[:4].hex()}", flush=True)
 
     header_bytes = ASM + bytes([SISL_VERSION, MSG_ACK])
     frame = header_bytes + body_bytes
