@@ -1733,16 +1733,27 @@ def main() -> int:
                 ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
                 ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
                 ack_sym_samples = upsample_chips_to_samples(ack_sym_chips, SAMPS_PER_CHIP)
-                print(f"  TX payload ACK ({len(ack_frame)}B)...", end="", flush=True)
-                soapy_tx_burst(
-                    ack_sym_samples, sdr.center_hz,
-                    samp_hz=SAMP_RATE_HZ,
-                    tx_vga_db=args.tx_vga,
-                    tx_amp_on=args.tx_amp,
-                    repeats=5,
-                    device=sdr.device,
-                )
-                print(" done")
+                # Retransmit payload ACK for 120s so caller catches it after
+                # finishing its RLNC TX window (up to 90s after decode).
+                import time as _time
+                _ack_deadline = _time.monotonic() + 120.0
+                _ack_n = 0
+                print(f"  TX payload ACK ({len(ack_frame)}B, repeating 120s)...",
+                      flush=True)
+                while _time.monotonic() < _ack_deadline:
+                    soapy_tx_burst(
+                        ack_sym_samples, sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        repeats=5,
+                        device=sdr.device,
+                    )
+                    _ack_n += 1
+                    print(f"  payload ACK burst {_ack_n} done, "
+                          f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
+                          flush=True)
+                print("  payload ACK TX complete")
             else:
                 print(f"  payload decode incomplete "
                       f"({received_count[0]} symbols received)")
