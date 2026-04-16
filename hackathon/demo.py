@@ -1541,7 +1541,14 @@ def main() -> int:
         block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
         listen_duration = max(600.0, args.duration)
 
-        with SoapyDevice(args.device, center_hz=args.freq * 1e6) as sdr:
+        # Apply --ppm to SoapyDevice so TX (ACK, payload ACK) uses the
+        # corrected center frequency, not just RX.  This aligns ACK TX with
+        # the caller's RX center so the caller sees the ACK near 0 Hz even
+        # when inter-device crystal spread is large (e.g. 205 kHz at 5.8 GHz).
+        _respond_center_hz = args.freq * 1e6
+        if args.ppm != 0.0:
+            _respond_center_hz += _respond_center_hz * args.ppm / 1e6
+        with SoapyDevice(args.device, center_hz=_respond_center_hz) as sdr:
             # ── Phase 1: hail RX ──────────────────────────────────────────
             # Single device handle is shared across all three phases.
             # libhackrf ≥ 2026.01.3 fixed the setupStream deadlock so
