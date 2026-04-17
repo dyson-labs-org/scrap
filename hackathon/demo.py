@@ -1739,18 +1739,21 @@ def main() -> int:
                 print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
                 print(f"  content: {payload_out[:80]}")
 
-                ack_frame = encode_payload_ack(payload_out, rx_key, prk, sess_id)
-                ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
-                ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
-                ack_sym_samples = upsample_chips_to_samples(ack_sym_chips, SAMPS_PER_CHIP)
                 # Retransmit payload ACK for 120s so caller catches it after
                 # finishing its RLNC TX window (up to 90s after decode).
+                # Re-encode each burst with an incrementing seq so every
+                # retransmission uses a unique (key, nonce) — fixes nonce reuse.
                 import time as _time
                 _ack_deadline = _time.monotonic() + 120.0
                 _ack_n = 0
-                print(f"  TX payload ACK ({len(ack_frame)}B, repeating 120s)...",
-                      flush=True)
+                print(f"  TX payload ACK (52B, repeating 120s)...", flush=True)
                 while _time.monotonic() < _ack_deadline:
+                    ack_frame = encode_payload_ack(
+                        payload_out, rx_key, prk, sess_id, seq=_ack_n)
+                    ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
+                    ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
+                    ack_sym_samples = upsample_chips_to_samples(
+                        ack_sym_chips, SAMPS_PER_CHIP)
                     soapy_tx_burst(
                         ack_sym_samples, sdr.center_hz,
                         samp_hz=SAMP_RATE_HZ,
@@ -1913,7 +1916,7 @@ def main() -> int:
             n_sym_bytes = len(session.next_tx_frame())
             session = RLNCSession(payload, K, session_keys)  # reset comb_id
 
-            PAYLOAD_ACK_BYTES = 48
+            PAYLOAD_ACK_BYTES = 52  # 4 seq + 32 hash (encrypted) + 16 Poly1305 tag
 
             n_fec_bits = sc.payload_fec_total_bits(n_sym_bytes)
             sym_chips_per_frame = n_fec_bits * sf.CHIPS_PER_SYMBOL

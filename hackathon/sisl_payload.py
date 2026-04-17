@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import struct
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
@@ -44,12 +45,24 @@ def encode_ack(
     reverse_direction_key: bytes,
     session_prk: bytes,
     session_id: bytes,
+    seq: int = 0,
 ) -> bytes:
+    """Encode a payload ACK frame.
+
+    Frame layout (52 bytes):
+      seq_bytes (4 B, big-endian uint32)  — retransmit sequence number
+      AEAD ciphertext+tag (48 B)          — encrypts sha256(session_id+payload)
+
+    The payload hash is inside the AEAD envelope so it is invisible to
+    observers without the key.  ``seq`` is included in both the IV derivation
+    and the AAD so every retransmission uses a unique (key, nonce) pair.
+    """
+    seq_bytes = struct.pack(">I", seq)
     h = hashlib.sha256(session_id + payload).digest()
-    iv = derive_rlnc_ack_iv(session_prk)
-    aad = session_id + b"sisl-ack"
-    tag = ChaCha20Poly1305(reverse_direction_key).encrypt(iv, b"", aad)
-    return h + tag
+    iv = derive_rlnc_ack_iv(session_prk, seq)
+    aad = session_id + b"sisl-ack" + seq_bytes
+    ct_and_tag = ChaCha20Poly1305(reverse_direction_key).encrypt(iv, h, aad)
+    return seq_bytes + ct_and_tag
 
 
 def decode_ack(
@@ -59,13 +72,22 @@ def decode_ack(
     session_prk: bytes,
     session_id: bytes,
 ) -> bool:
-    expected_hash = hashlib.sha256(session_id + payload).digest()
-    if frame[:32] != expected_hash:
+    """Decode and verify a payload ACK frame.
+
+    Reads ``seq`` from the frame, derives the matching IV, decrypts the hash
+    from inside the AEAD envelope, and verifies it against the expected payload
+    hash using a constant-time comparison.
+    """
+    if len(frame) < 4 + 32 + 16:
         return False
-    iv = derive_rlnc_ack_iv(session_prk)
-    aad = session_id + b"sisl-ack"
+    seq_bytes = frame[:4]
+    seq = struct.unpack(">I", seq_bytes)[0]
+    iv = derive_rlnc_ack_iv(session_prk, seq)
+    aad = session_id + b"sisl-ack" + seq_bytes
     try:
-        ChaCha20Poly1305(reverse_direction_key).decrypt(iv, frame[32:], aad)
+        h_decrypted = ChaCha20Poly1305(reverse_direction_key).decrypt(
+            iv, frame[4:], aad)
     except Exception:
         return False
-    return True
+    expected_hash = hashlib.sha256(session_id + payload).digest()
+    return secrets.compare_digest(h_decrypted, expected_hash)

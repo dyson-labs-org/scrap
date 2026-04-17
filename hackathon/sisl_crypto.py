@@ -806,8 +806,15 @@ def derive_coef_stream(session_prk: bytes, comb_id: int, length: int) -> bytes:
     return _hkdf_expand(session_prk, b"sisl-rlnc-coef" + comb_id.to_bytes(4, 'big'), length)
 
 
-def derive_rlnc_ack_iv(session_prk: bytes) -> bytes:
-    return _hkdf_expand(session_prk, b"sisl-ack-iv", 12)
+def derive_rlnc_ack_iv(session_prk: bytes, seq: int) -> bytes:
+    """Derive a per-retransmission IV for the RLNC payload ACK.
+
+    ``seq`` is the retransmit sequence number (0, 1, 2, …).  Including it in
+    the HKDF info string guarantees a unique (key, nonce) pair for every ACK
+    burst, preventing the catastrophic nonce-reuse that a fixed IV would cause
+    when the ACK is retransmitted multiple times per session.
+    """
+    return _hkdf_expand(session_prk, b"sisl-ack-iv" + seq.to_bytes(4, 'big'), 12)
 
 
 # ── RLNC payload FEC frame layout ────────────────────────────────────────────
