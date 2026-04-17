@@ -49,7 +49,8 @@ def sample_coefficients(
     c: float = 0.1,
     delta: float = 0.1,
 ) -> list[int]:
-    stream = derive_coef_stream(session_prk, comb_id, 2 + 4 * K)
+    # 2 bytes for degree sample + 4 bytes × max_attempts (4K) for index samples.
+    stream = derive_coef_stream(session_prk, comb_id, 2 + 16 * K)
 
     cdf = robust_soliton_cdf(K, c, delta)
     u = int.from_bytes(stream[0:2], 'big') / 65536.0
@@ -60,8 +61,10 @@ def sample_coefficients(
     attempts = 0
     max_attempts = 4 * K
     while len(indices) < d and attempts < max_attempts:
-        idx = stream[pos % len(stream)] % K
-        pos += 1
+        # Use 4 bytes per sample to eliminate modular bias for K not dividing 256.
+        raw = int.from_bytes(stream[pos:pos + 4], 'big')
+        idx = raw % K
+        pos += 4
         attempts += 1
         if idx not in indices:
             indices.append(idx)
@@ -100,6 +103,7 @@ class RLNCDecoder:
         self._prk = session_prk
         self._symbols: list[tuple[list[int], bytearray]] = []
         self._recovered: dict[int, bytes] = {}
+        self._seen_ids: set[int] = set()
 
     def _peel(self) -> None:
         changed = True
@@ -120,6 +124,9 @@ class RLNCDecoder:
                         changed = True
 
     def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
+        if comb_id in self._seen_ids:
+            return self.is_complete
+        self._seen_ids.add(comb_id)
         indices = sample_coefficients(comb_id, self._K, self._prk)
         self._symbols.append((indices, bytearray(encoded_bytes)))
         self._peel()

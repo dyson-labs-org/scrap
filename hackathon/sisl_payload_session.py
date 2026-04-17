@@ -12,8 +12,11 @@ class RLNCSession:
         self._session_keys = session_keys
         self._prk = derive_session_prk(session_keys)
         self._session_id = session_keys["session_id"]
-        self._tx_key = session_keys["p2p_tx_key"]
-        self._rx_key = session_keys["p2p_rx_key"]
+        # Directional keys: c2r = caller→responder, r2c = responder→caller.
+        # next_tx_frame / rx_frame use _c2r_key (payload flows caller→responder).
+        # build_ack / verify_ack use _r2c_key (ACK flows responder→caller).
+        self._c2r_key = session_keys["p2p_tx_key"]
+        self._r2c_key = session_keys["p2p_rx_key"]
         self._encoder = RLNCEncoder(payload, K, self._prk)
         self._decoder = RLNCDecoder(K, self._prk)
         self._next_comb_id = 0
@@ -23,10 +26,12 @@ class RLNCSession:
         comb_id = self._next_comb_id
         self._next_comb_id += 1
         _, encoded_bytes, _ = self._encoder.encode_symbol(comb_id)
-        return encode_payload_symbol(comb_id, encoded_bytes, self._tx_key, self._prk, self._session_id)
+        return encode_payload_symbol(
+            comb_id, encoded_bytes, self._c2r_key, self._prk, self._session_id)
 
     def rx_frame(self, frame: bytes) -> bool:
-        comb_id, plain = decode_payload_symbol(frame, self._tx_key, self._prk, self._session_id)
+        comb_id, plain = decode_payload_symbol(
+            frame, self._c2r_key, self._prk, self._session_id)
         complete = self._decoder.add_symbol(comb_id, plain)
         if complete and self._recovered is None:
             raw = self._decoder.decode()
@@ -36,10 +41,10 @@ class RLNCSession:
     def recovered_payload(self) -> bytes | None:
         return self._recovered
 
-    def build_ack(self) -> bytes | None:
+    def build_ack(self, seq: int = 0) -> bytes | None:
         if self._recovered is None:
             return None
-        return encode_ack(self._payload, self._rx_key, self._prk, self._session_id)
+        return encode_ack(self._payload, self._r2c_key, self._prk, self._session_id, seq=seq)
 
     def verify_ack(self, ack_frame: bytes) -> bool:
-        return decode_ack(ack_frame, self._payload, self._rx_key, self._prk, self._session_id)
+        return decode_ack(ack_frame, self._payload, self._r2c_key, self._prk, self._session_id)

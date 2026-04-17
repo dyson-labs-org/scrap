@@ -946,8 +946,6 @@ def decode_all_payload_in_block(
     phase_avgs = mag[:n_full].reshape(-1, samps_per_symbol).mean(axis=0)
     chip_phase = int(np.argmax(phase_avgs))
 
-    import sys as _sys3
-    print(f"  [DBG] decode_all: n_block_sym={n_block_symbols} n_track_bytes={n_track_bytes} corr_len={len(corr_c)} peak={peak_mag:.0f} chip_phase={chip_phase}", file=_sys3.stderr, flush=True)
     track = sf.decode_with_freq_tracking(
         samples_corr, samps_per_chip,
         n_bytes=n_track_bytes,
@@ -956,12 +954,9 @@ def decode_all_payload_in_block(
         start_pos=chip_phase,
         peak_hint=float(phase_avgs[chip_phase]),  # avg DSSS peak, not spike
     )
-    print(f"  [DBG] decode_all: track={'None' if track is None else len(track.get('peak_values',[]))}", file=_sys3.stderr, flush=True)
     if track is None:
         return [{**base, "status": "track_lost"}]
     peak_values = track["peak_values"]
-    print(f"  [DBG] decode_all: peak_values={len(peak_values)} n_fec_bits={n_fec_bits}", file=_sys3.stderr, flush=True)
-
     # ── 5. Sliding ASM search across full block ───────────────────────────
     frame_len_bytes = n_payload_bytes + sc.PAYLOAD_HEADER_LEN
     topk = find_sisl_frame_soft_topk(
@@ -986,22 +981,11 @@ def decode_all_payload_in_block(
             continue
 
         _, fec_soft, theta0, delta_theta, rms_res = dbpsk
-        import sys as _sys4
-        print(f"  [DBG] cand={cand_offset} score={cand_score:.1f} "
-              f"theta0={theta0:.3f} dtheta={delta_theta:.2e} rms={rms_res:.3f} "
-              f"llr_mean={fec_soft.mean():.1f} llr_std={fec_soft.std():.1f} "
-              f"llr_absmax={np.abs(fec_soft).max():.1f} "
-              f"fec_soft[:8]={fec_soft[:8].tolist()}",
-              file=_sys4.stderr, flush=True)
         for polarity in (1.0, -1.0):
             raw = sc.decode_payload_symbol_fec_from_llrs(
                 polarity * fec_soft, n_payload_bytes,
             )
             if raw is not None and len(raw) == n_payload_bytes:
-                import struct as _struct
-                comb_id_guess = _struct.unpack(">I", raw[:4])[0]
-                print(f"  [DBG] pol={polarity:+.0f} comb_id_guess={comb_id_guess} raw[:8]={raw[:8].hex()}",
-                      file=_sys4.stderr, flush=True)
                 results.append({
                     "status": "decrypt_ok",
                     "payload_frame_bytes": raw,

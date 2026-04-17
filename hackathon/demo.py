@@ -1386,6 +1386,10 @@ def main() -> int:
                              "at 2 Msps with a single tuner gain; "
                              "useful as a second observer on sub-GHz "
                              "bands. tx mode is always HackRF.")
+    parser.add_argument("--serial", type=str, default=None,
+                        help="HackRF serial number to open (short or full). "
+                             "Required when two HackRF devices are connected "
+                             "so each process claims a distinct device.")
     parser.add_argument("--payload", type=str, default=None,
                         help="file path to send as RLNC payload after session "
                              "establishment (call mode). Responder saves "
@@ -1548,7 +1552,10 @@ def main() -> int:
         _respond_center_hz = args.freq * 1e6
         if args.ppm != 0.0:
             _respond_center_hz += _respond_center_hz * args.ppm / 1e6
-        with SoapyDevice(args.device, center_hz=_respond_center_hz) as sdr:
+        _device_str = None
+        if args.serial:
+            _device_str = f"driver=hackrf,serial={args.serial}"
+        with SoapyDevice(args.device, device_str=_device_str, center_hz=_respond_center_hz) as sdr:
             # ── Phase 1: hail RX ──────────────────────────────────────────
             # Single device handle is shared across all three phases.
             # libhackrf ≥ 2026.01.3 fixed the setupStream deadlock so
@@ -1784,7 +1791,10 @@ def main() -> int:
         # are stable; no close/reopen needed between phases.
         # The handle is grabbed here so Phase 1 TX, Phase 2 ACK RX, Phase 3
         # RLNC TX, and Phase 4 payload ACK RX all share one USB session.
-        call_sdr = SoapyDevice(args.device, center_hz=center_hz)
+        _call_device_str = None
+        if args.serial:
+            _call_device_str = f"driver=hackrf,serial={args.serial}"
+        call_sdr = SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz)
         print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
 
         # Build the hail — retain ephemeral key for ACK decode

@@ -835,6 +835,20 @@ def payload_fec_total_bits(n_payload_bytes: int) -> int:
     return PAYLOAD_FEC_HEADER_BITS + sisl_fec.coded_length(n_payload_bytes * 8)
 
 
+def _payload_interleave_perm(n_coded_bits: int) -> np.ndarray:
+    """Return row-major→column-major interleave permutation for n_coded_bits.
+
+    Selects the largest power-of-2 rows (up to 32) that evenly divides
+    n_coded_bits, guaranteeing a non-trivial interleave for any coded length.
+    Example: 912 bits → rows=16, cols=57 (16 is largest power-of-2 divisor ≤32).
+    """
+    for rows in (32, 16, 8, 4, 2):
+        if n_coded_bits % rows == 0:
+            cols = n_coded_bits // rows
+            return np.arange(n_coded_bits).reshape(rows, cols).T.ravel()
+    return np.arange(n_coded_bits)  # n_coded_bits==1: identity
+
+
 def encode_payload_symbol_fec(payload_symbol_bytes: bytes) -> np.ndarray:
     """Produce FEC-coded channel bits for one RLNC payload symbol.
 
@@ -845,6 +859,8 @@ def encode_payload_symbol_fec(payload_symbol_bytes: bytes) -> np.ndarray:
     header_bits = np.unpackbits(np.frombuffer(header, dtype=np.uint8))
     body_bits = np.unpackbits(np.frombuffer(payload_symbol_bytes, dtype=np.uint8))
     coded_body = sisl_fec.encode(body_bits)
+    perm = _payload_interleave_perm(len(coded_body))
+    coded_body = coded_body[perm]
     seed = int(header_bits[-1])
     diff_body = sf.differential_encode_bits(coded_body, seed=seed)
     return np.concatenate([header_bits, diff_body]).astype(np.uint8)
@@ -865,5 +881,9 @@ def decode_payload_symbol_fec_from_llrs(
         return None
     llrs = np.asarray(llrs[:n_fec_bits], dtype=np.float32)
     body_llrs = llrs[PAYLOAD_FEC_HEADER_BITS:]
+    n_coded = len(body_llrs)
+    perm = _payload_interleave_perm(n_coded)
+    deinterleave_perm = np.argsort(perm)
+    body_llrs = body_llrs[deinterleave_perm]
     body_bits = sisl_fec.decode(body_llrs, n_payload_bytes * 8)
     return np.packbits(body_bits).tobytes()[:n_payload_bytes]
