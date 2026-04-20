@@ -116,7 +116,7 @@ class LlrAccumulator:
         """
         if self.n_copies == 0:
             return None
-        body_llrs_f32 = sc._deinterleave_llrs(
+        body_llrs_f32 = sc.deinterleave_hail_body_llrs(
             self.accumulated.astype(np.float32))
         body_bits = sisl_fec.decode(
             body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,

@@ -761,14 +761,11 @@ class _AgcPpmState:
             return
         foff = result.get("freq_offset_hz")
         now = time.time()
-        # Ignore extreme offsets (> 100 kHz) — these are spurs, not the
-        # signal. After PPM calibration the real signal should be within
-        # ±50 kHz; a 100 kHz gate prevents spur-locked estimates from
-        # corrupting the median and causing runaway AUTO-PPM drift.
-        # NOTE: at 5+ GHz the inter-device PPM spread (~35 PPM = 183 kHz)
-        # exceeds this gate. Fix: pass --ppm to pre-correct the larger
-        # of the two device offsets before running at 5 GHz.
-        MAX_FOFF_HZ = 100_000.0
+        # Ignore extreme offsets — these are spurs, not the signal. After PPM
+        # calibration the real signal should be within ±50 kHz. Scale the gate
+        # with frequency so that at 5.8 GHz (35 PPM inter-device = ~200 kHz)
+        # the gate still admits the real signal while rejecting distant spurs.
+        MAX_FOFF_HZ = max(100_000.0, self._nominal_center_hz * 40e-6)
         if foff is not None and abs(foff) > 0 and abs(foff) <= MAX_FOFF_HZ:
             self._offset_history.append(foff)
             do_retune = False
@@ -1701,15 +1698,12 @@ def main() -> int:
                         print(f"  symbol {comb_id} received "
                               f"({received_count[0]} total), complete={complete}")
                     except ValueError as _e:
-                        raw = res["payload_frame_bytes"]
-                        import struct as _s
-                        _cid = _s.unpack(">I", raw[:4])[0]
-                        print(f"  [AEAD FAIL] comb_id={_cid} "
-                              f"tx_key[:4]={tx_key[:4].hex()} "
-                              f"prk[:4]={prk[:4].hex()} "
-                              f"sess_id[:4]={sess_id[:4].hex()} "
-                              f"frame[:8]={raw[:8].hex()}",
-                              flush=True)
+                        if os.environ.get("SISL_DEBUG"):
+                            raw = res["payload_frame_bytes"]
+                            import struct as _s
+                            _cid = _s.unpack(">I", raw[:4])[0]
+                            print(f"  [AEAD FAIL] comb_id={_cid} frame[:8]={raw[:8].hex()}",
+                                  flush=True)
                 if complete:
                     return {"status": "decrypt_ok", "decoded_hail": True}
                 # Return a result with real peak diagnostics for _print_live_event.
@@ -1876,6 +1870,7 @@ def main() -> int:
                 exit_on_decrypt=True,
                 decode_fn=_ack_decode_fn,
             )
+            ack_recv_time = time.time()
             dh = ack_stats.get("_decoded_hail")
             if not (ack_stats.get("hails_decrypted", 0) > 0 and dh is not None):
                 print(f"\n  timeout — no ACK received")
@@ -1888,21 +1883,21 @@ def main() -> int:
                   flush=True)
 
             # ── Phase 3: RLNC payload TX ──────────────────────────────────
-            # Delay Phase 3 TX until responder's ACK TX window has expired.
-            # Do this BEFORE call_sdr.reopen() because reopen() can block for
-            # 10-15 seconds on Linux USB re-enumeration, consuming the window.
-            # The responder keeps sending ACKs for ACK_TX_WINDOW seconds from
-            # when it decoded the hail (could be as early as Phase 1 start).
-            # If we start RLNC TX before that, the responder is still
-            # transmitting ACKs and not listening → payload is missed entirely.
+            # Wait until the responder's ACK TX window has expired before
+            # starting RLNC TX. The responder transmits ACKs for ACK_TX_WINDOW
+            # seconds from when it decoded the hail, then switches to payload RX.
+            #
+            # We anchor to ack_recv_time (when we received the first ACK) rather
+            # than phase1_start_time. The responder's hail-decode happened no
+            # later than ack_recv_time, so waiting ACK_TX_WINDOW from
+            # ack_recv_time guarantees the responder has finished its ACK window
+            # regardless of clock drift between the two processes.
             _ACK_TX_WINDOW = 50.0  # must match responder ACK_TX_WINDOW
-            _phase3_ready_at = phase1_start_time + _ACK_TX_WINDOW
+            _phase3_ready_at = ack_recv_time + _ACK_TX_WINDOW
             _phase3_delay = _phase3_ready_at - time.time()
-            print(f"  [phase3 timing] phase1_start={phase1_start_time:.1f} "
-                  f"now={time.time():.1f} delay={_phase3_delay:.1f}s", flush=True)
+            print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
+                  flush=True)
             if _phase3_delay > 0:
-                print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
-                      flush=True)
                 time.sleep(_phase3_delay)
 
             dh2_sess = sc.ecdh(caller_static, dh.responder_eph_pub)
@@ -1944,9 +1939,7 @@ def main() -> int:
             _tx_key_caller = session_keys["p2p_tx_key"]
             rx_key = session_keys["p2p_rx_key"]
             sess_id = session_keys["session_id"]
-            print(f"  [KEY DBG caller] tx_key[:4]={_tx_key_caller[:4].hex()} "
-                  f"prk[:4]={prk[:4].hex()} sess_id[:4]={sess_id[:4].hex()}",
-                  flush=True)
+
 
             from sisl_payload import decode_ack as _decode_payload_ack
 

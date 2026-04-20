@@ -22,6 +22,7 @@ Dependencies: `cryptography` (pyca).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import secrets
 import struct
@@ -139,6 +140,11 @@ _ACK_DEINTERLEAVE_PERM = np.argsort(_ACK_INTERLEAVE_PERM)
 
 def _deinterleave_llrs(llrs: np.ndarray) -> np.ndarray:
     """Undo block interleaving on soft LLR array (float32)."""
+    return llrs[_DEINTERLEAVE_PERM]
+
+
+def deinterleave_hail_body_llrs(llrs: np.ndarray) -> np.ndarray:
+    """Public alias for hail body LLR deinterleaving (used by sisl_rx)."""
     return llrs[_DEINTERLEAVE_PERM]
 
 
@@ -835,6 +841,7 @@ def payload_fec_total_bits(n_payload_bytes: int) -> int:
     return PAYLOAD_FEC_HEADER_BITS + sisl_fec.coded_length(n_payload_bytes * 8)
 
 
+@functools.lru_cache(maxsize=8)
 def _payload_interleave_perm(n_coded_bits: int) -> np.ndarray:
     """Return row-major→column-major interleave permutation for n_coded_bits.
 
