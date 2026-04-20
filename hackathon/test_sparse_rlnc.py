@@ -42,10 +42,12 @@ def test_degree_range():
 def test_coefficients_unique():
     for K in (16, 32):
         for comb_id in range(5):
-            indices = sr.sample_coefficients(comb_id, K, PRK)
+            indices, coeffs = sr.sample_coefficients(comb_id, K, PRK)
             assert len(indices) == len(set(indices)), "duplicate indices"
             assert all(0 <= i < K for i in indices), "index out of range"
             assert indices == sorted(indices), "not sorted"
+            assert all(1 <= c <= 255 for c in coeffs), "coefficient out of GF(2^8) nonzero range"
+            assert len(indices) == len(coeffs), "indices/coeffs length mismatch"
 
 
 def test_coefficients_deterministic():
@@ -71,24 +73,23 @@ def test_encode_length():
     assert len(sym) == len(frags[0])
 
 
-def test_encode_xor():
+def test_encode_gf_linear():
+    """Verify GF(2^8) linear combination: encoded = XOR of c_i * frag_i."""
+    import numpy as np
     payload = bytes(range(256)) * 2
     K = 16
     enc = sr.RLNCEncoder(payload, K, PRK)
-    frags = sr.fragment_payload(payload, K)
+    frags = [np.frombuffer(f, dtype=np.uint8) for f in sr.fragment_payload(payload, K)]
 
-    for comb_id in range(20):
+    for comb_id in range(40):
         _, sym, indices = enc.encode_symbol(comb_id)
-        if len(indices) == 2:
-            expected = bytes(a ^ b for a, b in zip(frags[indices[0]], frags[indices[1]]))
-            assert sym == expected, f"comb_id={comb_id} XOR mismatch"
-            return
-    # if no degree-2 found, just verify degree-1
-    for comb_id in range(20):
-        _, sym, indices = enc.encode_symbol(comb_id)
-        if len(indices) == 1:
-            assert sym == frags[indices[0]]
-            return
+        idx_list, coeff_list = sr.sample_coefficients(comb_id, K, PRK)
+        sym_arr = np.frombuffer(sym, dtype=np.uint8)
+        expected = np.zeros(len(sym_arr), dtype=np.uint8)
+        for idx, coeff in zip(idx_list, coeff_list):
+            expected ^= sr._gf_mul_vec(coeff, frags[idx])
+        assert (sym_arr == expected).all(), f"comb_id={comb_id} GF linear combination mismatch"
+        return  # one check suffices
 
 
 def test_fragment_padding():

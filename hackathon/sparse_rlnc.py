@@ -3,7 +3,60 @@ from __future__ import annotations
 import math
 import bisect
 
+import numpy as np
+
 from sisl_crypto import derive_coef_stream
+
+
+# ── GF(2^8) arithmetic (AES polynomial x^8+x^4+x^3+x+1 = 0x11b) ────────────
+
+_GF256_POLY = 0x11b
+
+
+def _build_gf256_tables() -> tuple[list[int], list[int]]:
+    """Build GF(2^8) log/antilog tables using generator 3 (= x+1, primitive root of AES poly)."""
+    exp = [0] * 512
+    log = [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i] = x
+        log[x] = i
+        # Multiply x by 3 = (x+1): x*x XOR x, reduced mod x^8+x^4+x^3+x+1
+        x ^= (x << 1) ^ (0x1b if x & 0x80 else 0)
+        x &= 0xff
+    for i in range(255, 512):
+        exp[i] = exp[i - 255]
+    return exp, log
+
+
+_GF256_EXP, _GF256_LOG = _build_gf256_tables()
+
+
+def _gf_mul(a: int, b: int) -> int:
+    if a == 0 or b == 0:
+        return 0
+    return _GF256_EXP[_GF256_LOG[a] + _GF256_LOG[b]]
+
+
+def _gf_inv(a: int) -> int:
+    return _GF256_EXP[255 - _GF256_LOG[a]]
+
+
+# 256×256 multiply table for vectorized byte-array operations.
+_MUL_TABLE = np.zeros((256, 256), dtype=np.uint8)
+for _a in range(256):
+    for _b in range(256):
+        _MUL_TABLE[_a, _b] = _gf_mul(_a, _b)
+
+# Inverse table (element 0 is undefined; map 0 → 0 as sentinel).
+_INV_TABLE = np.zeros(256, dtype=np.uint8)
+for _a in range(1, 256):
+    _INV_TABLE[_a] = _gf_inv(_a)
+
+
+def _gf_mul_vec(scalar: int, vec: np.ndarray) -> np.ndarray:
+    """Multiply each byte in vec by scalar ∈ GF(2^8)."""
+    return _MUL_TABLE[scalar][vec]
 
 
 def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> list[float]:
@@ -48,28 +101,39 @@ def sample_coefficients(
     session_prk: bytes,
     c: float = 0.1,
     delta: float = 0.1,
-) -> list[int]:
-    # 2 bytes for degree sample + 4 bytes × max_attempts (4K) for index samples.
-    stream = derive_coef_stream(session_prk, comb_id, 2 + 16 * K)
+) -> tuple[list[int], list[int]]:
+    """Sample (indices, GF(2^8) coefficients) for one coded symbol.
+
+    Returns two parallel lists: fragment indices and their nonzero GF(2^8)
+    coefficients (1..255).  The stream layout is:
+        2 bytes  — uniform [0,1) for degree sampling
+        5 bytes × max_attempts — 4 bytes index + 1 byte coefficient
+    """
+    max_attempts = 4 * K
+    stream = derive_coef_stream(session_prk, comb_id, 2 + 5 * max_attempts)
 
     cdf = robust_soliton_cdf(K, c, delta)
     u = int.from_bytes(stream[0:2], 'big') / 65536.0
     d = sample_degree(cdf, u)
 
     indices: list[int] = []
+    coeffs: list[int] = []
     pos = 2
     attempts = 0
-    max_attempts = 4 * K
     while len(indices) < d and attempts < max_attempts:
-        # Use 4 bytes per sample to eliminate modular bias for K not dividing 256.
         raw = int.from_bytes(stream[pos:pos + 4], 'big')
         idx = raw % K
-        pos += 4
+        coeff_raw = stream[pos + 4]
+        coeff = (coeff_raw % 255) + 1  # map 0..254 → 1..255 (always nonzero)
+        pos += 5
         attempts += 1
         if idx not in indices:
             indices.append(idx)
+            coeffs.append(coeff)
 
-    return sorted(indices)
+    # Sort by index for deterministic ordering.
+    pairs = sorted(zip(indices, coeffs))
+    return ([p[0] for p in pairs], [p[1] for p in pairs])
 
 
 def fragment_payload(payload: bytes, K: int) -> list[bytes]:
@@ -83,17 +147,19 @@ def fragment_payload(payload: bytes, K: int) -> list[bytes]:
 
 class RLNCEncoder:
     def __init__(self, payload: bytes, K: int, session_prk: bytes):
-        self._fragments = fragment_payload(payload, K)
+        self._fragments = [
+            np.frombuffer(f, dtype=np.uint8).copy()
+            for f in fragment_payload(payload, K)
+        ]
         self._K = K
         self._prk = session_prk
 
     def encode_symbol(self, comb_id: int) -> tuple[int, bytes, list[int]]:
-        indices = sample_coefficients(comb_id, self._K, self._prk)
-        frags = [self._fragments[i] for i in indices]
-        result = bytearray(frags[0])
-        for f in frags[1:]:
-            for j in range(len(result)):
-                result[j] ^= f[j]
+        indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
+        frag_size = len(self._fragments[0])
+        result = np.zeros(frag_size, dtype=np.uint8)
+        for idx, c in zip(indices, coeffs):
+            result ^= _gf_mul_vec(c, self._fragments[idx])
         return (comb_id, bytes(result), indices)
 
 
@@ -101,34 +167,47 @@ class RLNCDecoder:
     def __init__(self, K: int, session_prk: bytes):
         self._K = K
         self._prk = session_prk
-        self._symbols: list[tuple[list[int], bytearray]] = []
-        self._recovered: dict[int, bytes] = {}
+        # Each entry: (coeff_vec: np.ndarray[K, uint8], data: np.ndarray[frag_size, uint8])
+        self._symbols: list[tuple[np.ndarray, np.ndarray]] = []
+        self._recovered: dict[int, np.ndarray] = {}
         self._seen_ids: set[int] = set()
+
+    def _subtract_recovered(self, coeff_vec: np.ndarray, data: np.ndarray) -> None:
+        """XOR out all already-recovered fragments from a symbol's data."""
+        for i, frag in self._recovered.items():
+            c = int(coeff_vec[i])
+            if c != 0:
+                data ^= _gf_mul_vec(c, frag)
+                coeff_vec[i] = 0
 
     def _peel(self) -> None:
         changed = True
         while changed and len(self._recovered) < self._K:
             changed = False
-            for active_set, enc_bytes in self._symbols:
-                to_remove = [i for i in list(active_set) if i in self._recovered]
-                for i in to_remove:
-                    frag = self._recovered[i]
-                    for j in range(len(enc_bytes)):
-                        enc_bytes[j] ^= frag[j]
-                    active_set.remove(i)
-                if len(active_set) == 1:
-                    frag_idx = active_set[0]
-                    if frag_idx not in self._recovered:
-                        self._recovered[frag_idx] = bytes(enc_bytes)
-                        active_set.clear()
+            for coeff_vec, data in self._symbols:
+                self._subtract_recovered(coeff_vec, data)
+                nonzero = np.flatnonzero(coeff_vec)
+                if len(nonzero) == 1:
+                    idx = int(nonzero[0])
+                    if idx not in self._recovered:
+                        c = int(coeff_vec[idx])
+                        frag = data.copy()
+                        if c != 1:
+                            frag = _gf_mul_vec(int(_INV_TABLE[c]), frag)
+                        self._recovered[idx] = frag
+                        coeff_vec[idx] = 0
                         changed = True
 
     def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
         if comb_id in self._seen_ids:
             return self.is_complete
         self._seen_ids.add(comb_id)
-        indices = sample_coefficients(comb_id, self._K, self._prk)
-        self._symbols.append((indices, bytearray(encoded_bytes)))
+        indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
+        coeff_vec = np.zeros(self._K, dtype=np.uint8)
+        for idx, c in zip(indices, coeffs):
+            coeff_vec[idx] = c
+        data = np.frombuffer(encoded_bytes, dtype=np.uint8).copy()
+        self._symbols.append((coeff_vec, data))
         self._peel()
         if not self.is_complete:
             self._gaussian_eliminate()
@@ -136,48 +215,70 @@ class RLNCDecoder:
         return self.is_complete
 
     def _gaussian_eliminate(self) -> None:
-        residual = [
-            (list(active_set), bytearray(enc_bytes))
-            for active_set, enc_bytes in self._symbols
-            if active_set
-        ]
-        if not residual:
-            return
-        frag_size = len(residual[0][1])
         unknown = [i for i in range(self._K) if i not in self._recovered]
         if not unknown:
             return
-        idx_map = {frag: row for row, frag in enumerate(unknown)}
+        idx_map = {frag: col for col, frag in enumerate(unknown)}
         n = len(unknown)
-        rows: list[list[int]] = []
-        data: list[bytearray] = []
-        for active_set, enc_bytes in residual:
-            cols = sorted(idx_map[i] for i in active_set if i in idx_map)
+
+        # Build reduced coefficient matrix over unknowns only.
+        rows_c: list[np.ndarray] = []
+        rows_d: list[np.ndarray] = []
+        for coeff_vec, data in self._symbols:
+            # Apply known-fragment subtraction first.
+            cv = coeff_vec.copy()
+            d = data.copy()
+            self._subtract_recovered(cv, d)
+            cols = [idx_map[i] for i in unknown if cv[i] != 0]
             if cols:
-                rows.append(cols)
-                data.append(bytearray(enc_bytes))
+                row = np.zeros(n, dtype=np.uint8)
+                for i in unknown:
+                    if cv[i] != 0:
+                        row[idx_map[i]] = cv[i]
+                rows_c.append(row)
+                rows_d.append(d)
+
+        if not rows_c:
+            return
+
+        frag_size = len(rows_d[0])
         pivot_row: dict[int, int] = {}
         row_idx = 0
+
         for col in range(n):
+            # Find pivot.
             found = None
-            for r in range(row_idx, len(rows)):
-                if col in rows[r]:
+            for r in range(row_idx, len(rows_c)):
+                if rows_c[r][col] != 0:
                     found = r
                     break
             if found is None:
                 continue
-            rows[row_idx], rows[found] = rows[found], rows[row_idx]
-            data[row_idx], data[found] = data[found], data[row_idx]
+            rows_c[row_idx], rows_c[found] = rows_c[found], rows_c[row_idx]
+            rows_d[row_idx], rows_d[found] = rows_d[found], rows_d[row_idx]
+
+            # Normalize pivot row so pivot coefficient = 1.
+            piv_c = int(rows_c[row_idx][col])
+            if piv_c != 1:
+                inv_piv = int(_INV_TABLE[piv_c])
+                rows_c[row_idx] = _MUL_TABLE[inv_piv][rows_c[row_idx]]
+                rows_d[row_idx] = _gf_mul_vec(inv_piv, rows_d[row_idx])
+
             pivot_row[col] = row_idx
-            for r in range(len(rows)):
-                if r != row_idx and col in rows[r]:
-                    rows[r] = sorted(set(rows[r]) ^ set(rows[row_idx]))
-                    for j in range(frag_size):
-                        data[r][j] ^= data[row_idx][j]
+
+            # Eliminate this column from all other rows.
+            for r in range(len(rows_c)):
+                if r != row_idx and rows_c[r][col] != 0:
+                    scale = int(rows_c[r][col])
+                    rows_c[r] ^= _MUL_TABLE[scale][rows_c[row_idx]]
+                    rows_d[r] ^= _gf_mul_vec(scale, rows_d[row_idx])
+
             row_idx += 1
+
         for col, pr in pivot_row.items():
-            if rows[pr] == [col]:
-                self._recovered[unknown[col]] = bytes(data[pr])
+            nonzero = np.flatnonzero(rows_c[pr])
+            if len(nonzero) == 1 and nonzero[0] == col:
+                self._recovered[unknown[col]] = rows_d[pr].copy()
 
     def decode(self) -> bytes | None:
         self._peel()
@@ -186,7 +287,7 @@ class RLNCDecoder:
             self._peel()
         if len(self._recovered) < self._K:
             return None
-        parts = [self._recovered[i] for i in range(self._K)]
+        parts = [self._recovered[i].tobytes() for i in range(self._K)]
         return b''.join(parts)
 
     @property
