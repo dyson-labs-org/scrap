@@ -99,6 +99,7 @@ from sdr_devices import (
     DeviceInfo, DEVICES, PLUGIN_INSTALL_HINTS as _PLUGIN_INSTALL_HINTS,
     format_device_open_error as _format_device_open_error,
     get_device_ppm as _get_device_ppm,
+    get_band_min_vga as _get_band_min_vga,
 )
 
 
@@ -1308,10 +1309,10 @@ def main() -> int:
                              "RTL-SDR has no AMP stage; flag is ignored.")
     parser.add_argument("--no-rx-amp", action="store_false", dest="rx_amp",
                         help="rx: disable HackRF RX AMP")
-    parser.add_argument("--tx-vga", type=int, default=HACKRF_TX_VGA_DB,
-                        help=f"tx: HackRF TX VGA (IF gain, baseband "
-                             f"amplification before upconversion, 0..47 dB "
-                             f"in 1 dB steps) (default {HACKRF_TX_VGA_DB})")
+    parser.add_argument("--tx-vga", type=int, default=None,
+                        help="tx: HackRF TX VGA (IF gain, baseband "
+                             "amplification before upconversion, 0..47 dB "
+                             "in 1 dB steps) (default: band-calibrated minimum)")
     parser.add_argument("--rlnc-tx-vga", type=int, default=None,
                         help="tx: HackRF TX VGA for RLNC payload symbols only "
                              "(overrides --tx-vga for Phase 3; useful when "
@@ -1410,6 +1411,16 @@ def main() -> int:
                              "occupies 2 MHz. TX and RX must use the same "
                              "chip rate.")
     args = parser.parse_args()
+
+    # ── Resolve tx-vga: use band-calibrated minimum if not specified ──────────
+    if args.tx_vga is None:
+        cal_vga, cal_amp = _get_band_min_vga(args.freq * 1e6)
+        args.tx_vga = cal_vga
+        if cal_amp and not args.tx_amp:
+            args.tx_amp = True
+            print(f"  tx-vga cal: {args.freq:.0f} MHz → vga={cal_vga} dB + amp (auto)")
+        else:
+            print(f"  tx-vga cal: {args.freq:.0f} MHz → vga={cal_vga} dB (auto)")
 
     # ── Resolve chip rate → samples per chip for the selected device ──
     chip_rate_hz = int(args.chip_rate * 1e6)

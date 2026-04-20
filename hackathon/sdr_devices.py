@@ -39,6 +39,27 @@ DEVICE_PPM: dict[str, float] = {
 }
 
 
+# Minimum tx-vga (and whether --tx-amp is required) per nominal band center,
+# measured OTA with HackRF loopback at ~1 m using the full RLNC call/respond
+# sequence (hail + payload TX + ACK).  These are floor values for the test
+# bench; real deployments should add headroom.  Lookup uses nearest frequency.
+#
+# Measured 2026-04-20 with HackRF pair 930c64dc279e7bc3 / 78d063dc2b6d2267,
+# stock antennas, binary search over 0–47 dB, 290 s timeout per test.
+BAND_MIN_VGA: dict[int, tuple[int, bool]] = {
+    433_000_000:    (24, False),
+    915_000_000:    ( 3, False),
+    2_437_000_000:  (21, False),
+    5_825_000_000:  (47, True),   # also requires --tx-amp
+}
+
+
+def get_band_min_vga(freq_hz: float) -> tuple[int, bool]:
+    """Return (min_vga_db, tx_amp_required) for the nearest calibrated band."""
+    nearest = min(BAND_MIN_VGA, key=lambda f: abs(f - freq_hz))
+    return BAND_MIN_VGA[nearest]
+
+
 def get_device_ppm(serial: str) -> float:
     """Look up the calibrated PPM for a device by serial number.
 
