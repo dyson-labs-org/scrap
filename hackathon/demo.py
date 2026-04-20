@@ -1395,6 +1395,10 @@ def main() -> int:
     parser.add_argument("--rlnc-k", type=int, default=16,
                         help="RLNC source block count K (default 16). "
                              "Both call and respond must use the same value.")
+    parser.add_argument("--payload-len", type=int, default=None,
+                        help="Expected payload length in bytes (respond mode). "
+                             "Must match the caller's --payload file size. "
+                             "Defaults to the built-in demo payload length.")
     parser.add_argument("--chip-rate", type=float, default=1.0,
                         help="chip rate in Mcps (default 1.0). Higher rates "
                              "shorten each symbol, reducing phase drift per "
@@ -1647,17 +1651,15 @@ def main() -> int:
             K = args.rlnc_k
             prk = sc.derive_session_prk(session_keys)
             tx_key = session_keys["p2p_tx_key"]
-            rx_key = session_keys["p2p_rx_key"]
             sess_id = session_keys["session_id"]
             from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
-            from sisl_payload import encode_ack as encode_payload_ack
 
             _DEMO_PAYLOAD = (
                 b"SISL RLNC fountain code over DSSS steganographic link "
                 b"-- hackathon demo payload v1"
             )
-            expected_payload_len = len(_DEMO_PAYLOAD)
-            frags = _frag(_DEMO_PAYLOAD, K)
+            expected_payload_len = args.payload_len or len(_DEMO_PAYLOAD)
+            frags = _frag(b'\x00' * expected_payload_len, K)
             frag_size = len(frags[0])
             n_sym_bytes = 4 + frag_size + 16
 
@@ -1740,6 +1742,10 @@ def main() -> int:
                 print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
                 print(f"  content: {payload_out[:80]}")
 
+                # Build an RLNCSession with the recovered payload so we can
+                # use session.build_ack() — handles key direction and seq nonce.
+                ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
+
                 # Retransmit payload ACK for 120s so caller catches it after
                 # finishing its RLNC TX window (up to 90s after decode).
                 # Re-encode each burst with an incrementing seq so every
@@ -1749,8 +1755,7 @@ def main() -> int:
                 _ack_n = 0
                 print(f"  TX payload ACK (52B, repeating 120s)...", flush=True)
                 while _time.monotonic() < _ack_deadline:
-                    ack_frame = encode_payload_ack(
-                        payload_out, rx_key, prk, sess_id, seq=_ack_n)
+                    ack_frame = ack_session.build_ack(seq=_ack_n)
                     ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
                     ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
                     ack_sym_samples = upsample_chips_to_samples(
@@ -1917,9 +1922,10 @@ def main() -> int:
                     b"SISL RLNC fountain code over DSSS steganographic link "
                     b"-- hackathon demo payload v1"
                 )
+            from sparse_rlnc import fragment_payload as _frag_cal
+            _frags_cal = _frag_cal(payload, K)
+            n_sym_bytes = 4 + len(_frags_cal[0]) + 16  # comb_id + fragment + AEAD tag
             session = RLNCSession(payload, K, session_keys)
-            n_sym_bytes = len(session.next_tx_frame())
-            session = RLNCSession(payload, K, session_keys)  # reset comb_id
 
             PAYLOAD_ACK_BYTES = 52  # 4 seq + 32 hash (encrypted) + 16 Poly1305 tag
 
