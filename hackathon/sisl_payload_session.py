@@ -65,9 +65,8 @@ class RLNCSession:
         return self._recovered
 
     def build_ack(self, seq: int = 0) -> bytes | None:
-        if self._recovered is None:
-            return None
-        return encode_ack(self._payload, self._r2c_key, self._prk,
+        assert self._recovered is not None, "build_ack called before decode complete"
+        return encode_ack(self._recovered, self._r2c_key, self._prk,
                           self._session_id, seq=seq, K=self._K)
 
     def verify_ack(self, ack_frame: bytes) -> bool:
