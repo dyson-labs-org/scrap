@@ -262,7 +262,8 @@ class HailBody:
             + bytes([self.flags])
             + struct.pack("<H", self.payload_len)
         )
-        assert len(packed) == HAIL_BODY_LEN, (len(packed), HAIL_BODY_LEN)
+        if len(packed) != HAIL_BODY_LEN:
+            raise ValueError(f"expected {HAIL_BODY_LEN} bytes, got {len(packed)}")
         return packed
 
     @classmethod
@@ -363,10 +364,12 @@ def encode_hail(
     # pyca returns ciphertext||tag concatenated; split for clarity
     ciphertext = ct_with_tag[:HAIL_BODY_LEN]
     tag = ct_with_tag[HAIL_BODY_LEN:]
-    assert len(tag) == TAG_LEN
+    if len(tag) != TAG_LEN:
+        raise ValueError(f"expected {TAG_LEN} bytes, got {len(tag)}")
 
     frame = aad + ciphertext + tag
-    assert len(frame) == HAIL_FRAME_LEN, (len(frame), HAIL_FRAME_LEN)
+    if len(frame) != HAIL_FRAME_LEN:
+        raise ValueError(f"expected {HAIL_FRAME_LEN} bytes, got {len(frame)}")
     return frame
 
 
@@ -442,6 +445,47 @@ def decode_hail(
     )
 
 
+# ── Shared FEC encode helper ───────────────────────────────────────────────
+
+def _encode_frame_to_fec_bits(
+    frame: bytes,
+    header_len: int,
+    body_payload_len: int,
+    interleave_perm: np.ndarray,
+    fec_total_bits: int,
+    fec_header_bits: int,
+) -> np.ndarray:
+    """Encode a raw frame into FEC-coded channel bits.
+
+    Shared pipeline for hail and ACK FEC encoding:
+        frame bytes → split header / body → unpack bits
+        → conv FEC encode body → interleave → differential encode with header seed
+        → concatenate uncoded header bits + diff-encoded coded body bits.
+
+    Returns a uint8 ndarray of fec_total_bits bits.
+    """
+    header_bytes = frame[:header_len]
+    body_bytes = frame[header_len:]
+    if len(body_bytes) != body_payload_len:
+        raise ValueError(f"expected {body_payload_len} bytes, got {len(body_bytes)}")
+
+    header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
+    body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
+    coded_body_bits = sisl_fec.encode(body_bits)
+    if len(coded_body_bits) != len(interleave_perm):
+        raise ValueError(
+            f"expected {len(interleave_perm)} coded bits, got {len(coded_body_bits)}")
+
+    coded_body_bits = coded_body_bits[interleave_perm]
+    seed = int(header_bits[-1])
+    diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
+
+    out = np.empty(fec_total_bits, dtype=np.uint8)
+    out[:fec_header_bits] = header_bits
+    out[fec_header_bits:] = diff_coded_body
+    return out
+
+
 # ── FEC-wrapped hail encode / decode ───────────────────────────────────────
 #
 # Production-path encode/decode that puts a rate-1/2 K=9 convolutional code
@@ -486,29 +530,10 @@ def encode_hail_fec(
     coherently-recovered last pilot symbol.
     """
     frame = encode_hail(caller_eph, responder_static_pub, body)
-    header_bytes = frame[:HAIL_HEADER_LEN]
-    body_bytes = frame[HAIL_HEADER_LEN:]
-    assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN
-
-    header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
-    body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
-    coded_body_bits = sisl_fec.encode(body_bits)
-    assert len(coded_body_bits) == HAIL_FEC_BODY_CODED_BITS
-
-    # Interleave: spread burst errors across the codeword so Viterbi
-    # sees scattered single-bit errors instead of uncorrectable bursts.
-    coded_body_bits = _interleave_bits(coded_body_bits)
-
-    # Differential encode the FEC body. Seed = last header bit so the
-    # receiver can anchor the first body-bit differential decode on the
-    # coherently-recovered last pilot symbol.
-    seed = int(header_bits[-1])
-    diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
-
-    out = np.empty(HAIL_FEC_TOTAL_BITS, dtype=np.uint8)
-    out[:HAIL_FEC_HEADER_BITS] = header_bits
-    out[HAIL_FEC_HEADER_BITS:] = diff_coded_body
-    return out
+    return _encode_frame_to_fec_bits(
+        frame, HAIL_HEADER_LEN, HAIL_BODY_PAYLOAD_LEN,
+        _INTERLEAVE_PERM, HAIL_FEC_TOTAL_BITS, HAIL_FEC_HEADER_BITS,
+    )
 
 
 def decode_hail_fec_from_llrs(
@@ -539,7 +564,8 @@ def decode_hail_fec_from_llrs(
     coded_body_llrs = _deinterleave_llrs(llrs[HAIL_FEC_HEADER_BITS:])
     body_bits = sisl_fec.decode(coded_body_llrs, HAIL_FEC_BODY_PAYLOAD_BITS)
     body_bytes = np.packbits(body_bits).tobytes()
-    assert len(body_bytes) == HAIL_BODY_PAYLOAD_LEN
+    if len(body_bytes) != HAIL_BODY_PAYLOAD_LEN:
+        raise ValueError(f"expected {HAIL_BODY_PAYLOAD_LEN} bytes, got {len(body_bytes)}")
 
     header_bytes = ASM + bytes([SISL_VERSION, MSG_HAIL])
     frame = header_bytes + body_bytes
@@ -618,10 +644,12 @@ def encode_ack_frame(
     ct_with_tag = ChaCha20Poly1305(ack_key).encrypt(ack_iv, body.pack(), aad)
     ciphertext = ct_with_tag[:ACK_BODY_LEN]
     tag = ct_with_tag[ACK_BODY_LEN:]
-    assert len(tag) == TAG_LEN
+    if len(tag) != TAG_LEN:
+        raise ValueError(f"expected {TAG_LEN} bytes, got {len(tag)}")
 
     frame = aad + ciphertext + tag
-    assert len(frame) == ACK_FRAME_LEN, (len(frame), ACK_FRAME_LEN)
+    if len(frame) != ACK_FRAME_LEN:
+        raise ValueError(f"expected {ACK_FRAME_LEN} bytes, got {len(frame)}")
     return frame
 
 
@@ -723,23 +751,10 @@ def encode_ack_fec(
     Same pipeline as encode_hail_fec but for the 95-byte ACK frame.
     """
     frame = encode_ack_frame(responder_eph, decoded_hail, status)
-    header_bytes = frame[:ACK_HEADER_LEN]
-    body_bytes = frame[ACK_HEADER_LEN:]
-    assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
-
-    header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
-    body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
-    coded_body_bits = sisl_fec.encode(body_bits)
-    assert len(coded_body_bits) == ACK_FEC_BODY_CODED_BITS
-
-    coded_body_bits = coded_body_bits[_ACK_INTERLEAVE_PERM]
-    seed = int(header_bits[-1])
-    diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
-
-    out = np.empty(ACK_FEC_TOTAL_BITS, dtype=np.uint8)
-    out[:ACK_FEC_HEADER_BITS] = header_bits
-    out[ACK_FEC_HEADER_BITS:] = diff_coded_body
-    return out
+    return _encode_frame_to_fec_bits(
+        frame, ACK_HEADER_LEN, ACK_BODY_PAYLOAD_LEN,
+        _ACK_INTERLEAVE_PERM, ACK_FEC_TOTAL_BITS, ACK_FEC_HEADER_BITS,
+    )
 
 
 def decode_ack_fec_from_llrs(
@@ -759,7 +774,8 @@ def decode_ack_fec_from_llrs(
     coded_body_llrs = llrs[ACK_FEC_HEADER_BITS:][_ACK_DEINTERLEAVE_PERM]
     body_bits = sisl_fec.decode(coded_body_llrs, ACK_FEC_BODY_PAYLOAD_BITS)
     body_bytes = np.packbits(body_bits).tobytes()
-    assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
+    if len(body_bytes) != ACK_BODY_PAYLOAD_LEN:
+        raise ValueError(f"expected {ACK_BODY_PAYLOAD_LEN} bytes, got {len(body_bytes)}")
 
     if _ACK_DEBUG:
         # Check how many LLR bits have low confidence (near zero)

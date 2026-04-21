@@ -2092,8 +2092,8 @@ def main() -> int:
                 wc = sf.tx_bits_to_chips(wb)
                 all_symbol_samples.append(upsample_chips_to_samples(wc, SAMPS_PER_CHIP))
             coded_frames = [session.next_tx_frame() for _ in range(N_CODED)]
-            from concurrent.futures import ProcessPoolExecutor as _PPE
-            with _PPE(max_workers=min(4, os.cpu_count() or 1)) as _pool:
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            with _TPE(max_workers=min(4, os.cpu_count() or 1)) as _pool:
                 all_symbol_samples.extend(_pool.map(_encode_symbol_to_samples, coded_frames))
             print(" done")
 

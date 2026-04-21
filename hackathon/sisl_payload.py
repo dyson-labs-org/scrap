@@ -116,7 +116,9 @@ def decode_ack(
     block = _padded_block(payload, K)
     expected_hash = hashlib.sha256(session_id + block).digest()
     if not secrets.compare_digest(h_decrypted, expected_hash):
-        print(f"  [ACK ERROR] hash mismatch: decoded {len(payload)} bytes "
-              f"(padded block {len(block)}B, K={K})", flush=True)
+        import os as _os
+        if _os.environ.get("SISL_DEBUG"):
+            print(f"  [ACK ERROR] hash mismatch: decoded {len(payload)} bytes "
+                  f"(padded block {len(block)}B, K={K})", flush=True)
         return False
     return True
