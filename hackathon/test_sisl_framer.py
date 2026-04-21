@@ -344,6 +344,7 @@ def test_tx_rx_loopback_full_hail_frame():
         chip_rate_code=0x32,
         body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
         flags=0x03,
+        payload_len=20,
     )
     frame = sc.encode_hail(caller_eph, responder_static.public_key(), body)
     assert len(frame) == sc.HAIL_FRAME_LEN
