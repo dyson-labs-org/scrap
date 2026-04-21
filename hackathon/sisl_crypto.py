@@ -575,7 +575,7 @@ def derive_ack_iv(dh1: bytes, dh2: bytes, dh3: bytes, transcript: bytes) -> byte
     return hkdf_sha256(shared, SALT_ACK_IV, transcript, 12)
 
 
-def encode_ack(
+def encode_ack_frame(
     responder_eph: Ephemeral,
     decoded_hail: DecodedHail,
     status: int = 1,
@@ -632,7 +632,7 @@ class DecodedAck:
     dh3: bytes
 
 
-def decode_ack(
+def decode_ack_frame(
     frame: bytes,
     caller_static_priv: ec.EllipticCurvePrivateKey,
     caller_eph_priv: ec.EllipticCurvePrivateKey,
@@ -722,7 +722,7 @@ def encode_ack_fec(
     Returns uint8 ndarray of ACK_FEC_TOTAL_BITS = 1488 bits.
     Same pipeline as encode_hail_fec but for the 95-byte ACK frame.
     """
-    frame = encode_ack(responder_eph, decoded_hail, status)
+    frame = encode_ack_frame(responder_eph, decoded_hail, status)
     header_bytes = frame[:ACK_HEADER_LEN]
     body_bytes = frame[ACK_HEADER_LEN:]
     assert len(body_bytes) == ACK_BODY_PAYLOAD_LEN
@@ -770,8 +770,8 @@ def decode_ack_fec_from_llrs(
 
     header_bytes = ASM + bytes([SISL_VERSION, MSG_ACK])
     frame = header_bytes + body_bytes
-    return decode_ack(frame, caller_static_priv, caller_eph_priv,
-                      dh1, expected_nonce_echo)
+    return decode_ack_frame(frame, caller_static_priv, caller_eph_priv,
+                            dh1, expected_nonce_echo)
 
 
 # ── Session key derivation (§4.3 v3) ────────────────────────────────────────
@@ -847,6 +847,12 @@ def payload_fec_total_bits(n_payload_bytes: int) -> int:
 
 
 @functools.lru_cache(maxsize=8)
+def _payload_deinterleave_perm(n_coded_bits: int) -> np.ndarray:
+    """Return the inverse of _payload_interleave_perm (cached alongside it)."""
+    return np.argsort(_payload_interleave_perm(n_coded_bits))
+
+
+@functools.lru_cache(maxsize=8)
 def _payload_interleave_perm(n_coded_bits: int) -> np.ndarray:
     """Return row-major→column-major interleave permutation for n_coded_bits.
 
@@ -894,8 +900,6 @@ def decode_payload_symbol_fec_from_llrs(
     llrs = np.asarray(llrs[:n_fec_bits], dtype=np.float32)
     body_llrs = llrs[PAYLOAD_FEC_HEADER_BITS:]
     n_coded = len(body_llrs)
-    perm = _payload_interleave_perm(n_coded)
-    deinterleave_perm = np.argsort(perm)
-    body_llrs = body_llrs[deinterleave_perm]
+    body_llrs = body_llrs[_payload_deinterleave_perm(n_coded)]
     body_bits = sisl_fec.decode(body_llrs, n_payload_bytes * 8)
     return np.packbits(body_bits).tobytes()[:n_payload_bytes]

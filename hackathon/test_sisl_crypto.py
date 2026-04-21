@@ -301,7 +301,7 @@ def test_ack_roundtrip():
 
     # Responder builds an ACK using full X3DH
     responder_eph = sc.Ephemeral()
-    ack_frame = sc.encode_ack(
+    ack_frame = sc.encode_ack_frame(
         responder_eph=responder_eph,
         decoded_hail=decoded_hail,
         status=1,
@@ -310,7 +310,7 @@ def test_ack_roundtrip():
 
     # Caller side: full X3DH needs caller_static_priv + caller_eph_priv + dh1
     dh1_caller = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
-    decoded_ack = sc.decode_ack(
+    decoded_ack = sc.decode_ack_frame(
         frame=ack_frame,
         caller_static_priv=caller_static,
         caller_eph_priv=caller_eph_priv_ref,
@@ -339,14 +339,14 @@ def test_ack_wrong_caller_static_priv_rejected():
     decoded_hail = sc.decode_hail(hail_frame, responder_static)
 
     responder_eph = sc.Ephemeral()
-    ack_frame = sc.encode_ack(
+    ack_frame = sc.encode_ack_frame(
         responder_eph=responder_eph,
         decoded_hail=decoded_hail,
         status=1,
     )
 
     dh1 = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
-    result = sc.decode_ack(
+    result = sc.decode_ack_frame(
         frame=ack_frame,
         caller_static_priv=wrong_caller_static,
         caller_eph_priv=caller_eph_priv_ref,
@@ -370,14 +370,14 @@ def test_ack_wrong_nonce_echo_rejected():
     decoded_hail = sc.decode_hail(hail_frame, responder_static)
 
     responder_eph = sc.Ephemeral()
-    ack_frame = sc.encode_ack(
+    ack_frame = sc.encode_ack_frame(
         responder_eph=responder_eph,
         decoded_hail=decoded_hail,
         status=1,
     )
 
     dh1 = sc.ecdh(caller_eph_priv_ref, responder_static.public_key())
-    result = sc.decode_ack(
+    result = sc.decode_ack_frame(
         frame=ack_frame,
         caller_static_priv=caller_static,
         caller_eph_priv=caller_eph_priv_ref,
@@ -407,14 +407,14 @@ def test_hail_ack_session_key_derivation():
 
     responder_eph = sc.Ephemeral()
     responder_eph_priv = responder_eph._priv
-    ack_frame = sc.encode_ack(
+    ack_frame = sc.encode_ack_frame(
         responder_eph=responder_eph,
         decoded_hail=decoded_hail,
         status=1,
     )
 
     dh1_caller = sc.ecdh(caller_eph_priv, responder_static.public_key())
-    decoded_ack = sc.decode_ack(
+    decoded_ack = sc.decode_ack_frame(
         frame=ack_frame,
         caller_static_priv=caller_static,
         caller_eph_priv=caller_eph_priv,

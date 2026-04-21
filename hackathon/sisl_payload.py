@@ -10,6 +10,10 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from sisl_crypto import derive_payload_iv, derive_rlnc_ack_iv
 
 
+class AEADDecryptError(ValueError):
+    """Raised when AEAD authentication/decryption fails."""
+
+
 def _padded_block(payload: bytes, K: int) -> bytes:
     """Return the full zero-padded RLNC block (K * frag_size bytes).
 
@@ -52,7 +56,7 @@ def decode_payload_symbol(
     try:
         plaintext = ChaCha20Poly1305(direction_key).decrypt(iv, frame[4:], aad)
     except Exception as e:
-        raise ValueError("AEAD authentication failed") from e
+        raise AEADDecryptError("AEAD authentication failed") from e
     return comb_id, plaintext
 
 

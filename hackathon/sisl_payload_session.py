@@ -26,11 +26,21 @@ class RLNCSession:
     def for_responder(cls, recovered_payload: bytes, K: int, session_keys: dict) -> "RLNCSession":
         """Construct a session for the responder side after payload is decoded.
 
-        The responder doesn't have the payload at session start, only after
-        decoding. This factory pre-sets _recovered so build_ack() works
+        The responder only decodes RLNC symbols (never encodes), so no
+        RLNCEncoder is allocated. _recovered is pre-set so build_ack() works
         without needing to call rx_frame() first.
         """
-        inst = cls(recovered_payload, K, session_keys)
+        inst = object.__new__(cls)
+        inst._payload = recovered_payload
+        inst._K = K
+        inst._session_keys = session_keys
+        inst._prk = derive_session_prk(session_keys)
+        inst._session_id = session_keys["session_id"]
+        inst._c2r_key = session_keys["p2p_tx_key"]
+        inst._r2c_key = session_keys["p2p_rx_key"]
+        inst._encoder = None
+        inst._decoder = RLNCDecoder(K, inst._prk)
+        inst._next_comb_id = 0
         inst._recovered = recovered_payload
         return inst
 
