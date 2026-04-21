@@ -1446,6 +1446,15 @@ def main() -> int:
                              "bandwidth equals the chip rate, so 2 Mcps "
                              "occupies 2 MHz. TX and RX must use the same "
                              "chip rate.")
+    parser.add_argument("--coord-port", type=int, default=None,
+                        help="WebSocket coordination port for TX/RX role swapping. "
+                             "call side listens as WS server; respond side connects "
+                             "as client on localhost. Omit to preserve current "
+                             "single-pass behavior exactly.")
+    parser.add_argument("--payload-out", type=str,
+                        default="/tmp/sisl_rlnc_payload.bin",
+                        help="path where respond side writes received payload "
+                             "(default /tmp/sisl_rlnc_payload.bin)")
     args = parser.parse_args()
 
     # ── Resolve tx-vga: use band-calibrated minimum if not specified ──────────
@@ -1584,8 +1593,35 @@ def main() -> int:
             print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
+    # ── Optional WebSocket coordination channel (--coord-port) ───────────
+    # coord is None when --coord-port is omitted; all coord interactions
+    # below are guarded by `if coord:` so existing behavior is unchanged.
+    # TODO(hackathon-ipj): wrap respond/call branches in a role-swap loop:
+    #   while True:
+    #       _run_call(args, coord, seq) / _run_respond(args, coord, seq)
+    #       if coord is None: break
+    #       role, seq = swap(role), seq+1
+    # Currently the coord hookpoints are inline; extraction to _run_call /
+    # _run_respond is deferred because both blocks exceed 200 lines each.
+    coord = None
+    if args.coord_port and args.mode in ("call", "respond"):
+        import sisl_coord as _coord_mod
+        import asyncio as _asyncio
+        if args.mode == "call":
+            _coord_server = _coord_mod.CoordServer()
+            _asyncio.run(_coord_server.start(args.coord_port))
+            coord = _coord_server
+        else:
+            _coord_client = _coord_mod.CoordClient()
+            _asyncio.run(_coord_client.connect("127.0.0.1", args.coord_port))
+            coord = _coord_client
+    _coord_seq = 0
+
     # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
+        if coord:
+            import asyncio as _asyncio
+            _asyncio.run(coord.send_ready(_coord_seq))
         responder_static = demo_responder_key()
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
@@ -1789,7 +1825,7 @@ def main() -> int:
                     continue  # restart while True: → Phase 1 hail listen
                 if recovered is not None:
                     payload_out = recovered
-                    out_path = "/tmp/sisl_rlnc_payload.bin"
+                    out_path = args.payload_out
                     with open(out_path, "wb") as _f:
                         _f.write(payload_out)
                     print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
@@ -1826,11 +1862,17 @@ def main() -> int:
                               f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
                               flush=True)
                     print("  payload ACK TX complete")
+                    if coord:
+                        import asyncio as _asyncio
+                        _asyncio.run(coord.send_received(_coord_seq))
+                        _asyncio.run(coord.wait_for_switch())
                     break  # exit while True: — session complete
                 else:
                     print(f"  payload decode incomplete "
                           f"({received_count} symbols received)")
         # sdr.__exit__ closes device here
+        if coord:
+            coord.close()
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -2096,9 +2138,15 @@ def main() -> int:
 
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
+            if coord:
+                import asyncio as _asyncio
+                _asyncio.run(coord.wait_for_received(_coord_seq))
+                _asyncio.run(coord.send_switch(_coord_seq))
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
+        if coord:
+            coord.close()
         return 0
 
     # mode == "tx"
