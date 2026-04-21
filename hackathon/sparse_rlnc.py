@@ -131,6 +131,13 @@ def sample_coefficients(
             indices.append(idx)
             coeffs.append(coeff)
 
+    # Clamp to available indices: if degree > K or attempts exhausted, we may
+    # have fewer than d indices.  This is expected for large degree / small K.
+    # Callers must tolerate fewer-than-degree indices; assert non-empty only.
+    assert len(indices) > 0 or d == 0, (
+        f"coefficient under-sampling: got 0 indices for degree {d}, K={K}"
+    )
+
     # Sort by index for deterministic ordering.
     pairs = sorted(zip(indices, coeffs))
     return ([p[0] for p in pairs], [p[1] for p in pairs])
@@ -156,10 +163,15 @@ class RLNCEncoder:
 
     def encode_symbol(self, comb_id: int) -> tuple[int, bytes, list[int]]:
         indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
-        frag_size = len(self._fragments[0])
-        result = np.zeros(frag_size, dtype=np.uint8)
-        for idx, c in zip(indices, coeffs):
-            result ^= _gf_mul_vec(c, self._fragments[idx])
+        if not indices:
+            frag_size = len(self._fragments[0])
+            return (comb_id, bytes(frag_size), indices)
+        # Stack active fragments into 2D array (degree × frag_size), scale each
+        # row by its GF(2^8) coefficient via the lookup table, then XOR-reduce.
+        active = np.stack([self._fragments[idx] for idx in indices])  # (d, frag_size)
+        for i, c in enumerate(coeffs):
+            active[i] = _MUL_TABLE[c][active[i]]
+        result = np.bitwise_xor.reduce(active, axis=0)
         return (comb_id, bytes(result), indices)
 
 
