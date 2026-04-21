@@ -197,7 +197,7 @@ def demo_other_key() -> ec.EllipticCurvePrivateKey:
 def build_demo_hail() -> bytes:
     """Produce a real SISL v3 hail frame targeting the demo responder.
 
-    Returns the 133-byte on-wire frame. The encrypted body carries
+    Returns the 135-byte on-wire frame. The encrypted body carries
     caller_static_pub (the demo caller's compressed pubkey) so the
     responder can compute DH2 for full X3DH at ACK time. body_nonce is
     fresh per call (replay protection); caller ephemeral is fresh per
@@ -649,6 +649,7 @@ def _usb_reader_thread(
     local_buf = np.empty(block_samples, dtype=np.complex64)
     while not stop_event.is_set():
         filled = 0
+        fatal_error = False
         while filled < block_samples and not stop_event.is_set():
             remain = block_samples - filled
             want = min(read_chunk, remain) if read_chunk else remain
@@ -664,7 +665,11 @@ def _usb_reader_thread(
                 stats["overflows"] += 1
                 continue
             else:
+                fatal_error = True
                 break
+        if fatal_error:
+            block_queue.put(None)
+            return
         if filled >= block_samples // 2 and not stop_event.is_set():
             blk = local_buf[:filled].copy()
             while True:
@@ -1706,9 +1711,10 @@ def main() -> int:
                 print(f"  pre-seeded VGA={_converged_vga:.0f} dB, "
                       f"static PPM (no auto-retune)")
 
-                received_count = [0]
+                received_count = 0
 
                 def _payload_sym_fn(block_data):
+                    nonlocal received_count
                     # Decode every RLNC symbol found in this block (continuous stream).
                     sym_results = sisl_rx.decode_all_payload_in_block(
                         block_data, n_sym_bytes,
@@ -1730,11 +1736,11 @@ def main() -> int:
                             continue
                         try:
                             complete = rx_session.rx_frame(res["payload_frame_bytes"])
-                            received_count[0] += 1
+                            received_count += 1
                             n_decoded += 1
                             comb_id = int.from_bytes(res["payload_frame_bytes"][:4], "big")
                             print(f"  symbol {comb_id} received "
-                                  f"({received_count[0]} total), complete={complete}")
+                                  f"({received_count} total), complete={complete}")
                         except ValueError as _e:
                             if os.environ.get("SISL_DEBUG"):
                                 raw = res["payload_frame_bytes"]
@@ -1816,7 +1822,7 @@ def main() -> int:
                     break  # exit while True: — session complete
                 else:
                     print(f"  payload decode incomplete "
-                          f"({received_count[0]} symbols received)")
+                          f"({received_count} symbols received)")
         # sdr.__exit__ closes device here
         return 0
 
@@ -1834,8 +1840,6 @@ def main() -> int:
         _call_device_str = None
         if args.serial:
             _call_device_str = f"driver=hackrf,serial={args.serial}"
-        call_sdr = SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz)
-        print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
 
         # Build the hail — retain ephemeral key for ACK decode
         caller_eph = sc.Ephemeral()
@@ -1880,7 +1884,8 @@ def main() -> int:
         print(f"  phase 2:       RX listening for ACK")
         print(f"  max rounds:    {int(args.duration / (5+12))}")
 
-        with call_sdr:
+        with SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz) as call_sdr:
+            print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
             # ── Phase 1: TX hail ──────────────────────────────────────────
             phase1_start_time = time.time()
             initial_repeats = max(1, int(
@@ -2024,12 +2029,13 @@ def main() -> int:
             print(f"  Pre-encoding {N_WARMUP} warmup + {N_CODED} coded symbols...",
                   end="", flush=True)
             all_symbol_samples: list[np.ndarray] = []
-            # warmup: 2 copies of the first coded frame (receiver locks chip sync)
-            warmup_frame = session.next_tx_frame()
-            warmup_bits = sc.encode_payload_symbol_fec(warmup_frame)
-            warmup_chips = sf.tx_bits_to_chips(warmup_bits)
-            warmup_samples_1 = upsample_chips_to_samples(warmup_chips, SAMPS_PER_CHIP)
-            all_symbol_samples.extend([warmup_samples_1] * N_WARMUP)
+            # warmup: N_WARMUP distinct frames (each gets its own comb_id → unique
+            # AEAD nonce); receiver locks chip sync on the first few symbols.
+            for _ in range(N_WARMUP):
+                wf = session.next_tx_frame()
+                wb = sc.encode_payload_symbol_fec(wf)
+                wc = sf.tx_bits_to_chips(wb)
+                all_symbol_samples.append(upsample_chips_to_samples(wc, SAMPS_PER_CHIP))
             coded_frames = [session.next_tx_frame() for _ in range(N_CODED)]
             from concurrent.futures import ProcessPoolExecutor as _PPE
             with _PPE(max_workers=min(4, os.cpu_count() or 1)) as _pool:
