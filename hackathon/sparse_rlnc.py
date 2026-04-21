@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import math
 import bisect
 
@@ -59,7 +60,8 @@ def _gf_mul_vec(scalar: int, vec: np.ndarray) -> np.ndarray:
     return _MUL_TABLE[scalar][vec]
 
 
-def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> list[float]:
+@functools.lru_cache(maxsize=32)
+def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> tuple[float, ...]:
     rho = [0.0] * (K + 1)
     rho[1] = 1.0 / K
     for d in range(2, K + 1):
@@ -86,10 +88,10 @@ def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> list[float
     for d in range(1, K + 1):
         cumsum += normalized[d]
         cdf.append(cumsum)
-    return cdf
+    return tuple(cdf)
 
 
-def sample_degree(cdf: list[float], uniform_val: float) -> int:
+def sample_degree(cdf: tuple[float, ...], uniform_val: float) -> int:
     idx = bisect.bisect_left(cdf, uniform_val)
     idx = min(idx, len(cdf) - 1)
     return idx + 1
@@ -184,6 +186,8 @@ class RLNCDecoder:
         self._recovered: dict[int, np.ndarray] = {}
         self._seen_ids: set[int] = set()
 
+    _MAX_SEEN_IDS = 4096
+
     def _subtract_recovered(self, coeff_vec: np.ndarray, data: np.ndarray) -> None:
         """XOR out all already-recovered fragments from a symbol's data."""
         for i, frag in self._recovered.items():
@@ -213,7 +217,8 @@ class RLNCDecoder:
     def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
         if comb_id in self._seen_ids:
             return self.is_complete
-        self._seen_ids.add(comb_id)
+        if len(self._seen_ids) < self._MAX_SEEN_IDS:
+            self._seen_ids.add(comb_id)
         indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
         coeff_vec = np.zeros(self._K, dtype=np.uint8)
         for idx, c in zip(indices, coeffs):

@@ -71,12 +71,10 @@ def differential_encode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
     bits = np.ascontiguousarray(bits, dtype=np.uint8)
     if bits.ndim != 1:
         raise ValueError(f"bits must be 1-D, got shape {bits.shape}")
-    out = np.empty_like(bits)
-    prev = int(seed) & 1
-    for k in range(len(bits)):
-        prev = prev ^ int(bits[k])
-        out[k] = prev
-    return out
+    padded = np.empty(len(bits) + 1, dtype=np.uint8)
+    padded[0] = seed & 1
+    padded[1:] = bits
+    return np.bitwise_xor.accumulate(padded)[1:]
 
 
 def differential_decode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
@@ -84,12 +82,10 @@ def differential_decode_bits(bits: np.ndarray, seed: int = 0) -> np.ndarray:
     bits = np.ascontiguousarray(bits, dtype=np.uint8)
     if bits.ndim != 1:
         raise ValueError(f"bits must be 1-D, got shape {bits.shape}")
-    out = np.empty_like(bits)
-    prev = int(seed) & 1
-    for k in range(len(bits)):
-        out[k] = int(bits[k]) ^ prev
-        prev = int(bits[k])
-    return out
+    padded = np.empty(len(bits) + 1, dtype=np.uint8)
+    padded[0] = seed & 1
+    padded[1:] = bits
+    return np.diff(padded).astype(np.uint8) & 1
 
 
 # ── TX: bytes → chip stream ─────────────────────────────────────────────────
