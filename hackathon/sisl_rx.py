@@ -47,45 +47,71 @@ _ACK_PILOT_BITS = np.unpackbits(
 
 
 class LlrAccumulator:
-    """Multi-copy FEC LLR accumulator for SISL hails.
+    """Multi-copy FEC LLR accumulator for SISL hails or ACK frames.
 
-    The TX loops the same FEC-encoded hail frame repeatedly. Each clean
+    The TX loops the same FEC-encoded frame repeatedly. Each clean
     per-block detection yields a per-bit soft-value vector. Adding these
     vectors element-wise across copies gives +3 dB effective SNR per
     doubling (coherent addition of independent AWGN observations).
 
-    The accumulator stores only the FEC body LLRs (2048 coded bits);
-    the 48-bit uncoded header is used for polarity vote and ASM
-    cheap-reject but is not summed. try_decrypt runs sisl_fec.decode
-    (soft Viterbi) on the accumulated body LLRs.
+    The accumulator stores only the FEC body LLRs; the uncoded header
+    is used for polarity vote and ASM cheap-reject but is not summed.
+    try_decrypt runs sisl_fec.decode (soft Viterbi) on accumulated body LLRs.
 
-    `max_copies` is the cap before exponential forgetting (halving).
+    `max_copies` is the cap before exponential forgetting (halving the
+    accumulated LLRs before adding the new copy — sliding-window behaviour).
+
+    Frequency-drift flush: if a new block's frequency estimate differs
+    from the running estimate by more than `freq_flush_hz` (default 5×
+    chip rate = 5000 Hz at 1 Mcps), the accumulator is flushed and
+    restarted with the new block's LLRs only.  This prevents stale LLRs
+    from a previous hail (different ephemeral key / carrier offset) from
+    contaminating a new one.
     """
 
     def __init__(self, n_bits: int, pass_rms: float = 0.6,
-                 max_copies: int = 64, max_asm_errs: int = 2):
-        assert n_bits == sc.HAIL_FEC_TOTAL_BITS, (
-            f"n_bits must be HAIL_FEC_TOTAL_BITS "
-            f"({sc.HAIL_FEC_TOTAL_BITS}); got {n_bits}"
-        )
+                 max_copies: int = 64, max_asm_errs: int = 2,
+                 freq_flush_hz: float = 5000.0):
         self.n_bits = n_bits
         self.pass_rms = pass_rms
         self.max_copies = max_copies
         self.max_asm_errs = max_asm_errs
-        self._header_bits = sc.HAIL_FEC_HEADER_BITS
-        self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
+        self.freq_flush_hz = freq_flush_hz
+        # For hail frames the body starts after the header; for ACK frames
+        # all bits are FEC body (no separate header field in sisl_crypto).
+        assert n_bits in (sc.HAIL_FEC_TOTAL_BITS, sc.ACK_FEC_TOTAL_BITS), (
+            f"n_bits must be HAIL_FEC_TOTAL_BITS ({sc.HAIL_FEC_TOTAL_BITS}) "
+            f"or ACK_FEC_TOTAL_BITS ({sc.ACK_FEC_TOTAL_BITS}); got {n_bits}"
+        )
+        if n_bits == sc.HAIL_FEC_TOTAL_BITS:
+            self._header_bits = sc.HAIL_FEC_HEADER_BITS
+            self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
+        else:
+            # ACK frame: accumulate all FEC bits as body.
+            self._header_bits = 0
+            self._accum_size = n_bits
         self.accumulated = np.zeros(self._accum_size, dtype=np.float64)
         self.n_copies = 0
+        self._running_freq_hz: float | None = None
         self._asm_signs = np.where(_ASM_BITS == 0, 1.0, -1.0).astype(np.float64)
 
     def reset(self) -> None:
         self.accumulated.fill(0.0)
         self.n_copies = 0
+        self._running_freq_hz = None
 
     def try_add(self, result: dict) -> bool:
         """Try to add a block-decode result to the accumulator.
 
         Returns True if the result was accepted and added, False otherwise.
+
+        Frequency-drift flush: if the incoming block's frequency estimate
+        differs from the running estimate by more than freq_flush_hz, the
+        accumulator is flushed before adding the new LLRs.
+
+        Exponential forgetting: if n_copies >= max_copies, the accumulated
+        LLRs are halved before the new copy is added (sliding-window
+        behaviour that prevents stale copies from dominating).
         """
         llrs = result.get("fec_llrs")
         if llrs is None:
@@ -102,6 +128,27 @@ class LlrAccumulator:
         # copies to cancel instead of add (sublinear L1 growth).
         llrs_f64 = llrs[:self.n_bits].astype(np.float64)
         body_llrs = llrs_f64[self._header_bits:]
+
+        # Frequency-drift flush: detect carrier shift > freq_flush_hz.
+        incoming_freq = result.get("freq_offset_hz")
+        if incoming_freq is not None:
+            if (self._running_freq_hz is not None
+                    and abs(incoming_freq - self._running_freq_hz) > self.freq_flush_hz):
+                # New carrier offset — stale LLRs would cancel, not add.
+                self.accumulated.fill(0.0)
+                self.n_copies = 0
+            # Update running estimate as exponential moving average.
+            if self._running_freq_hz is None:
+                self._running_freq_hz = float(incoming_freq)
+            else:
+                self._running_freq_hz = (
+                    0.8 * self._running_freq_hz + 0.2 * float(incoming_freq)
+                )
+
+        # Exponential forgetting: halve before adding when saturated.
+        if self.n_copies >= self.max_copies:
+            self.accumulated *= 0.5
+
         self.accumulated += body_llrs
         self.n_copies += 1
         return True
@@ -129,6 +176,80 @@ class LlrAccumulator:
         if decoded is not None:
             return decoded, "fec-acc", 0
         return None
+
+
+def make_ack_decode_fn(
+    caller_static_priv,
+    caller_eph_priv,
+    dh1: bytes,
+    expected_nonce_echo: bytes,
+    samps_per_chip: int = 2,
+    samp_hz: float = 2_000_000.0,
+    signal_threshold: float = _SIGNAL_FLOOR_RATIO,
+    top_k_soft: int = 5,
+    max_copies: int = 64,
+):
+    """Return a stateful ACK decode function with LLR accumulation.
+
+    The returned callable has the same signature as `decode_one_ack_in_block`
+    (takes a block of samples, returns a status dict) but internally accumulates
+    FEC LLRs across calls for multi-copy coherent combining.  When the
+    accumulated LLRs yield a successful decrypt, the result dict contains
+    ``status='decrypt_ok'`` and the accumulator is reset.  The accumulator
+    is also reset on each new nonce (session).
+
+    Use this instead of a bare `decode_one_ack_in_block` call when the
+    responder retransmits the ACK continuously (e.g. for ACK_TX_WINDOW seconds).
+    """
+    accumulator = LlrAccumulator(
+        n_bits=sc.ACK_FEC_TOTAL_BITS,
+        max_copies=max_copies,
+    )
+
+    def _decode(block_data: "np.ndarray") -> dict:
+        result = decode_one_ack_in_block(
+            block_data,
+            caller_static_priv=caller_static_priv,
+            caller_eph_priv=caller_eph_priv,
+            dh1=dh1,
+            expected_nonce_echo=expected_nonce_echo,
+            samps_per_chip=samps_per_chip,
+            samp_hz=samp_hz,
+            signal_threshold=signal_threshold,
+            top_k_soft=top_k_soft,
+        )
+        if result["status"] == "decrypt_ok":
+            accumulator.reset()
+            return result
+
+        # Try accumulating FEC LLRs from this block (present on decrypt_fail
+        # and decrypt_ok paths from _try_fec_decrypt in ACK mode).
+        fec_llrs = result.get("fec_llrs")
+        if fec_llrs is not None and len(fec_llrs) >= sc.ACK_FEC_TOTAL_BITS:
+            accumulator.try_add({
+                "fec_llrs": fec_llrs,
+                "freq_offset_hz": result.get("freq_offset_hz"),
+            })
+            if accumulator.n_copies >= 2:
+                acc_llrs = accumulator.accumulated.astype(np.float32)
+                for polarity in (1.0, -1.0):
+                    attempt = sc.decode_ack_fec_from_llrs(
+                        polarity * acc_llrs,
+                        caller_static_priv, caller_eph_priv,
+                        dh1, expected_nonce_echo,
+                    )
+                    if attempt is not None:
+                        accumulator.reset()
+                        return {
+                            **result,
+                            "status": "decrypt_ok",
+                            "polarity": "ack-fec-acc",
+                            "decoded_ack": attempt,
+                            "body": attempt.body,
+                        }
+        return result
+
+    return _decode
 
 
 # Pre-computed differential polarity template for the 32-bit ASM.
@@ -351,24 +472,13 @@ def _acquire_and_track(
         peak_hint=chip_phase_peak,
     )
     if track_result is None:
-        fallback_bytes = (fec_total_bits + 7) // 8
-        track_result = sf.decode_with_freq_tracking(
-            samples,
-            samps_per_chip=samps_per_chip,
-            n_bytes=fallback_bytes,
-            freq_offset_rad_per_sample=rad_per_sample,
-            precomputed_corr=corr_c,
-            start_pos=chip_phase,
-            peak_hint=chip_phase_peak,
-        )
-        if track_result is None:
-            return {
-                "status": "track_lost",
-                "peak_mag": peak_mag,
-                "median_mag": median_mag,
-                "rad_per_sample": rad_per_sample,
-                "freq_offset_hz": freq_hz,
-            }
+        return {
+            "status": "acquire_failed",
+            "peak_mag": peak_mag,
+            "median_mag": median_mag,
+            "rad_per_sample": rad_per_sample,
+            "freq_offset_hz": freq_hz,
+        }
 
     return {
         "status": "acquired",
@@ -508,7 +618,10 @@ def _try_fec_decrypt(
         "soft_score": best_score,
         "pts_ratio": best_pts_ratio,
     }
-    if not ack_mode:
+    if ack_mode:
+        # Expose FEC LLRs for ACK LLR accumulation (multi-copy combining).
+        base["fec_llrs"] = fec_llrs_arr
+    else:
         base["fec_llrs"] = fec_llrs_arr
         base["extra_fec_llrs"] = extra_fec_llrs
         base["phase_rms_residual_rad"] = llr_diag["phase_rms_residual_rad"]

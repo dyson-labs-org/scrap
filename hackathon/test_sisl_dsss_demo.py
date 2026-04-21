@@ -156,7 +156,7 @@ def test_decode_one_hail_in_block_pure_noise():
     # so downstream periodicity / tracking / ASM checks can reject them.
     assert result["status"] in (
         "no_signal", "no_lock", "no_hail",
-        "track_lost", "frame_fuzzy", "short_block",
+        "track_lost", "acquire_failed", "frame_fuzzy", "short_block",
     ), result
     # The critical invariant: pure noise must NEVER decrypt.
     assert result["status"] != "decrypt_ok"

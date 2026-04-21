@@ -1874,16 +1874,14 @@ def main() -> int:
 
         INITIAL_TX_DURATION = 30.0
 
-        def _ack_decode_fn(block_data):
-            return sisl_rx.decode_one_ack_in_block(
-                block_data,
-                caller_static_priv=caller_static,
-                caller_eph_priv=caller_eph_priv,
-                dh1=dh1,
-                expected_nonce_echo=body.body_nonce,
-                samps_per_chip=2,
-                samp_hz=chip_rate_hz * 2,
-            )
+        _ack_decode_fn = sisl_rx.make_ack_decode_fn(
+            caller_static_priv=caller_static,
+            caller_eph_priv=caller_eph_priv,
+            dh1=dh1,
+            expected_nonce_echo=body.body_nonce,
+            samps_per_chip=2,
+            samp_hz=chip_rate_hz * 2,
+        )
 
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
