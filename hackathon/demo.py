@@ -857,7 +857,14 @@ class _AgcPpmState:
         else:
             self._clip_count = 0
             pk = result.get("peak_mag")
-            if pk is not None and pk > 1:
+            periodic_ratio = result.get("periodic_ratio", 0.0)
+            # Gate peak-based AGC on periodic DSSS structure. At 2.4 GHz the
+            # matched-filter peak is often dominated by a WiFi burst, not the
+            # DSSS signal. If periodic_ratio < 0.3 the dominant peak is
+            # interference; skip the AGC update to avoid gain suppression
+            # before the hail can even decode (30 dB processing gain rejects
+            # narrowband interference, so AGC should not react to it).
+            if pk is not None and pk > 1 and periodic_ratio >= 0.3:
                 if pk < self.AGC_MIN_PEAK or pk > self.AGC_MAX_PEAK:
                     step_db = 10.0 * np.log10(self.AGC_TARGET / pk)
                     step_db = max(-6.0, min(6.0, step_db))
@@ -866,7 +873,7 @@ class _AgcPpmState:
                     if abs(new_vga - self._current_vga) >= 1.0:
                         self._current_vga = round(new_vga)
                         self._set_rx_vga(self._current_vga)
-                        print(f"       AGC: peak={pk:.0f}, "
+                        print(f"       AGC: peak={pk:.0f} (periodic_ratio={periodic_ratio:.2f}), "
                               f"gain → {self._current_vga:.0f} dB")
 
 
@@ -1945,12 +1952,20 @@ def main() -> int:
             # starting RLNC TX. The responder transmits ACKs for ACK_TX_WINDOW
             # seconds from when it decoded the hail, then switches to payload RX.
             #
-            # We anchor to ack_recv_time (when we received the first ACK) rather
-            # than phase1_start_time. The responder's hail-decode happened no
-            # later than ack_recv_time, so waiting ACK_TX_WINDOW from
-            # ack_recv_time guarantees the responder has finished its ACK window
-            # regardless of clock drift between the two processes.
-            _phase3_ready_at = ack_recv_time + ACK_TX_WINDOW
+            # Timing race (hackathon-2sb): anchoring to ack_recv_time alone is
+            # unsafe — if the ACK arrives 40s into the responder's window, the
+            # caller would wait another ACK_TX_WINDOW (50s) and start RLNC TX
+            # at the 90s mark, exactly when the responder's 90s RLNC RX window
+            # expires. Instead, estimate when the responder's ACK window ends:
+            # the responder decoded the hail no later than INITIAL_TX_DURATION
+            # after phase1 started (the last possible moment it could have
+            # received the hail TX). Its ACK window therefore ends by:
+            #   phase1_start_time + INITIAL_TX_DURATION + ACK_TX_WINDOW
+            # Use this as the anchor; fall back to ack_recv_time + ACK_TX_WINDOW
+            # if that has already passed (clock drift / long hail decode).
+            _resp_window_end = (phase1_start_time
+                                + INITIAL_TX_DURATION + ACK_TX_WINDOW)
+            _phase3_ready_at = max(_resp_window_end, ack_recv_time + 2.0)
             _phase3_delay = _phase3_ready_at - time.time()
             print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
                   flush=True)
