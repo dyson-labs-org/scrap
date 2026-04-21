@@ -47,6 +47,7 @@ class RLNCSession:
         complete = self._decoder.add_symbol(comb_id, plain)
         if complete and self._recovered is None:
             raw = self._decoder.decode()
+            # raw is the full padded block; trim to original payload length.
             self._recovered = raw[: len(self._payload)] if raw is not None else None
         return complete
 
@@ -56,7 +57,9 @@ class RLNCSession:
     def build_ack(self, seq: int = 0) -> bytes | None:
         if self._recovered is None:
             return None
-        return encode_ack(self._payload, self._r2c_key, self._prk, self._session_id, seq=seq)
+        return encode_ack(self._payload, self._r2c_key, self._prk,
+                          self._session_id, seq=seq, K=self._K)
 
     def verify_ack(self, ack_frame: bytes) -> bool:
-        return decode_ack(ack_frame, self._payload, self._r2c_key, self._prk, self._session_id)
+        return decode_ack(ack_frame, self._payload, self._r2c_key, self._prk,
+                          self._session_id, K=self._K)

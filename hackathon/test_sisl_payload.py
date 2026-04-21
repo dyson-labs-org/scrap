@@ -97,7 +97,7 @@ def test_frame_sizes(session):
     frame = encode_payload_symbol(0, data, keys["p2p_tx_key"], prk, keys["session_id"])
     assert len(frame) == 4 + len(data) + 16
     ack = encode_ack(b"payload", keys["p2p_rx_key"], prk, keys["session_id"])
-    assert len(ack) == 48
+    assert len(ack) == 52  # 4 seq + 32 hash (encrypted) + 16 Poly1305 tag
 
 
 def test_prk_key_order_sensitivity():

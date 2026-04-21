@@ -61,9 +61,9 @@ SALT_X3DH = hashlib.sha256(b"SISL-v3-X3DH").digest()
 # Hail carries caller_static_pub (33 B compressed) inside the encrypted body
 # so the responder can compute DH2 = ECDH(responder_eph, caller_static) on
 # hail decrypt. This restores full X3DH mutual authentication at ACK time.
-HAIL_FRAME_LEN = 133            # 4+1+1+64+47+16
+HAIL_FRAME_LEN = 135            # 4+1+1+64+49+16
 ACK_FRAME_LEN = 95              # 4+1+1+64+9+16 (unchanged)
-HAIL_BODY_LEN = 47              # 33 (caller_static_pub) + 14 (channel params)
+HAIL_BODY_LEN = 49              # 33 (caller_static_pub) + 14 (channel params) + 2 (payload_len)
 ACK_BODY_LEN = 9
 ELLIGATOR_LEN = 64
 COMPRESSED_PUBKEY_LEN = 33
@@ -229,7 +229,7 @@ def derive_hail_iv(dh1: bytes) -> bytes:
 class HailBody:
     """Plaintext of the encrypted hail body.
 
-    Byte layout (47 bytes total):
+    Byte layout (49 bytes total):
         0..33   caller_static_pub   33 B  (compressed secp256k1 pubkey)
         33..35  center_freq_offset   2 B  big-endian
         35      bandwidth_code       1 B
@@ -237,6 +237,7 @@ class HailBody:
         37      chip_rate_code       1 B  (0.1 Mcps units)
         38..46  body_nonce           8 B  (replay window)
         46      flags                1 B
+        47..49  payload_len          2 B  little-endian uint16 (RLNC payload length)
     """
     caller_static_pub: bytes      # 33 B compressed
     center_freq_offset: int
@@ -245,6 +246,7 @@ class HailBody:
     chip_rate_code: int
     body_nonce: bytes             # 8 B
     flags: int
+    payload_len: int              # RLNC payload length in bytes (0 = not specified)
 
     def pack(self) -> bytes:
         if len(self.caller_static_pub) != COMPRESSED_PUBKEY_LEN:
@@ -258,6 +260,7 @@ class HailBody:
             + bytes([self.bandwidth_code, self.mode, self.chip_rate_code])
             + self.body_nonce
             + bytes([self.flags])
+            + struct.pack("<H", self.payload_len)
         )
         assert len(packed) == HAIL_BODY_LEN, (len(packed), HAIL_BODY_LEN)
         return packed
@@ -274,6 +277,7 @@ class HailBody:
             chip_rate_code=data[37],
             body_nonce=data[38:46],
             flags=data[46],
+            payload_len=struct.unpack("<H", data[47:49])[0],
         )
 
 
@@ -286,6 +290,7 @@ def make_test_hail_body(**overrides):
         chip_rate_code=0x32,
         body_nonce=b"\x01\x02\x03\x04\x05\x06\x07\x08",
         flags=0x03,
+        payload_len=0,
     )
     defaults.update(overrides)
     return HailBody(**defaults)

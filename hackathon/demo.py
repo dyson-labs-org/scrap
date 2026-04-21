@@ -214,6 +214,7 @@ def build_demo_hail() -> bytes:
         chip_rate_code=0x32,      # 5 Mcps
         body_nonce=os.urandom(8),
         flags=0x03,               # DSSS + FHSS capable
+        payload_len=0,
     )
     return sc.encode_hail(caller_eph, responder_static.public_key(), body)
 
@@ -243,6 +244,7 @@ def build_demo_hail_fec_chips() -> tuple[np.ndarray, bytes]:
         chip_rate_code=0x32,
         body_nonce=os.urandom(8),
         flags=0x03,
+        payload_len=0,
     )
     # Capture the canonical frame for printing/debugging by re-encoding
     # under a separate ephemeral. The on-wire bits use the consumed eph.
@@ -1677,7 +1679,16 @@ def main() -> int:
                 sess_id = session_keys["session_id"]
                 from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
     
-                expected_payload_len = args.payload_len or len(DEMO_PAYLOAD)
+                _wire_payload_len = decoded_hail.body.payload_len
+                expected_payload_len = (
+                    _wire_payload_len if _wire_payload_len > 0
+                    else (args.payload_len or len(DEMO_PAYLOAD))
+                )
+                if _wire_payload_len > 0:
+                    print(f"  payload_len from hail: {_wire_payload_len}B")
+                else:
+                    print(f"  payload_len not in hail, defaulting to {expected_payload_len}B",
+                          file=sys.stderr)
                 frags = _frag(b'\x00' * expected_payload_len, K)
                 frag_size = len(frags[0])
                 n_sym_bytes = 4 + frag_size + 16
@@ -1823,6 +1834,11 @@ def main() -> int:
         # Build the hail — retain ephemeral key for ACK decode
         caller_eph = sc.Ephemeral()
         caller_eph_priv = caller_eph.peek()  # retain for ACK decode
+        if args.payload:
+            with open(args.payload, "rb") as _pf:
+                _payload_for_len = _pf.read()
+        else:
+            _payload_for_len = DEMO_PAYLOAD
         body = sc.HailBody(
             caller_static_pub=sc.pubkey_to_compressed(
                 caller_static.public_key()),
@@ -1831,6 +1847,7 @@ def main() -> int:
             chip_rate_code=0x32,
             body_nonce=os.urandom(8),
             flags=0x03,
+            payload_len=len(_payload_for_len),
         )
         dh1 = sc.ecdh(caller_eph_priv, responder_static_pub)
 
@@ -1979,7 +1996,7 @@ def main() -> int:
                 )
                 if res.get("status") == "decrypt_ok":
                     raw = res["payload_frame_bytes"]
-                    if _decode_payload_ack(raw, payload, rx_key, prk, sess_id):
+                    if _decode_payload_ack(raw, payload, rx_key, prk, sess_id, K=K):
                         return {"status": "decrypt_ok", "decoded_hail": True}
                 return {**res, "status": "no_signal"}
 

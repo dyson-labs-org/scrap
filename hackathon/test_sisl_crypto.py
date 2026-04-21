@@ -151,11 +151,11 @@ def test_hail_fec_layout_constants():
     """The FEC layout constants must agree with sisl_fec.coded_length."""
     import sisl_fec
     assert sc.HAIL_FEC_HEADER_BITS == 48
-    assert sc.HAIL_FEC_BODY_PAYLOAD_BITS == 1016
-    assert sc.HAIL_FEC_BODY_CODED_BITS == sisl_fec.coded_length(1016)
-    assert sc.HAIL_FEC_BODY_CODED_BITS == 2048
-    assert sc.HAIL_FEC_TOTAL_BITS == 48 + 2048
-    assert sc.HAIL_FEC_TOTAL_BITS == 2096
+    assert sc.HAIL_FEC_BODY_PAYLOAD_BITS == 1032
+    assert sc.HAIL_FEC_BODY_CODED_BITS == sisl_fec.coded_length(1032)
+    assert sc.HAIL_FEC_BODY_CODED_BITS == 2080
+    assert sc.HAIL_FEC_TOTAL_BITS == 48 + 2080
+    assert sc.HAIL_FEC_TOTAL_BITS == 2128
 
 
 def test_hail_fec_encode_returns_correct_shape_and_dtype():
@@ -492,7 +492,7 @@ def test_rlnc_derivations():
     coef = sc.derive_coef_stream(prk, 0, 64)
     assert len(coef) == 64
 
-    ack_iv = sc.derive_rlnc_ack_iv(prk)
+    ack_iv = sc.derive_rlnc_ack_iv(prk, seq=0)
     assert len(ack_iv) == 12
 
 
