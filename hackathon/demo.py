@@ -269,6 +269,55 @@ def upsample_chips_to_samples(chips: np.ndarray,
     return rep.astype(np.complex64)
 
 
+# ── SoapySDR helpers ────────────────────────────────────────────────────────
+
+def _encode_symbol_to_samples(frame_bytes: bytes) -> np.ndarray:
+    """Encode one RLNC frame to IQ samples (module-level for picklability)."""
+    sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
+    sym_chips = sf.tx_bits_to_chips(sym_bits)
+    return upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP)
+
+
+def _open_soapy_with_retry(device_str: str, attempts: int = 10):
+    """Open a SoapySDR device with up to *attempts* retries (3 s apart).
+
+    Returns the opened ``SoapySDR.Device`` or raises the last ``RuntimeError``.
+    """
+    import SoapySDR as _SoapySDR
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return _SoapySDR.Device(device_str)
+        except RuntimeError as exc:
+            last_exc = exc
+            if attempt == attempts - 1:
+                raise
+            time.sleep(3.0)
+    raise RuntimeError("unreachable") from last_exc
+
+
+def _read_device_serial(device, SoapySDR, device_str: str) -> str:
+    """Read the serial string from an already-opened SoapySDR device.
+
+    Falls back to ``SoapySDR.Device.enumerate`` if ``getHardwareInfo`` returns
+    nothing, matching the logic in ``SoapyDevice._read_serial``.
+    """
+    serial = ""
+    try:
+        hw_dict = dict(device.getHardwareInfo())
+        serial = hw_dict.get("serial", "")
+    except Exception:
+        pass
+    if not serial:
+        try:
+            found = SoapySDR.Device.enumerate(device_str)
+            if found:
+                serial = str(dict(found[0]).get("serial", ""))
+        except Exception:
+            pass
+    return serial
+
+
 # ── SoapySDR persistent device handle ───────────────────────────────────────
 
 class SoapyDevice:
@@ -306,15 +355,7 @@ class SoapyDevice:
         self._device_str = device_str
         self._info = info
 
-        self.device: Any = None
-        for attempt in range(open_attempts):
-            try:
-                self.device = _SoapySDR.Device(device_str)
-                break
-            except RuntimeError:
-                if attempt == open_attempts - 1:
-                    raise
-                time.sleep(3.0)
+        self.device: Any = _open_soapy_with_retry(device_str, attempts=open_attempts)
 
         serial = self._read_serial()
         self.serial = serial
@@ -329,20 +370,7 @@ class SoapyDevice:
         self.center_hz: float = center_hz  # PPM-corrected; use this in all calls.
 
     def _read_serial(self) -> str:
-        serial = ""
-        try:
-            hw_dict = dict(self.device.getHardwareInfo())
-            serial = hw_dict.get("serial", "")
-        except Exception:
-            pass
-        if not serial:
-            try:
-                found = self._SoapySDR.Device.enumerate(self._device_str)
-                if found:
-                    serial = str(dict(found[0]).get("serial", ""))
-            except Exception:
-                pass
-        return serial
+        return _read_device_serial(self.device, self._SoapySDR, self._device_str)
 
     def close(self) -> None:
         dev = self.device
@@ -404,15 +432,7 @@ def soapy_tx_burst(
 
     _owns_device = device is None
     if _owns_device:
-        for _open_attempt in range(10):
-            try:
-                device = SoapySDR.Device(device_str)
-                break
-            except RuntimeError:
-                if _open_attempt == 9:
-                    raise
-                import time as _time_tx
-                _time_tx.sleep(3.0)
+        device = _open_soapy_with_retry(device_str)
     assert device is not None
     device.setSampleRate(SOAPY_SDR_TX, 0, samp_hz)
     device.setFrequency(SOAPY_SDR_TX, 0, center_hz)
@@ -940,7 +960,7 @@ def live_rx_decode(
               f"(processing ~{int(block_seconds*samp_hz*8/1e6)} MB/block, "
               f"{samps_per_chip} samples/chip)")
         try:
-            device = SoapySDR.Device(info.driver)
+            device = _open_soapy_with_retry(info.driver)
         except RuntimeError as e:
             return {
                 "ok": False,
@@ -948,19 +968,7 @@ def live_rx_decode(
             }
 
         # Auto-load calibrated PPM correction from the device serial.
-        serial = ""
-        try:
-            hw_dict = dict(device.getHardwareInfo())
-            serial = hw_dict.get("serial", "")
-        except Exception:
-            pass
-        if not serial:
-            try:
-                found = SoapySDR.Device.enumerate(info.driver)
-                if found:
-                    serial = str(dict(found[0]).get("serial", ""))
-            except Exception:
-                pass
+        serial = _read_device_serial(device, SoapySDR, info.driver)
         cal_ppm = _get_device_ppm(serial)
         short_serial = serial.lstrip("0") or serial
         if cal_ppm != 0.0:
@@ -1083,7 +1091,9 @@ def live_rx_decode(
                 result_queue.put(None)
                 return
             # Compute p99 here so main thread doesn't need block_data for AGC.
-            sample_p99 = float(np.percentile(np.abs(block_data), 99))
+            _abs_sub = np.abs(block_data[::10])
+            _k99 = int(0.99 * len(_abs_sub))
+            sample_p99 = float(np.partition(_abs_sub, _k99)[_k99])
             if _save_file_ref is not None:
                 block_data.tofile(_save_file_ref)
             if decode_fn is not None:
@@ -1674,11 +1684,8 @@ def main() -> int:
     
                 # ── Phase 3: RLNC payload RX ──────────────────────────────────
                 K = args.rlnc_k
-                prk = sc.derive_session_prk(session_keys)
-                tx_key = session_keys["p2p_tx_key"]
-                sess_id = session_keys["session_id"]
-                from sparse_rlnc import RLNCDecoder, fragment_payload as _frag
-    
+                from sparse_rlnc import fragment_payload as _frag
+
                 _wire_payload_len = decoded_hail.body.payload_len
                 expected_payload_len = (
                     _wire_payload_len if _wire_payload_len > 0
@@ -1692,15 +1699,15 @@ def main() -> int:
                 frags = _frag(b'\x00' * expected_payload_len, K)
                 frag_size = len(frags[0])
                 n_sym_bytes = 4 + frag_size + 16
-    
-                decoder = RLNCDecoder(K, prk)
+
+                rx_session = RLNCSession(b'\x00' * expected_payload_len, K, session_keys)
                 print(f"\n  phase 3: \033[36mRLNC payload RX\033[0m  "
                       f"K={K}, expected={expected_payload_len}B, symbol={n_sym_bytes}B")
                 print(f"  pre-seeded VGA={_converged_vga:.0f} dB, "
                       f"static PPM (no auto-retune)")
-    
+
                 received_count = [0]
-    
+
                 def _payload_sym_fn(block_data):
                     # Decode every RLNC symbol found in this block (continuous stream).
                     sym_results = sisl_rx.decode_all_payload_in_block(
@@ -1722,11 +1729,10 @@ def main() -> int:
                             acq_sentinel = res  # acquisition failure diagnostic
                             continue
                         try:
-                            comb_id, plain = decode_payload_symbol(
-                                res["payload_frame_bytes"], tx_key, prk, sess_id)
-                            complete = decoder.add_symbol(comb_id, plain)
+                            complete = rx_session.rx_frame(res["payload_frame_bytes"])
                             received_count[0] += 1
                             n_decoded += 1
+                            comb_id = int.from_bytes(res["payload_frame_bytes"][:4], "big")
                             print(f"  symbol {comb_id} received "
                                   f"({received_count[0]} total), complete={complete}")
                         except ValueError as _e:
@@ -1763,13 +1769,13 @@ def main() -> int:
                     device=sdr.device,
                 )
     
-                recovered = decoder.decode()
+                recovered = rx_session.recovered_payload()
                 if recovered is None and rlnc_stats.get("hails_decrypted", 0) == 0:
                     print(f"  RLNC RX timeout — no symbols decoded; looping back to hail listen",
                           flush=True)
                     continue  # restart while True: → Phase 1 hail listen
                 if recovered is not None:
-                    payload_out = recovered[:expected_payload_len]
+                    payload_out = recovered
                     out_path = "/tmp/sisl_rlnc_payload.bin"
                     with open(out_path, "wb") as _f:
                         _f.write(payload_out)
@@ -1985,8 +1991,6 @@ def main() -> int:
             sess_id = session_keys["session_id"]
 
 
-            from sisl_payload import decode_ack as _decode_payload_ack
-
             def _payload_ack_fn(block_data):
                 res = sisl_rx.decode_one_payload_in_block(
                     block_data, PAYLOAD_ACK_BYTES,
@@ -1996,7 +2000,7 @@ def main() -> int:
                 )
                 if res.get("status") == "decrypt_ok":
                     raw = res["payload_frame_bytes"]
-                    if _decode_payload_ack(raw, payload, rx_key, prk, sess_id, K=K):
+                    if session.verify_ack(raw):
                         return {"status": "decrypt_ok", "decoded_hail": True}
                 return {**res, "status": "no_signal"}
 
@@ -2026,12 +2030,10 @@ def main() -> int:
             warmup_chips = sf.tx_bits_to_chips(warmup_bits)
             warmup_samples_1 = upsample_chips_to_samples(warmup_chips, SAMPS_PER_CHIP)
             all_symbol_samples.extend([warmup_samples_1] * N_WARMUP)
-            for _ in range(N_CODED):
-                frame_bytes = session.next_tx_frame()
-                sym_bits = sc.encode_payload_symbol_fec(frame_bytes)
-                sym_chips = sf.tx_bits_to_chips(sym_bits)
-                all_symbol_samples.append(
-                    upsample_chips_to_samples(sym_chips, SAMPS_PER_CHIP))
+            coded_frames = [session.next_tx_frame() for _ in range(N_CODED)]
+            from concurrent.futures import ProcessPoolExecutor as _PPE
+            with _PPE(max_workers=min(4, os.cpu_count() or 1)) as _pool:
+                all_symbol_samples.extend(_pool.map(_encode_symbol_to_samples, coded_frames))
             print(" done")
 
             # Concatenate into one contiguous buffer so the TX stream never
