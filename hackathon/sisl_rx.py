@@ -173,12 +173,12 @@ def find_sisl_frame_soft_topk(
     if n_peaks < 33:
         return []
 
-    peaks = np.array(peak_values, dtype=np.complex128)
+    peaks = np.array(peak_values, dtype=np.complex64)
     diffs = (peaks[1:] * np.conj(peaks[:-1])).real
     mags = np.abs(peaks[1:]) * np.abs(peaks[:-1])
-    soft = np.where(mags > 1e-12, diffs / mags, 0.0).astype(np.float64)
+    soft = np.where(mags > 1e-12, diffs / mags, 0.0).astype(np.float32)
 
-    template = _ASM_DIFF_POLARITY
+    template = _ASM_DIFF_POLARITY.astype(np.float32)
     n_soft = len(soft)
     if n_soft < 31:
         return []
@@ -214,29 +214,37 @@ def find_sisl_frame_soft_topk(
 def _extract_llrs_at_position(
     peak_values: list,
     peak_offset: int,
+    n_fec_bits: int | None = None,
+    pilot_bits: np.ndarray | None = None,
 ) -> dict:
     """Run the DBPSK decoder at one ASM offset and return FEC LLRs.
 
-    Returns a dict with fec_llrs (2096 float32), phase_rms_residual_rad,
-    and asm_errs_in_coherent. All None if the offset is out of range or
+    Handles both hail frames (default) and ACK frames via n_fec_bits /
+    pilot_bits parameters.
+
+    Returns a dict with fec_llrs, phase_rms_residual_rad, and
+    asm_errs_in_coherent. All None if the offset is out of range or
     the decode fails.
     """
+    if n_fec_bits is None:
+        n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
+    if pilot_bits is None:
+        pilot_bits = _PILOT_BITS
     out: dict = {
         "fec_llrs": None,
         "phase_rms_residual_rad": None,
         "asm_errs_in_coherent": None,
     }
     aligned_peaks = peak_values[peak_offset:]
-    n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
     if len(aligned_peaks) < n_fec_bits:
         return out
 
     dbpsk = sf.dbpsk_decode_from_pilot(
-        aligned_peaks, _PILOT_BITS, n_fec_bits,
+        aligned_peaks, pilot_bits, n_fec_bits,
     )
     if dbpsk is None:
         return out
-    fec_frame, fec_soft, theta0, delta_theta, rms = dbpsk
+    fec_frame, fec_soft, _, _, rms = dbpsk
     out["fec_llrs"] = fec_soft
     out["phase_rms_residual_rad"] = rms
     c_bits_first32 = np.unpackbits(
@@ -376,69 +384,102 @@ def _acquire_and_track(
 def _try_fec_decrypt(
     peak_values: list,
     positions: list,
-    responder_static: ec.EllipticCurvePrivateKey,
     top_k_soft: int,
     freq_hz: float,
     peak_mag: float,
     median_mag: float,
     rad_per_sample: float,
+    # Hail-mode args (default):
+    responder_static: ec.EllipticCurvePrivateKey | None = None,
+    # ACK-mode args (pass all four to select ACK path):
+    caller_static_priv: ec.EllipticCurvePrivateKey | None = None,
+    caller_eph_priv: ec.EllipticCurvePrivateKey | None = None,
+    dh1: bytes | None = None,
+    expected_nonce_echo: bytes | None = None,
 ) -> dict:
     """FEC fast path: soft correlator search, DBPSK decode, Viterbi, decrypt.
 
+    Handles both hail frames (pass responder_static) and ACK frames (pass
+    caller_static_priv, caller_eph_priv, dh1, expected_nonce_echo).
+
     Returns a result dict with status decrypt_ok, decrypt_fail, or track_lost.
     """
-    if not peak_values or len(peak_values) < sc.HAIL_FEC_TOTAL_BITS:
+    ack_mode = caller_static_priv is not None
+    fec_total_bits = sc.ACK_FEC_TOTAL_BITS if ack_mode else sc.HAIL_FEC_TOTAL_BITS
+    frame_len = sc.ACK_FRAME_LEN if ack_mode else sc.HAIL_FRAME_LEN
+    pilot_bits = _ACK_PILOT_BITS if ack_mode else None
+    polarity_pos = "ack-fec" if ack_mode else "fec"
+    polarity_inv = "ack-fec-inv" if ack_mode else "fec-inv"
+
+    if not peak_values or len(peak_values) < fec_total_bits:
         return {
             "status": "track_lost",
             "peak_mag": peak_mag,
             "median_mag": median_mag,
             "rad_per_sample": rad_per_sample,
             "freq_offset_hz": freq_hz,
-            "note": "peak_values too short for HAIL_FEC_TOTAL_BITS",
+            "note": f"peak_values too short for {'ACK' if ack_mode else 'HAIL'}_FEC_TOTAL_BITS",
         }
 
-    topk = find_sisl_frame_soft_topk(
-        peak_values, sc.HAIL_FRAME_LEN, k=top_k_soft,
-    )
+    topk = find_sisl_frame_soft_topk(peak_values, frame_len, k=top_k_soft)
 
     best_attempt: dict | None = None
     best_offset = -1
     best_score = 0.0
     best_pts_ratio = 0.0
-    decoded_hail: sc.DecodedHail | None = None
-    polarity_label = "fec"
+    decoded = None
+    polarity_label = polarity_pos
     extra_fec_llrs: list[np.ndarray] = []
 
     for cand_offset, cand_score, cand_pts in topk:
-        if cand_offset + sc.HAIL_FEC_TOTAL_BITS > len(peak_values):
+        if cand_offset + fec_total_bits > len(peak_values):
             continue
         if abs(cand_score) <= 10.0 or cand_pts < 3.0:
             continue
 
-        llr_diag = _extract_llrs_at_position(peak_values, int(cand_offset))
+        llr_diag = _extract_llrs_at_position(
+            peak_values, int(cand_offset),
+            n_fec_bits=fec_total_bits if ack_mode else None,
+            pilot_bits=pilot_bits,
+        )
         fec_llrs_arr = llr_diag.get("fec_llrs")
         if fec_llrs_arr is None:
             continue
 
-        attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
-        if attempt is None:
-            attempt = sc.decode_hail_fec_from_llrs(
-                -fec_llrs_arr, responder_static,
-            )
-            if attempt is not None:
-                polarity_label = "fec-inv"
+        if ack_mode:
+            assert caller_static_priv is not None and caller_eph_priv is not None
+            assert dh1 is not None and expected_nonce_echo is not None
+            attempt = sc.decode_ack_fec_from_llrs(
+                fec_llrs_arr, caller_static_priv, caller_eph_priv,
+                dh1, expected_nonce_echo)
+            if attempt is None:
+                attempt = sc.decode_ack_fec_from_llrs(
+                    -fec_llrs_arr, caller_static_priv, caller_eph_priv,
+                    dh1, expected_nonce_echo)
+                if attempt is not None:
+                    polarity_label = polarity_inv
+            else:
+                polarity_label = polarity_pos
         else:
-            polarity_label = "fec"
+            assert responder_static is not None
+            attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
+            if attempt is None:
+                attempt = sc.decode_hail_fec_from_llrs(-fec_llrs_arr, responder_static)
+                if attempt is not None:
+                    polarity_label = polarity_inv
+            else:
+                polarity_label = polarity_pos
 
         if attempt is not None:
-            decoded_hail = attempt
+            decoded = attempt
             best_offset = int(cand_offset)
             best_score = float(cand_score)
             best_pts_ratio = float(cand_pts)
             best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
             break
 
-        extra_fec_llrs.append(fec_llrs_arr)
+        if not ack_mode:
+            extra_fec_llrs.append(fec_llrs_arr)
         if best_attempt is None or abs(cand_score) > abs(best_score):
             best_attempt = {"llr_diag": llr_diag, "fec_llrs": fec_llrs_arr}
             best_offset = int(cand_offset)
@@ -457,7 +498,7 @@ def _try_fec_decrypt(
 
     llr_diag = best_attempt["llr_diag"]
     fec_llrs_arr = best_attempt["fec_llrs"]
-    base = {
+    base: dict = {
         "start_sample": positions[0] if positions else 0,
         "asm_at_byte": f"soft-bit{best_offset}",
         "peak_mag": peak_mag,
@@ -466,19 +507,30 @@ def _try_fec_decrypt(
         "freq_offset_hz": freq_hz,
         "soft_score": best_score,
         "pts_ratio": best_pts_ratio,
-        "fec_llrs": fec_llrs_arr,
-        "extra_fec_llrs": extra_fec_llrs,
-        "phase_rms_residual_rad": llr_diag["phase_rms_residual_rad"],
-        "asm_errs_in_coherent": llr_diag["asm_errs_in_coherent"],
     }
-    if decoded_hail is None:
-        return {"status": "decrypt_fail", "polarity": "fec", **base}
+    if not ack_mode:
+        base["fec_llrs"] = fec_llrs_arr
+        base["extra_fec_llrs"] = extra_fec_llrs
+        base["phase_rms_residual_rad"] = llr_diag["phase_rms_residual_rad"]
+        base["asm_errs_in_coherent"] = llr_diag["asm_errs_in_coherent"]
+
+    if decoded is None:
+        return {"status": "decrypt_fail", "polarity": polarity_label, **base}
+    if ack_mode:
+        return {
+            "status": "decrypt_ok",
+            "polarity": polarity_label,
+            "decoded_ack": decoded,
+            "body": decoded.body,
+            **base,
+        }
+    decoded_hail: sc.DecodedHail = decoded  # type: ignore[assignment]
     return {
         "status": "decrypt_ok",
         "polarity": polarity_label,
         "body": decoded_hail.body,
         "caller_eph_pub_canonical": decoded_hail.caller_eph_pub_canonical,
-        "decoded_hail": decoded_hail,  # full object for ACK construction
+        "decoded_hail": decoded_hail,
         **base,
     }
 
@@ -520,136 +572,6 @@ def _decode_one_hail_in_block(
 
 # ── ACK decode path (parallel to hail, different frame sizes) ────────────
 
-def _extract_ack_llrs_at_position(
-    peak_values: list,
-    peak_offset: int,
-) -> dict:
-    """Run the DBPSK decoder at one ASM offset for an ACK frame."""
-    out: dict = {
-        "fec_llrs": None,
-        "phase_rms_residual_rad": None,
-        "asm_errs_in_coherent": None,
-    }
-    aligned_peaks = peak_values[peak_offset:]
-    n_fec_bits = sc.ACK_FEC_TOTAL_BITS
-    if len(aligned_peaks) < n_fec_bits:
-        return out
-
-    dbpsk = sf.dbpsk_decode_from_pilot(
-        aligned_peaks, _ACK_PILOT_BITS, n_fec_bits,
-    )
-    if dbpsk is None:
-        return out
-    fec_frame, fec_soft, _, _, rms = dbpsk
-    out["fec_llrs"] = fec_soft
-    out["phase_rms_residual_rad"] = rms
-    c_bits_first32 = np.unpackbits(
-        np.frombuffer(fec_frame[:4], dtype=np.uint8))
-    out["asm_errs_in_coherent"] = int(np.sum(c_bits_first32 != _ASM_BITS))
-    return out
-
-
-def _try_ack_fec_decrypt(
-    peak_values: list,
-    positions: list,
-    caller_static_priv: ec.EllipticCurvePrivateKey,
-    caller_eph_priv: ec.EllipticCurvePrivateKey,
-    dh1: bytes,
-    expected_nonce_echo: bytes,
-    top_k_soft: int,
-    freq_hz: float,
-    peak_mag: float,
-    median_mag: float,
-    rad_per_sample: float,
-) -> dict:
-    """ACK-specific FEC decrypt path. Parallel to _try_fec_decrypt."""
-    if not peak_values or len(peak_values) < sc.ACK_FEC_TOTAL_BITS:
-        return {
-            "status": "track_lost",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-        }
-
-    topk = find_sisl_frame_soft_topk(
-        peak_values, sc.ACK_FRAME_LEN, k=top_k_soft,
-    )
-
-    best_attempt = None
-    best_offset = -1
-    best_score = 0.0
-    best_pts_ratio = 0.0
-    decoded_ack = None
-    polarity_label = "ack-fec"
-
-    for cand_offset, cand_score, cand_pts in topk:
-        if cand_offset + sc.ACK_FEC_TOTAL_BITS > len(peak_values):
-            continue
-        if abs(cand_score) <= 10.0 or cand_pts < 3.0:
-            continue
-
-        llr_diag = _extract_ack_llrs_at_position(
-            peak_values, int(cand_offset))
-        fec_llrs_arr = llr_diag.get("fec_llrs")
-        if fec_llrs_arr is None:
-            continue
-
-        attempt = sc.decode_ack_fec_from_llrs(
-            fec_llrs_arr, caller_static_priv, caller_eph_priv,
-            dh1, expected_nonce_echo)
-        if attempt is None:
-            attempt = sc.decode_ack_fec_from_llrs(
-                -fec_llrs_arr, caller_static_priv, caller_eph_priv,
-                dh1, expected_nonce_echo)
-            if attempt is not None:
-                polarity_label = "ack-fec-inv"
-        else:
-            polarity_label = "ack-fec"
-
-        if attempt is not None:
-            decoded_ack = attempt
-            best_offset = int(cand_offset)
-            best_score = float(cand_score)
-            best_pts_ratio = float(cand_pts)
-            best_attempt = {"llr_diag": llr_diag}
-            break
-
-        if best_attempt is None or abs(cand_score) > abs(best_score):
-            best_attempt = {"llr_diag": llr_diag}
-            best_offset = int(cand_offset)
-            best_score = float(cand_score)
-            best_pts_ratio = float(cand_pts)
-
-    if best_attempt is None:
-        return {
-            "status": "track_lost",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-        }
-
-    base = {
-        "start_sample": positions[0] if positions else 0,
-        "asm_at_byte": f"soft-bit{best_offset}",
-        "peak_mag": peak_mag,
-        "median_mag": median_mag,
-        "rad_per_sample": rad_per_sample,
-        "freq_offset_hz": freq_hz,
-        "soft_score": best_score,
-        "pts_ratio": best_pts_ratio,
-    }
-    if decoded_ack is None:
-        return {"status": "decrypt_fail", "polarity": polarity_label, **base}
-    return {
-        "status": "decrypt_ok",
-        "polarity": polarity_label,
-        "decoded_ack": decoded_ack,
-        "body": decoded_ack.body,
-        **base,
-    }
-
 
 def decode_one_ack_in_block(
     samples: np.ndarray,
@@ -679,18 +601,18 @@ def decode_one_ack_in_block(
     if acq["status"] != "acquired":
         return acq
 
-    return _try_ack_fec_decrypt(
+    return _try_fec_decrypt(
         peak_values=acq["peak_values"],
         positions=acq["positions"],
-        caller_static_priv=caller_static_priv,
-        caller_eph_priv=caller_eph_priv,
-        dh1=dh1,
-        expected_nonce_echo=expected_nonce_echo,
         top_k_soft=top_k_soft,
         freq_hz=acq["freq_hz"],
         peak_mag=acq["peak_mag"],
         median_mag=acq["median_mag"],
         rad_per_sample=acq["rad_per_sample"],
+        caller_static_priv=caller_static_priv,
+        caller_eph_priv=caller_eph_priv,
+        dh1=dh1,
+        expected_nonce_echo=expected_nonce_echo,
     )
 
 
