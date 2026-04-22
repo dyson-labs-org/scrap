@@ -84,6 +84,27 @@ _G2 = 0o561    # 0b101110001
 _NUM_STATES = 1 << (CONSTRAINT_LENGTH - 1)     # 256
 
 
+# ── Module-load precomputation of the convolutional output lookup table ─────
+
+def _build_conv_out_table() -> np.ndarray:
+    """Build a 512-entry lookup table mapping each 9-bit register value to
+    its packed output byte: bit 1 = c1 (G1 parity), bit 0 = c2 (G2 parity).
+    """
+    regs = np.arange(512, dtype=np.uint16)
+    c1 = np.zeros(512, dtype=np.uint8)
+    c2 = np.zeros(512, dtype=np.uint8)
+    for r in range(512):
+        c1[r] = bin(r & _G1).count('1') % 2
+        c2[r] = bin(r & _G2).count('1') % 2
+    return (c1 * 2 + c2).astype(np.uint8)
+
+
+_CONV_OUT_TABLE = _build_conv_out_table()
+
+# Powers-of-two for sliding-window register reconstruction (MSB first)
+_WIN_POWERS = (1 << np.arange(8, -1, -1, dtype=np.uint16))
+
+
 # ── Module-load precomputation of the trellis tables ────────────────────────
 
 def _popcount_bit(x: int, mask: int) -> int:
@@ -182,23 +203,22 @@ def encode(bits: np.ndarray) -> np.ndarray:
     if not np.all((bits == 0) | (bits == 1)):
         raise ValueError("encode: bits must be 0 or 1")
 
-    # Append tail
+    # Append tail zeros for zero-tail termination.
     tail = np.zeros(TAIL_BITS, dtype=np.uint8)
     all_bits = np.concatenate([bits, tail])
     n_total = len(all_bits)
+
+    # Fully vectorized encoder using sliding-window view.
+    # The 9-bit shift register at time t equals the window
+    # [b_{t-8}, ..., b_{t-1}, b_t] (MSB=oldest bit).
+    # We pad 8 zeros at the front to represent the all-zero initial state.
+    padded = np.concatenate([np.zeros(TAIL_BITS, dtype=np.uint8), all_bits])
+    windows = np.lib.stride_tricks.sliding_window_view(padded, CONSTRAINT_LENGTH)  # (n_total, 9)
+    registers = (windows.astype(np.uint16) @ _WIN_POWERS).astype(np.uint16)  # (n_total,)
+    packed = _CONV_OUT_TABLE[registers]  # (n_total,)
     out = np.empty(n_total * CODED_BITS_PER_PAYLOAD_BIT, dtype=np.uint8)
-
-    state = 0         # 8-bit memory, LSB is most recently shifted-in
-    for t in range(n_total):
-        b = int(all_bits[t])
-        # 9-bit register = (state << 1) | b, with bit 0 = b and
-        # bit k = past input b_{t-k} (k=1..8).
-        register = ((state << 1) | b) & 0x1FF
-        out[2 * t] = _popcount_bit(register, _G1)
-        out[2 * t + 1] = _popcount_bit(register, _G2)
-        # New state drops the oldest bit (bit 8 of register).
-        state = register & 0xFF
-
+    out[0::2] = (packed >> 1) & 1
+    out[1::2] = packed & 1
     return out
 
 
@@ -314,11 +334,8 @@ def decode(llrs: np.ndarray, n_payload_bits: int) -> np.ndarray:
     state = 0
     for t in range(n_total - 1, -1, -1):
         bits[t] = state & 1            # input bit that produced this state
-        if survivors[t, state]:
-            # b-predecessor won: previous state had bit 8 = 1
-            state = (state >> 1) | 0x80
-        else:
-            state = state >> 1
+        # Branch-free: survivors[t, state] is 0 or 1; shift MSB in from survivor.
+        state = (state >> 1) | (int(survivors[t, state]) << (CONSTRAINT_LENGTH - 2))
 
     # Drop the TAIL_BITS flush bits at the end and return the payload.
     return bits[:n_payload_bits].copy()
