@@ -1983,43 +1983,42 @@ def main() -> int:
             samp_hz=chip_rate_hz * 2,
         )
 
+        COORD_HAIL_PASS_S = 2.0  # short passes so coord check is responsive
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
-        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
         print(f"  phase 2:       RX listening for ACK")
 
         with SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz) as call_sdr:
             print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
             # ── Phase 1: TX hail ──────────────────────────────────────────
             phase1_start_time = time.time()
-            initial_repeats = max(1, int(
-                INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
             if coord:
-                # Loop TX hail until respond signals it decoded (sends "switch").
+                _pass_repeats = max(1, int(
+                    COORD_HAIL_PASS_S * chip_rate_hz / len(hail_chips)))
                 hail_pass = 0
                 print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                      f"(coord: loop until respond decoded)...", flush=True)
+                      f"(coord: ~{COORD_HAIL_PASS_S:.0f}s/pass, "
+                      f"loop until respond decoded)...", flush=True)
                 while True:
                     hail_pass += 1
-                    print(f"  hail pass {hail_pass} "
-                          f"({INITIAL_TX_DURATION:.0f}s)...",
-                          end="", flush=True)
                     soapy_tx_burst(
                         hail_samples, call_sdr.center_hz,
                         samp_hz=SAMP_RATE_HZ,
                         tx_vga_db=args.tx_vga,
                         tx_amp_on=args.tx_amp,
-                        repeats=initial_repeats,
+                        repeats=_pass_repeats,
                         device=call_sdr.device,
                     )
                     if coord.wait_for_switch(timeout=0.1):
-                        print(f" done — respond decoded hail", flush=True)
+                        print(f"  hail pass {hail_pass} — respond decoded",
+                              flush=True)
                         coord.send_switch()  # confirm: hail TX stopped
                         break
-                    print(" done", flush=True)
             else:
+                _pass_repeats = max(1, int(
+                    INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
                 print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                      f"({initial_repeats} repeats, "
+                      f"({_pass_repeats} repeats, "
                       f"{INITIAL_TX_DURATION:.0f}s continuous)...",
                       end="", flush=True)
                 soapy_tx_burst(
@@ -2027,7 +2026,7 @@ def main() -> int:
                     samp_hz=SAMP_RATE_HZ,
                     tx_vga_db=args.tx_vga,
                     tx_amp_on=args.tx_amp,
-                    repeats=initial_repeats,
+                    repeats=_pass_repeats,
                     device=call_sdr.device,
                 )
                 print(" done", flush=True)
