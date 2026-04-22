@@ -15,9 +15,7 @@ personas:
   - "sisl_fec.py"
   - "sdr_devices.py"
   - "demo.py"
-  - "bench_radio_characterize.py"
   - "bench_llr_accumulator.py"
-  - "waterfall_check.py"
   - "rf_power.py"
   - "ota_test.py"
   experts:
@@ -41,9 +39,7 @@ personas:
   - "sisl_coord.py"
   - "demo.py"
   - "ota_test.py"
-  - "bench_radio_characterize.py"
   - "rf_power.py"
-  - "waterfall_check.py"
   experts:
   - name: "Michael Ossmann"
     association: "HackRF One designer, Great Scott Gadgets founder, HackRF open-source SDR hardware, half-duplex TX/RX limitation of HackRF, MAX2837 baseband IC, RFFC5072 mixer, MAX5864 ADC/DAC (8-bit), USB 2.0 High Speed streaming (480 Mbps, ~20 Msps max sustained), LPC4320 ARM Cortex-M4 controller, antenna port SMA, 1 MHz to 6 GHz frequency range, no onboard TCXO (crystal oscillator PPM drift ~20 ppm), clock input for external reference, TX/RX switching time (not instantaneous, ~1 ms transition), PLL lock time, synthesizer settling, spur-free dynamic range limitations, hackrf_transfer CLI, hackrf_sweep, hackrf_info, hackrf_clock, Jawbreaker prototype, PortaPack H1/H2 add-on, YARD Stick One, Ubertooth One (Bluetooth), Software Defined Radio with HackRF (Great Scott Gadgets tutorial), SDR workshops at DEF CON and ShmooCon, open hardware OSHW, KiCad schematics, RF gain stages (LNA, VGA, TX VGA), baseband filter bandwidth, I/Q imbalance in low-cost SDR, DC offset, AGC automatic gain control, clipping and ADC saturation at 8-bit resolution, half-duplex guard time, antenna impedance mismatch, VSWR"

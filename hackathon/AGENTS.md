@@ -12,6 +12,14 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Canonical Local Verification
+
+Run the blessed local regression command from this directory:
+
+```bash
+./verify-local
+```
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

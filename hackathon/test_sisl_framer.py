@@ -16,12 +16,48 @@ import sisl_framer as sf
 
 # ── Basic sanity ────────────────────────────────────────────────────────────
 
+def test_debug_telemetry_schema_order(capsys, monkeypatch):
+    monkeypatch.setattr(sf, "SISL_DEBUG", True)
+    sf.debug_telemetry(
+        "rx",
+        mean_abs_llr=1.5,
+        status="candidate_eval",
+        freq_hz=-2500,
+        asm_errs=2,
+        custom_key="extra",
+        drift_rad=None,
+    )
+    out = capsys.readouterr().out.strip()
+    assert out.startswith("[DBG rx] status=candidate_eval")
+    assert "asm_errs=2" in out
+    assert "mean_abs_llr=1.5" in out
+    assert "freq_hz=-2500" in out
+    assert out.endswith("custom_key=extra")
+
+
+def test_debug_telemetry_gate_off(capsys, monkeypatch):
+    monkeypatch.setattr(sf, "SISL_DEBUG", False)
+    sf.debug_telemetry("rx", status="candidate_eval", candidates=3)
+    out = capsys.readouterr().out
+    assert out == ""
+
+
 def test_byte_bit_roundtrip():
     data = b"\x00\x01\xAB\xFF\x1A\xCF\xFC\x1D"
     bits = sf.bytes_to_bits(data)
     assert len(bits) == len(data) * 8
     out = sf.bits_to_bytes(bits)
     assert out == data
+
+
+def test_apply_freq_correction_rejects_nonfinite_or_out_of_range():
+    samples = np.ones(16, dtype=np.complex64)
+    with pytest.raises(ValueError, match="rad_per_sample"):
+        sf.apply_freq_correction(samples, float("nan"))
+    with pytest.raises(ValueError, match="rad_per_sample"):
+        sf.apply_freq_correction(samples, np.pi + 1e-6)
+    with pytest.raises(ValueError, match="drift_rad_per_sample2"):
+        sf.apply_freq_correction(samples, 0.0, drift_rad_per_sample2=float("inf"))
 
 
 # ── Differential bit encoding ──────────────────────────────────────────────
@@ -256,6 +292,27 @@ def test_dbpsk_decode_at_negative_drift():
     assert result is not None
     _, soft, _, delta_est, _ = result
     assert abs(delta_est - delta_theta) < 0.05, (delta_est, delta_theta)
+    decoded_bits = (soft < 0).astype(np.uint8)
+    expected = np.concatenate([pilot_bits, body_bits])
+    assert np.array_equal(decoded_bits, expected)
+
+
+def test_dbpsk_decode_wraps_large_drift_into_principal_interval():
+    """Large phase steps equivalent modulo 2π should decode without raising."""
+    rng = np.random.default_rng(seed=92)
+    pilot_bits = np.array([0, 0, 1, 1, 0, 1, 0, 1] * 6, dtype=np.uint8)
+    body_bits = rng.integers(0, 2, 256).astype(np.uint8)
+    delta_theta = 3.35  # > pi, equivalent to wrapped negative drift
+    peaks = _make_dbpsk_test_signal(
+        pilot_bits,
+        body_bits,
+        theta0=0.2,
+        delta_theta=delta_theta,
+    )
+    result = sf.dbpsk_decode_from_pilot(peaks, pilot_bits, len(peaks))
+    assert result is not None
+    _, soft, _, delta_est, _ = result
+    assert -np.pi <= delta_est < np.pi
     decoded_bits = (soft < 0).astype(np.uint8)
     expected = np.concatenate([pilot_bits, body_bits])
     assert np.array_equal(decoded_bits, expected)
@@ -532,13 +589,94 @@ def _synth_peaks(bits: np.ndarray, theta0: float, delta: float,
     return peaks.astype(np.complex128)
 
 
+def _phase_spread_rms(coherent_mag: float, incoherent_mag: float) -> float:
+    if incoherent_mag <= 0:
+        return float("inf")
+    ratio = coherent_mag / incoherent_mag
+    safe_ratio = max(min(ratio, 1.0 - 1e-9), 1e-9)
+    return float(np.sqrt(-2.0 * np.log(safe_ratio)))
+
+
+def _fit_phase_from_known_bits(
+    peak_values,
+    start_bit_offset: int,
+    known_bits: np.ndarray,
+    delta_search_range: float = np.pi,
+    delta_fine_steps: int = 8,
+):
+    n_known = len(known_bits)
+    if n_known < 4:
+        return None
+    total = len(peak_values)
+    if start_bit_offset < 0 or start_bit_offset + n_known > total:
+        return None
+
+    peaks = np.array(
+        peak_values[start_bit_offset:start_bit_offset + n_known],
+        dtype=np.complex128,
+    )
+    if np.any(np.abs(peaks) < 1e-12):
+        return None
+
+    sign = np.where(known_bits == 0, 1.0, -1.0).astype(np.float64)
+    derotated = peaks * sign
+
+    n_fft = max(256, 16 * n_known)
+    spectrum = np.fft.fft(derotated, n=n_fft)
+    mag_sq = (spectrum.real ** 2 + spectrum.imag ** 2)
+    coarse_idx = int(np.argmax(mag_sq))
+    if coarse_idx > n_fft // 2:
+        coarse_idx -= n_fft
+    coarse_delta = 2.0 * np.pi * coarse_idx / n_fft
+    if abs(coarse_delta) > delta_search_range:
+        bin_lo = int(-delta_search_range * n_fft / (2.0 * np.pi))
+        bin_hi = int(delta_search_range * n_fft / (2.0 * np.pi))
+        idx_wrapped = np.arange(n_fft)
+        signed = np.where(
+            idx_wrapped > n_fft // 2, idx_wrapped - n_fft, idx_wrapped,
+        )
+        mask = (signed >= bin_lo) & (signed <= bin_hi)
+        masked = np.where(mask, mag_sq, -1.0)
+        coarse_idx_raw = int(np.argmax(masked))
+        coarse_delta = 2.0 * np.pi * signed[coarse_idx_raw] / n_fft
+
+    k_arr = np.arange(n_known, dtype=np.float64)
+
+    def _likelihood(delta_val: float) -> float:
+        phasor = np.exp(-1j * k_arr * delta_val)
+        return float(np.abs(np.sum(derotated * phasor)))
+
+    delta_hat = float(coarse_delta)
+    h = 2.0 * np.pi / n_fft
+    for _ in range(delta_fine_steps):
+        left = _likelihood(delta_hat - h)
+        center = _likelihood(delta_hat)
+        right = _likelihood(delta_hat + h)
+        if left > center and left >= right:
+            delta_hat -= h
+        elif right > center and right > left:
+            delta_hat += h
+        h *= 0.5
+
+    phasor = np.exp(-1j * k_arr * delta_hat)
+    coherent_sum = np.sum(derotated * phasor)
+    coherent_mag = float(np.abs(coherent_sum))
+    theta0_local = float(np.angle(coherent_sum))
+    theta0_at_zero = theta0_local - start_bit_offset * delta_hat
+    incoherent_mag = float(np.sum(np.abs(derotated)))
+    rms_residual = _phase_spread_rms(coherent_mag, incoherent_mag)
+    if rms_residual == float("inf"):
+        return None
+    return theta0_at_zero, float(delta_hat), rms_residual
+
+
 def test_fit_phase_from_known_bits_clean():
     rng = np.random.default_rng(seed=11)
     bits = rng.integers(0, 2, size=64).astype(np.uint8)
     theta0_true = 0.7
     delta_true = 0.02
     peaks = _synth_peaks(bits, theta0_true, delta_true)
-    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    fit = _fit_phase_from_known_bits(peaks, 0, bits)
     assert fit is not None
     theta0, delta, rms = fit
     assert abs(theta0 - theta0_true) < 1e-3
@@ -555,7 +693,7 @@ def test_fit_phase_from_known_bits_with_offset():
     peaks = _synth_peaks(bits, theta0_true, delta_true)
     start = 10
     pilot = bits[start:start + 32]
-    fit = sf.fit_phase_from_known_bits(peaks, start, pilot)
+    fit = _fit_phase_from_known_bits(peaks, start, pilot)
     assert fit is not None
     theta0, delta, _ = fit
     assert abs(theta0 - theta0_true) < 5e-3
@@ -573,7 +711,7 @@ def test_fit_phase_from_known_bits_large_slope_no_pi_ambiguity():
     delta_true = np.pi * 0.9
     peaks = _synth_peaks(bits, theta0_true, delta_true, noise_std=0.05,
                           seed=22)
-    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    fit = _fit_phase_from_known_bits(peaks, 0, bits)
     assert fit is not None
     theta0, delta, rms = fit
     # Must resolve the correct slope within ~0.02 rad/symbol
@@ -590,7 +728,7 @@ def test_fit_phase_from_known_bits_negative_slope():
     delta_true = -0.4
     peaks = _synth_peaks(bits, theta0_true, delta_true, noise_std=0.05,
                           seed=24)
-    fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+    fit = _fit_phase_from_known_bits(peaks, 0, bits)
     assert fit is not None
     theta0, delta, _ = fit
     assert abs(delta - delta_true) < 0.02
@@ -605,7 +743,7 @@ def test_fit_phase_noise_ratio_reflects_quality():
     for noise in [0.0, 0.1, 0.3, 0.6, 1.0]:
         peaks = _synth_peaks(bits, theta0=0.1, delta=0.001,
                               noise_std=noise, seed=26)
-        fit = sf.fit_phase_from_known_bits(peaks, 0, bits)
+        fit = _fit_phase_from_known_bits(peaks, 0, bits)
         assert fit is not None
         rmss.append(fit[2])
     # Monotone nondecreasing
@@ -617,7 +755,7 @@ def test_fit_phase_noise_ratio_reflects_quality():
 
 
 def test_fit_phase_from_known_bits_too_short():
-    assert sf.fit_phase_from_known_bits(
+    assert _fit_phase_from_known_bits(
         np.zeros(10, dtype=np.complex128), 0,
         np.array([0, 1, 0], dtype=np.uint8),
     ) is None

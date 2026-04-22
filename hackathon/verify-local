@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+export PYTHONPATH="$ROOT"
+
+# Fail-fast: ensure we're in the correct repository root
+if [[ ! -f "verify-local" || ! -f "conftest.py" ]]; then
+    echo "ERROR: verify-local must be invoked from repo root with conftest.py present" >&2
+    exit 1
+fi
+
+# Fail-fast: check for required test files
+for testfile in test_ota_test_import.py test_sisl_coord.py test_sisl_framer.py test_sisl_dsss_demo.py test_demo_output.py; do
+    if [[ ! -f "$testfile" ]]; then
+        echo "ERROR: required test file missing: $testfile" >&2
+        exit 1
+    fi
+done
+
+pytest -q \
+  test_ota_test_import.py \
+  test_sisl_coord.py \
+  test_sisl_framer.py::test_debug_telemetry_schema_order \
+  test_sisl_framer.py::test_debug_telemetry_gate_off \
+  test_sisl_framer.py::test_dbpsk_body_drift_compensation_preserves_body_llr_strength \
+  test_sisl_dsss_demo.py::test_llr_accumulator_fec_constructor_validates_n_bits \
+  test_demo_output.py::test_tx_mode_runs_without_gnuradio
+

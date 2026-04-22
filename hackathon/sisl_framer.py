@@ -9,9 +9,49 @@ Assumes chip-aligned start; add a sliding correlator for acquisition.
 from __future__ import annotations
 
 import os
+import sys
 
 import numpy as np
-_FRAMER_DEBUG = bool(os.environ.get("SISL_DEBUG"))
+SISL_DEBUG = bool(os.environ.get("SISL_DEBUG"))
+_DEBUG_SCHEMA_KEYS = (
+    "status",
+    "candidates",
+    "asm_errs",
+    "mean_abs_llr",
+    "cos_sim",
+    "freq_hz",
+    "drift_rad",
+)
+
+
+def _format_debug_value(value) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (float, np.floating)):
+        if np.isfinite(value):
+            return f"{float(value):.6g}"
+        return str(float(value))
+    if isinstance(value, (np.integer, int)):
+        return str(int(value))
+    return str(value)
+
+
+def debug_telemetry(component: str, /, stream=None, **fields) -> None:
+    """Emit SISL_DEBUG telemetry in a stable key/value format."""
+    if not SISL_DEBUG:
+        return
+    ordered: list[tuple[str, object]] = []
+    for key in _DEBUG_SCHEMA_KEYS:
+        value = fields.pop(key, None)
+        if value is not None:
+            ordered.append((key, value))
+    for key, value in fields.items():
+        if value is not None:
+            ordered.append((key, value))
+    if not ordered:
+        return
+    payload = " ".join(f"{k}={_format_debug_value(v)}" for k, v in ordered)
+    print(f"  [DBG {component}] {payload}", file=(stream or sys.stdout), flush=True)
 
 # scipy is a HARD requirement — the matched-filter correlator must be
 # FFT-based for real-time DSP. A numpy np.convolve fallback on multi-
@@ -29,6 +69,9 @@ except ImportError as e:
 import sisl_dsss as sd
 
 CHIPS_PER_SYMBOL = 1023
+_MAX_ABS_RAD_PER_SAMPLE = float(np.pi)
+_MAX_ABS_DRIFT_PER_SYMBOL = float(np.pi)
+_MAX_ABS_DRIFT_RAD_PER_SAMPLE2 = 1.0
 
 
 # ── Spreading code helpers ──────────────────────────────────────────────────
@@ -184,6 +227,47 @@ def _remove_dc(samples: np.ndarray) -> np.ndarray:
     if len(s) == 0:
         return s
     return (s - s.mean()).astype(np.complex64)
+
+
+def _require_finite_real(name: str, value: float) -> float:
+    value_f = float(value)
+    if not np.isfinite(value_f):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return value_f
+
+
+def _require_rad_per_sample(name: str, value: float) -> float:
+    value_f = _require_finite_real(name, value)
+    if abs(value_f) > _MAX_ABS_RAD_PER_SAMPLE:
+        raise ValueError(
+            f"{name} must be in [-pi, +pi] rad/sample, got {value_f:.6g}"
+        )
+    return value_f
+
+
+def _require_drift_per_symbol(name: str, value: float) -> float:
+    value_f = _require_finite_real(name, value)
+    if abs(value_f) > _MAX_ABS_DRIFT_PER_SYMBOL:
+        raise ValueError(
+            f"{name} must be in [-pi, +pi] rad/symbol, got {value_f:.6g}"
+        )
+    return value_f
+
+
+def _wrap_phase_pi(value: float) -> float:
+    """Wrap phase-like values to [-pi, +pi)."""
+    value_f = _require_finite_real("phase", value)
+    return float(((value_f + np.pi) % (2.0 * np.pi)) - np.pi)
+
+
+def _require_drift_rad_per_sample2(name: str, value: float) -> float:
+    value_f = _require_finite_real(name, value)
+    if abs(value_f) > _MAX_ABS_DRIFT_RAD_PER_SAMPLE2:
+        raise ValueError(
+            f"{name} magnitude {value_f:.6g} rad/sample^2 exceeds limit "
+            f"{_MAX_ABS_DRIFT_RAD_PER_SAMPLE2}"
+        )
+    return value_f
 
 
 def _estimate_freq_offset_r1(samples: np.ndarray) -> float:
@@ -499,6 +583,11 @@ def apply_freq_correction(samples: np.ndarray,
     drift_rad_per_sample2: linear drift rate (rad/sample², i.e. chirp rate).
         Compensates oscillator warm-up drift. Zero disables chirp correction.
     """
+    rad_per_sample = _require_rad_per_sample("rad_per_sample", rad_per_sample)
+    drift_rad_per_sample2 = _require_drift_rad_per_sample2(
+        "drift_rad_per_sample2",
+        drift_rad_per_sample2,
+    )
     if rad_per_sample == 0.0 and drift_rad_per_sample2 == 0.0:
         return samples
     n = np.arange(len(samples), dtype=np.float64)
@@ -606,6 +695,7 @@ def decode_with_freq_tracking(
         rad_per_sample = estimate_freq_offset_rad_per_sample(samples)
     else:
         rad_per_sample = float(freq_offset_rad_per_sample)
+    rad_per_sample = _require_rad_per_sample("freq_offset_rad_per_sample", rad_per_sample)
     samples_corr = apply_freq_correction(samples, rad_per_sample)
 
     # ── 2. Complex matched filter ─────────────────────────────────────
@@ -705,6 +795,7 @@ def decode_with_freq_tracking(
 
     # ── 5. V-V drift estimation + differential decoding ────────────────
     drift_per_symbol = estimate_drift_per_symbol(peak_values)
+    drift_per_symbol = _require_drift_per_symbol("drift_per_symbol", drift_per_symbol)
 
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0                          # caller tries both polarities
@@ -756,108 +847,6 @@ def _phase_spread_rms(coherent_mag: float, incoherent_mag: float) -> float:
     return float(np.sqrt(-2.0 * np.log(safe_ratio)))
 
 
-def fit_phase_from_known_bits(
-    peak_values,
-    start_bit_offset: int,
-    known_bits: np.ndarray,
-    delta_search_range: float = np.pi,
-    delta_fine_steps: int = 8,
-) -> tuple[float, float, float | None]:
-    """ML fit of absolute phase θ₀ and per-symbol drift Δθ from a known pilot.
-
-    Derotate by known bit sign: d[k] = sign[k] · peak[k] ≈ |p|·exp(j·(θ₀+k·Δθ))
-        Δθ̂ = argmax_{δ} |Σ_k d[k]·exp(-j·k·δ)|²   (FFT peak, zero-padded)
-        θ̂₀ = angle(Σ_k d[k]·exp(-j·k·Δθ̂))
-
-    rms_residual ≈ sqrt(-2·ln(coherent/incoherent)): <0.3 clean, >1.5 noise.
-
-    Returns (theta0, delta_theta, rms_residual_rad) or None on failure.
-    """
-    n_known = len(known_bits)
-    if n_known < 4:
-        return None
-    total = len(peak_values)
-    if start_bit_offset < 0 or start_bit_offset + n_known > total:
-        return None
-
-    peaks = np.array(
-        peak_values[start_bit_offset:start_bit_offset + n_known],
-        dtype=np.complex128,
-    )
-    if np.any(np.abs(peaks) < 1e-12):
-        return None
-
-    # Derotate by known sign: bit 0 → +1, bit 1 → -1
-    sign = np.where(known_bits == 0, 1.0, -1.0).astype(np.float64)
-    derotated = peaks * sign
-
-    # Coarse grid search via zero-padded FFT. With M = 16*n_known samples,
-    # the DFT bin spacing corresponds to Δθ = 2π/M per bin, covering
-    # [-π, π] around DC. For n_known=48 this gives ~768 bins at 8 mrad
-    # spacing — sufficient to localize the peak to one bin.
-    n_fft = max(256, 16 * n_known)
-    spectrum = np.fft.fft(derotated, n=n_fft)
-    mag_sq = (spectrum.real ** 2 + spectrum.imag ** 2)
-    coarse_idx = int(np.argmax(mag_sq))
-    # Map FFT bin index to Δθ in (-π, π]
-    if coarse_idx > n_fft // 2:
-        coarse_idx -= n_fft
-    coarse_delta = 2.0 * np.pi * coarse_idx / n_fft
-    # Restrict to user-provided range (in case caller has a tighter prior)
-    if abs(coarse_delta) > delta_search_range:
-        # Search was too wide; clamp by re-searching within the allowed band
-        bin_lo = int(-delta_search_range * n_fft / (2.0 * np.pi))
-        bin_hi = int(delta_search_range * n_fft / (2.0 * np.pi))
-        # Build masked magnitudes allowing only [bin_lo, bin_hi]
-        idx_wrapped = np.arange(n_fft)
-        signed = np.where(idx_wrapped > n_fft // 2,
-                           idx_wrapped - n_fft, idx_wrapped)
-        mask = (signed >= bin_lo) & (signed <= bin_hi)
-        masked = np.where(mask, mag_sq, -1.0)
-        coarse_idx_raw = int(np.argmax(masked))
-        coarse_delta = 2.0 * np.pi * signed[coarse_idx_raw] / n_fft
-
-    # Fine refinement: iterative bisection around the coarse peak.
-    # At each step, evaluate the likelihood at (δ - h, δ, δ + h), move
-    # to the best, halve h. This converges quadratically to machine
-    # precision in a handful of steps.
-    k_arr = np.arange(n_known, dtype=np.float64)
-    def _likelihood(delta_val: float) -> float:
-        phasor = np.exp(-1j * k_arr * delta_val)
-        s = float(np.abs(np.sum(derotated * phasor)))
-        return s
-    delta_hat = float(coarse_delta)
-    h = 2.0 * np.pi / n_fft   # half the coarse bin width
-    for _ in range(delta_fine_steps):
-        left = _likelihood(delta_hat - h)
-        center = _likelihood(delta_hat)
-        right = _likelihood(delta_hat + h)
-        if left > center and left >= right:
-            delta_hat -= h
-        elif right > center and right > left:
-            delta_hat += h
-        h *= 0.5
-
-    # ML θ₀ is the angle of the coherent sum at the best Δθ,
-    # translated from "at start_bit_offset" back to "at bit index 0".
-    phasor = np.exp(-1j * k_arr * delta_hat)
-    coherent_sum = np.sum(derotated * phasor)
-    coherent_mag = float(np.abs(coherent_sum))
-    theta0_local = float(np.angle(coherent_sum))
-    theta0_at_zero = theta0_local - start_bit_offset * delta_hat
-
-    # Phase-spread residual: how much are the derotated peaks scattered
-    # around the fitted trajectory? Compute via the ratio of coherent to
-    # incoherent sums. coherent/incoherent = 1 for a perfectly aligned
-    # signal; → 1/sqrt(N) for random noise.
-    incoherent_mag = float(np.sum(np.abs(derotated)))
-    rms_residual = _phase_spread_rms(coherent_mag, incoherent_mag)
-    if rms_residual == float("inf"):
-        return None
-
-    return theta0_at_zero, float(delta_hat), rms_residual
-
-
 def estimate_drift_per_symbol(
     peak_values,
     pilot_bits: np.ndarray | None = None,
@@ -888,12 +877,12 @@ def estimate_drift_per_symbol(
 
     if pilot_bits is None or len(pilot_bits) < 2:
         # No pilot — V-V is all we have. Bounded to [−π/2, +π/2].
-        return delta_vv if delta_vv is not None else 0.0
+        return _wrap_phase_pi(delta_vv if delta_vv is not None else 0.0)
 
     # ── Pilot-aided unambiguous coarse estimate ──
     n_pilot = int(min(len(pilot_bits), n))
     if n_pilot < 2:
-        return delta_vv if delta_vv is not None else 0.0
+        return _wrap_phase_pi(delta_vv if delta_vv is not None else 0.0)
     pilot_signs = (1.0 - 2.0
                     * np.asarray(pilot_bits[:n_pilot], dtype=np.float64))
     pilot_peaks = peaks[:n_pilot]
@@ -905,7 +894,7 @@ def estimate_drift_per_symbol(
     delta_pilot = float(np.angle(s_pilot))
 
     if delta_vv is None:
-        return delta_pilot
+        return _wrap_phase_pi(delta_pilot)
 
     # ── Unwrap V-V around pilot estimate ──
     # The true Δθ could be delta_vv, delta_vv + π, or delta_vv − π
@@ -913,7 +902,7 @@ def estimate_drift_per_symbol(
     # unambiguous estimate.
     candidates = (delta_vv, delta_vv + np.pi, delta_vv - np.pi)
     best = min(candidates, key=lambda c: abs(c - delta_pilot))
-    return float(best)
+    return _wrap_phase_pi(float(best))
 
 
 def dbpsk_decode_from_pilot(
@@ -942,6 +931,8 @@ def dbpsk_decode_from_pilot(
 
     # ── 1. Pilot-aided drift estimate (unambiguous over [−π, +π]) ──
     delta_theta = estimate_drift_per_symbol(peaks_arr, pilot_bits=pilot_bits)
+    delta_theta = _wrap_phase_pi(delta_theta)
+    delta_theta = _require_drift_per_symbol("delta_theta", delta_theta)
 
     # ── 2. Derotate to remove drift ──
     k_arr = np.arange(n_data_bits, dtype=np.float64)
@@ -985,16 +976,17 @@ def dbpsk_decode_from_pilot(
         drift_rotator = complex(np.cos(delta_theta), -np.sin(delta_theta))
         uncomp = (raw_body * np.conj(prev_peaks)).real.astype(np.float32)
         body_llrs = (raw_body * np.conj(prev_peaks) * drift_rotator).real.astype(np.float32)
-        if _FRAMER_DEBUG:
+        if SISL_DEBUG:
             sign_changes = float(np.mean(np.signbit(uncomp) != np.signbit(body_llrs)))
-            print(
-                "       [DBG framer] "
-                f"Δθ={delta_theta:+.4f} rms={rms_residual:.3f} "
-                f"mean|pilot|={float(np.mean(np.abs(pilot_llrs))):.3f} "
-                f"mean|body_unc|={float(np.mean(np.abs(uncomp))):.3f} "
-                f"mean|body_cmp|={float(np.mean(np.abs(body_llrs))):.3f} "
-                f"sign_flip={sign_changes:.3f}",
-                flush=True,
+            debug_telemetry(
+                "framer",
+                status="dbpsk_comp",
+                drift_rad=delta_theta,
+                mean_abs_llr=float(np.mean(np.abs(body_llrs))),
+                phase_rms=rms_residual,
+                mean_abs_pilot=float(np.mean(np.abs(pilot_llrs))),
+                mean_abs_body_unc=float(np.mean(np.abs(uncomp))),
+                sign_flip=sign_changes,
             )
     else:
         body_llrs = np.zeros(0, dtype=np.float32)
@@ -1007,7 +999,3 @@ def dbpsk_decode_from_pilot(
     frame_bytes = np.packbits(bits).tobytes()
 
     return frame_bytes, soft, theta0, delta_theta, rms_residual
-
-
-
-

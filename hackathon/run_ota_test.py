@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """One-shot OTA call/respond test with timing."""
-import subprocess, time, sys, re, os
+import subprocess, time, sys, re
+from pathlib import Path
 
-WD = os.path.dirname(os.path.abspath(__file__))
+WD = Path(__file__).resolve().parent
 
 print("Starting respond...", flush=True)
 resp = subprocess.Popen(
-    [sys.executable, os.path.join(WD, 'demo.py'),
+    [sys.executable, str(WD / 'demo.py'),
      '--mode', 'respond', '--freq', '915',
      '--duration', '180', '--serial', '930c64dc279e7bc3',
      '--rx-lna', '20', '--rx-vga', '20', '--rx-amp', '--tx-vga', '3'],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=WD)
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=str(WD))
 time.sleep(6)
 
 print("Starting call...", flush=True)
 t0 = time.time()
 call = subprocess.Popen(
-    [sys.executable, os.path.join(WD, 'demo.py'),
+    [sys.executable, str(WD / 'demo.py'),
      '--mode', 'call', '--freq', '915',
      '--duration', '120', '--serial', '78d063dc2b6d2267',
      '--tx-vga', '3', '--rx-lna', '20', '--rx-vga', '20', '--rx-amp'],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=WD)
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=str(WD))
 
 try:
     call_out, _ = call.communicate(timeout=240)

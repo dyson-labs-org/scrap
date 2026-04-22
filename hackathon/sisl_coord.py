@@ -19,6 +19,13 @@ import select
 import socket
 import time
 
+_DIM = "\x1b[2m"
+_RESET = "\x1b[0m"
+
+
+def _sync_msg(msg: str) -> str:
+    return f"{_DIM}[sync] {msg}{_RESET}"
+
 
 class Coord:
     """Half-duplex coordination channel.  Single-threaded send/recv over TCP.
@@ -53,27 +60,36 @@ class Coord:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("coord: timed out waiting for peer")
-            ready, _, _ = select.select([self._conn], [], [], remaining)
-            if not ready:
+            if not self._fill_buf(timeout=remaining):
                 raise TimeoutError("coord: timed out waiting for peer")
-            chunk = self._conn.recv(4096)
-            if not chunk:
-                raise ConnectionError("coord: peer disconnected")
-            self._buf += chunk
         line, self._buf = self._buf.split(b"\n", 1)
         return json.loads(line)
 
-    def has_data(self) -> bool:
-        """Non-blocking check: is a message waiting? Does NOT consume it."""
-        if b"\n" in self._buf:
-            return True
-        ready, _, _ = select.select([self._conn], [], [], 0)
+    def _fill_buf(self, timeout: float) -> bool:
+        """Try to read bytes into internal buffer.
+
+        Returns True if bytes were read, False on timeout.
+        """
+        if timeout < 0:
+            timeout = 0.0
+        ready, _, _ = select.select([self._conn], [], [], timeout)
         if not ready:
             return False
-        chunk = self._conn.recv(4096, socket.MSG_PEEK)
+        chunk = self._conn.recv(4096)
         if not chunk:
             raise ConnectionError("coord: peer disconnected")
+        self._buf += chunk
         return True
+
+    def has_data(self) -> bool:
+        """Non-blocking check for pending coord bytes/message.
+
+        May read from the socket into the internal line buffer, but does not
+        consume a framed JSON line from the caller's perspective.
+        """
+        if b"\n" in self._buf:
+            return True
+        return self._fill_buf(timeout=0.0)
 
     def send_ready(self) -> None:
         self._send({"type": "ready"})
@@ -101,10 +117,10 @@ class Coord:
 def listen(port: int) -> Coord:
     """Bind, accept one connection, return Coord.  Blocks."""
     srv = socket.create_server(("0.0.0.0", port), reuse_port=True)
-    print(f"  coord: listening on tcp://0.0.0.0:{port}")
+    print(_sync_msg(f"listening on tcp://0.0.0.0:{port}"))
     conn, addr = srv.accept()
     srv.close()
-    print(f"  coord: accepted connection from {addr[0]}:{addr[1]}")
+    print(_sync_msg(f"peer connected from {addr[0]}:{addr[1]}"))
     return Coord(conn)
 
 
@@ -115,7 +131,7 @@ def connect(host: str, port: int, retry_s: float = 120.0) -> Coord:
     while True:
         try:
             conn = socket.create_connection((host, port), timeout=5)
-            print(f"  coord: connected to tcp://{host}:{port}")
+            print(_sync_msg(f"connected to tcp://{host}:{port}"))
             return Coord(conn)
         except OSError:
             attempt += 1
@@ -124,6 +140,6 @@ def connect(host: str, port: int, retry_s: float = 120.0) -> Coord:
                 raise TimeoutError(
                     f"coord: could not connect to {host}:{port} "
                     f"after {retry_s:.0f}s")
-            print(f"  coord: waiting for call side… attempt {attempt}",
+            print(_sync_msg(f"waiting for caller… attempt {attempt}"),
                   flush=True)
             time.sleep(min(2.0, remaining))

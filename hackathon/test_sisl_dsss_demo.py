@@ -9,6 +9,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
 import sisl_crypto as sc
 import sisl_rx
@@ -363,8 +364,43 @@ def test_llr_accumulator_fec_short_input_rejected():
     result = _build_fec_result(responder_static, magnitude=10.0)
     result["fec_llrs"] = result["fec_llrs"][: sc.HAIL_FEC_TOTAL_BITS // 2]
     acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
-    assert acc.try_add(result) is False
+    with pytest.raises(ValueError, match="fec_llrs length"):
+        acc.try_add(result)
     assert acc.n_copies == 0
+
+
+def test_llr_accumulator_fec_rejects_nonfinite_frequency():
+    responder_static = dd.demo_responder_key()
+    result = _build_fec_result(responder_static, magnitude=10.0)
+    result["freq_offset_hz"] = float("nan")
+    acc = sisl_rx.LlrAccumulator(n_bits=sc.HAIL_FEC_TOTAL_BITS)
+    with pytest.raises(ValueError, match="freq_offset_hz"):
+        acc.try_add(result)
+
+
+def test_try_fec_decrypt_ack_requires_full_caller_context():
+    with pytest.raises(ValueError, match="ACK decode requires"):
+        sisl_rx._try_fec_decrypt(
+            peak_values=[0j] * (sc.ACK_FEC_TOTAL_BITS + 8),
+            positions=[0],
+            top_k_soft=1,
+            freq_hz=0.0,
+            peak_mag=1.0,
+            median_mag=1.0,
+            rad_per_sample=0.0,
+            caller_static_priv=dd.demo_caller_key(),
+        )
+
+
+def test_acquire_and_track_rejects_invalid_frequency_offset():
+    with pytest.raises(ValueError, match="freq_offset_hz"):
+        sisl_rx._acquire_and_track(
+            samples=np.zeros(1024, dtype=np.complex64),
+            samps_per_chip=2,
+            samp_hz=2_000_000.0,
+            signal_threshold=4.0,
+            freq_offset_hz=float("nan"),
+        )
 
 
 # ── RLNC payload loopback tests ─────────────────────────────────────────────
@@ -460,5 +496,4 @@ class TestRLNCPayloadLoopback:
             recovered = session.recovered_payload()
             assert recovered is not None
             assert recovered == payload
-
 

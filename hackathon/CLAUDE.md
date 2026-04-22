@@ -52,13 +52,25 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
+**Canonical local regression command** (run from repo root):
 
 ```bash
-# Example:
-# npm install
-# npm test
+./verify-local
 ```
+
+This is the authoritative local regression test suite. It:
+- Enforces repo-root execution with path drift checks
+- Uses repo-relative paths for all test file references
+- Sets PYTHONPATH to repo root automatically
+- Runs subset of core tests appropriate for pre-commit validation
+
+**All Python scripts use repo-relative paths** via `Path(__file__).resolve().parent` or equivalent. They are safe to run from any working directory as they compute their own repo root.
+
+**Key modules tested:**
+- `test_ota_test_import.py` - Ensures ota_test.py doesn't execute subprocesses on import
+- `test_sisl_coord.py` - Socket coordination tests
+- `test_sisl_framer.py` - Selected critical telemetry and phase compensation tests
+- `test_sisl_dsss_demo.py` - LLR accumulator constructor validation
 
 ## Architecture Overview
 

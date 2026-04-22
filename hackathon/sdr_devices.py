@@ -74,6 +74,57 @@ def get_device_ppm(serial: str) -> float:
     return 0.0
 
 
+def format_power_dbm(dbm: float, *, freq_mhz: float | None = None,
+                     approximate: bool = False) -> str:
+    """Format a power estimate using friendly SI units and dBm.
+
+    Examples:
+      "~2 uW (-27 dBm) at 915 MHz"
+      "6.31 mW (+8 dBm)"
+    """
+    mw = 10.0 ** (float(dbm) / 10.0)
+    w = mw / 1_000.0
+    if w >= 1.0:
+        value, unit = w, "W"
+    elif w >= 1e-3:
+        value, unit = w * 1e3, "mW"
+    elif w >= 1e-6:
+        value, unit = w * 1e6, "uW"
+    else:
+        value, unit = w * 1e9, "nW"
+
+    if value >= 100:
+        value_str = f"{value:.0f}"
+    elif value >= 10:
+        value_str = f"{value:.1f}".rstrip("0").rstrip(".")
+    else:
+        value_str = f"{value:.2f}".rstrip("0").rstrip(".")
+
+    if abs(dbm - round(dbm)) < 1e-9:
+        dbm_str = f"{dbm:+.0f}"
+    else:
+        dbm_str = f"{dbm:+.1f}"
+
+    out = f"{'~' if approximate else ''}{value_str} {unit} ({dbm_str} dBm)"
+    if freq_mhz is not None:
+        if abs(freq_mhz - round(freq_mhz)) < 1e-9:
+            freq_str = f"{freq_mhz:.0f}"
+        else:
+            freq_str = f"{freq_mhz:.1f}"
+        out += f" at {freq_str} MHz"
+    return out
+
+
+def estimate_tx_power_str(vga_db: int | float, amp_on: bool,
+                          freq_mhz: float = 915.0) -> str:
+    """Estimate HackRF TX output power from gain settings.
+
+    This provides a demo-friendly string that hides VGA/AMP jargon.
+    """
+    dbm = -30.0 + float(vga_db) + (14.0 if amp_on else 0.0)
+    return format_power_dbm(dbm, freq_mhz=freq_mhz, approximate=True)
+
+
 DEVICES: dict[str, DeviceInfo] = {
     "hackrf": DeviceInfo(
         name="HackRF One",
@@ -158,5 +209,3 @@ def format_device_open_error(soapy_module, info: DeviceInfo,
         lines.append("After installing, verify with:  SoapySDRUtil --find")
 
     return "\n".join(lines)
-
-
