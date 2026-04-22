@@ -958,6 +958,7 @@ def live_rx_decode(
     device=None,
     initial_vga_db: float | None = None,
     disable_auto_ppm: bool = False,
+    stop_event: threading.Event | None = None,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -1194,6 +1195,8 @@ def live_rx_decode(
 
     try:
         while time.time() - t_start < duration_s:
+            if stop_event is not None and stop_event.is_set():
+                break
             try:
                 result = result_queue.get(timeout=2.0)
             except _queue.Empty:
@@ -1867,10 +1870,25 @@ def main() -> int:
     
                 # B+C: pre-seeded VGA (no AGC warmup), static PPM (no wander).
                 # Shared device handle — no reopen between ACK TX and RLNC RX.
-                _n_coded = K + max(120, K * 8)
-                _n_fec = sc.payload_fec_total_bits(n_sym_bytes)
-                _sym_dur = (_n_fec * sf.CHIPS_PER_SYMBOL) / chip_rate_hz
-                _rlnc_rx_timeout = max(120.0, (2 + _n_coded) * _sym_dur * 1.5)
+                # With coord: RX until either we decode the payload OR the
+                # call signals it finished TX (whichever comes first).
+                # Without coord: use a computed timeout.
+                _rlnc_stop = None
+                if coord:
+                    _rlnc_stop = threading.Event()
+                    def _bg_wait_payload_tx_done():
+                        coord.wait_for_switch()
+                        print("  coord: caller finished payload TX", flush=True)
+                        _rlnc_stop.set()
+                    threading.Thread(target=_bg_wait_payload_tx_done,
+                                     daemon=True, name="coord-rlnc-stop").start()
+                    _rlnc_rx_timeout = 600.0  # fallback; stop_event is primary
+                else:
+                    _n_coded = K + max(120, K * 8)
+                    _n_fec = sc.payload_fec_total_bits(n_sym_bytes)
+                    _sym_dur = (_n_fec * sf.CHIPS_PER_SYMBOL) / chip_rate_hz
+                    _rlnc_rx_timeout = max(120.0, (2 + _n_coded) * _sym_dur * 1.5)
+
                 rlnc_stats = live_rx_decode(
                     duration_s=_rlnc_rx_timeout,
                     block_seconds=3.0,
@@ -1886,6 +1904,7 @@ def main() -> int:
                     initial_vga_db=_converged_vga,
                     disable_auto_ppm=True,
                     device=sdr.device,
+                    stop_event=_rlnc_stop,
                 )
     
                 recovered = rx_session.recovered_payload()
@@ -1910,10 +1929,12 @@ def main() -> int:
                 ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
 
                 if coord:
-                    print("  coord: payload decoded — telling caller to stop TX", flush=True)
+                    # Background thread already received call's "TX done" switch.
+                    # Tell call we decoded, wait for call to confirm it's in RX.
+                    print("  coord: payload decoded — notifying caller", flush=True)
                     coord.send_switch()
                     coord.wait_for_switch()
-                    print("  coord: caller stopped — starting payload ACK TX", flush=True)
+                    print("  coord: caller ready for payload ACK", flush=True)
 
                 import time as _time
                 _ack_deadline = _time.monotonic() + 120.0
@@ -2173,6 +2194,8 @@ def main() -> int:
             )
             print(f" done ({n_sent} symbols)")
             if coord:
+                print("  coord: payload TX done — notifying respond", flush=True)
+                coord.send_switch()  # tell respond: TX done (triggers stop_event)
                 print("  coord: waiting for respond to decode payload...", flush=True)
                 try:
                     coord.wait_for_switch()
@@ -2180,19 +2203,29 @@ def main() -> int:
                     print(f"  coord: respond side failed ({e})", flush=True)
                     return 1
                 print("  coord: respond decoded — switching to RX for payload ACK", flush=True)
-                coord.send_switch()
+                coord.send_switch()  # confirm: go ahead with payload ACK TX
 
             comb_id = n_sent
 
             # ── Phase 4: RX payload ACK ───────────────────────────────────
-            # Reuse Phase 2's converged center frequency (includes AUTO-PPM
-            # retune) so the payload ACK signal lands near 0 Hz offset.
+            # With coord: respond sends "switch" after payload ACK TX done.
+            # Use stop_event so we RX until respond finishes TX'ing.
             _phase4_center_hz = ack_stats.get(
                 "final_center_hz", call_sdr.center_hz)
+            _ack_stop = None
+            if coord:
+                _ack_stop = threading.Event()
+                def _bg_wait_ack_done():
+                    coord.wait_for_switch()
+                    print("  coord: respond finished payload ACK TX", flush=True)
+                    _ack_stop.set()
+                threading.Thread(target=_bg_wait_ack_done,
+                                 daemon=True, name="coord-ack-stop").start()
+
             print(f"  TX complete ({comb_id} symbols total). "
                   f"Listening for payload ACK...")
             rlnc_ack_stats = live_rx_decode(
-                duration_s=max(60.0, args.duration),
+                duration_s=600.0 if coord else max(60.0, args.duration),
                 block_seconds=3.0,
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
@@ -2204,14 +2237,13 @@ def main() -> int:
                 samps_per_chip=active_samps_per_chip,
                 exit_on_decrypt=True,
                 decode_fn=_payload_ack_fn,
+                stop_event=_ack_stop,
             )
         # call_sdr.__exit__ closes device here
 
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
             if coord:
-                print("  coord: waiting for respond to finish payload ACK...", flush=True)
-                coord.wait_for_switch()
                 print("  coord: session complete", flush=True)
         else:
             print(f"  timeout — payload ACK not received "
