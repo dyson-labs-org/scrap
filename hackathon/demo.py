@@ -1990,6 +1990,7 @@ def main() -> int:
                     acq_sentinel = None
                     complete = False
                     n_decoded = 0
+                    base = {}
                     for res in sym_results:
                         if "payload_frame_bytes" not in res:
                             acq_sentinel = res  # acquisition failure diagnostic
