@@ -2033,7 +2033,6 @@ def main() -> int:
             samp_hz=chip_rate_hz * 2,
         )
 
-        COORD_HAIL_PASS_S = 2.0  # short passes so coord check is responsive
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
         print(f"  phase 2:       RX listening for ACK")
@@ -2043,28 +2042,32 @@ def main() -> int:
             # ── Phase 1: TX hail ──────────────────────────────────────────
             phase1_start_time = time.time()
             if coord:
-                _pass_repeats = max(1, int(
-                    COORD_HAIL_PASS_S * chip_rate_hz / len(hail_chips)))
-                hail_pass = 0
+                # Continuous hail TX via streaming — no dead gaps between
+                # frames.  The generator yields hail samples and checks
+                # coord.has_data() between frames (~2s each).
+                def _hail_generator():
+                    n = 0
+                    while True:
+                        n += 1
+                        yield hail_samples
+                        if coord.has_data():
+                            return
+
                 print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                      f"(coord: ~{COORD_HAIL_PASS_S:.0f}s/pass, "
-                      f"loop until respond decoded)...", flush=True)
-                while True:
-                    hail_pass += 1
-                    soapy_tx_burst(
-                        hail_samples, call_sdr.center_hz,
-                        samp_hz=SAMP_RATE_HZ,
-                        tx_vga_db=args.tx_vga,
-                        tx_amp_on=args.tx_amp,
-                        repeats=_pass_repeats,
-                        device=call_sdr.device,
-                    )
-                    if coord.wait_for_switch(timeout=0.1):
-                        print(f"  phase 1: respond decoded hail after "
-                              f"{hail_pass} passes — switching to RX",
-                              flush=True)
-                        coord.send_switch()
-                        break
+                      f"(coord: continuous stream, checking between frames)...",
+                      flush=True)
+                n_hail = soapy_tx_streaming(
+                    _hail_generator(),
+                    call_sdr.center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    device=call_sdr.device,
+                )
+                coord.wait_for_switch()  # consume respond's "hail decoded"
+                print(f"  phase 1: respond decoded hail after "
+                      f"{n_hail} frames — switching to RX", flush=True)
+                coord.send_switch()  # confirm: TX stopped
             else:
                 _pass_repeats = max(1, int(
                     INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
