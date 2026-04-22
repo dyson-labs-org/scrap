@@ -460,12 +460,12 @@ def _acquire_and_track(
         return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
 
     periodic_ratio = float(np.median(test_peaks)) / peak_mag if peak_mag > 0 else 0.0
-    # Lowered from 0.3 to 0.15: WiFi/BLE bursts at 2.4 GHz create
-    # non-periodic MF spikes that suppress the periodic ratio even
-    # when the DSSS signal is present underneath. The FEC + Poly1305
-    # tag is the real integrity gate — this check just saves wasted
-    # compute on pure-noise blocks.
-    if periodic_ratio < 0.15:
+    # The post-MF frequency search already validated the signal using
+    # a median-noise denominator (not spike-dominated peak_mag).
+    # If _mf_score >= 3.0, the signal is real — skip the legacy
+    # periodic_ratio gate which uses peak_mag and fails when WiFi/BT
+    # spikes inflate the denominator.
+    if _mf_score < 3.0 and periodic_ratio < 0.15:
         return {
             "status": "no_signal",
             "peak_mag": peak_mag,
