@@ -1227,6 +1227,7 @@ def live_rx_decode(
                     stats["_decoded_hail"] = (result.get("decoded_hail")
                                               or result.get("decoded_ack"))
                     stats["_decode_peak_mag"] = result.get("peak_mag")
+                    stats["_decode_freq_offset_hz"] = result.get("freq_offset_hz", 0.0)
                 if exit_on_decrypt:
                     decode_stop.set()
                     break
@@ -1834,10 +1835,15 @@ def main() -> int:
                       f"static PPM (no auto-retune)")
 
                 received_count = 0
-                # Pre-seed the RLNC RX with the hail-phase frequency offset
-                # so the decoder doesn't waste blocks re-estimating via FFT.
-                _hail_freq_offset = (hail_stats.get("final_center_hz", sdr.center_hz)
-                                     - sdr.center_hz)
+                # Pre-seed the RLNC RX with the hail decode's frequency offset.
+                # Use the actual Δf from the block that decoded the hail, not
+                # the AGC/PPM state (which may not have converged if the hail
+                # decoded in the first few blocks).
+                _hail_freq_offset = hail_stats.get("_decode_freq_offset_hz", 0.0)
+                if abs(_hail_freq_offset) < 1.0:
+                    # Fallback: try the AGC/PPM converged center
+                    _hail_freq_offset = (hail_stats.get("final_center_hz", sdr.center_hz)
+                                         - sdr.center_hz)
                 if abs(_hail_freq_offset) > 1.0:
                     print(f"  pre-seeded freq offset: {_hail_freq_offset:+.0f} Hz")
 
