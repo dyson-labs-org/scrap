@@ -590,15 +590,19 @@ def decode_with_freq_tracking(
 
     bits = np.empty(n_bits, dtype=np.uint8)
     bits[0] = 0                          # caller tries both polarities
-    # Pre-compute the drift rotator so we can cancel it before each
-    # differential dot product
+    # Pre-compute the drift rotator (constant — same drift each symbol).
+    # drift_rotator = exp(-j * drift_per_symbol)
     drift_rotator = complex(np.cos(drift_per_symbol),
                              -np.sin(drift_per_symbol))
-    for k in range(1, n_bits):
-        # Remove the expected per-symbol drift before comparing
-        c_prev_rotated = peak_values[k - 1] * np.conj(drift_rotator)
-        dot = (peak_values[k] * np.conj(c_prev_rotated)).real
-        bits[k] = bits[k - 1] if dot >= 0 else (1 - bits[k - 1])
+    # Vectorized differential DBPSK decode (T1).
+    # c_prev_rotated[k] = peaks[k-1] * conj(drift_rotator)
+    # dot[k] = Re(peaks[k] * conj(c_prev_rotated[k]))
+    #         = Re(peaks[k] * conj(peaks[k-1]) * drift_rotator)
+    # bit flips when dot < 0; accumulate flips via XOR.
+    peaks = np.asarray(peak_values, dtype=np.complex128)
+    dots = (peaks[1:] * np.conj(peaks[:-1]) * drift_rotator).real
+    flips = (dots < 0).astype(np.uint8)
+    bits[1:] = np.bitwise_xor.accumulate(flips)
 
     return {
         "bytes": bits_to_bytes(bits),
