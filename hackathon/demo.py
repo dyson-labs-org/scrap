@@ -420,12 +420,17 @@ def soapy_tx_burst(
     repeats: int = 1,
     device_str: str = "driver=hackrf",
     device=None,
-) -> None:
+    stop_event=None,
+) -> bool:
     """Transmit a finite sample buffer via SoapySDR (no GnuRadio).
 
     If `device` is provided (a pre-opened SoapySDR.Device), it is used
     directly and NOT closed on return — the caller owns its lifetime.
     Otherwise a device is opened via `device_str`, used, and closed.
+
+    If `stop_event` (a threading.Event) is provided, the write loop checks
+    it every chunk (~8ms) and aborts early if set.  Returns True if aborted
+    early, False if the full buffer was transmitted.
     """
     import SoapySDR
     from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
@@ -456,7 +461,11 @@ def soapy_tx_burst(
     last_end = len(full)
     t_write = _time_tx2.time()
     _chk = last_end // 6
+    aborted = False
     while offset < last_end:
+        if stop_event is not None and stop_event.is_set():
+            aborted = True
+            break
         end = min(offset + chunk, last_end)
         is_last = (end == last_end)
         flags = SoapySDR.SOAPY_SDR_END_BURST if is_last else 0
@@ -473,7 +482,7 @@ def soapy_tx_burst(
             print(f'  [TX ERROR] writeStream ret={sr.ret}', file=sys.stderr)
             break
     if _sisl_dbg:
-        print(f"  [DBG tx] loop done {_time_tx2.time()-t_write:.2f}s", file=_sys_tx.stderr, flush=True)
+        print(f"  [DBG tx] loop done {_time_tx2.time()-t_write:.2f}s aborted={aborted}", file=_sys_tx.stderr, flush=True)
 
     # Drain USB TX FIFO before deactivating.
     # hackrf#1570: deactivateStream → hackrf_stop_tx → pthread_join hangs on
@@ -499,6 +508,7 @@ def soapy_tx_burst(
         print(f"  [DBG tx] closeStream {_time_tx2.time()-t_cs:.3f}s", file=_sys_tx.stderr, flush=True)
     if _owns_device:
         device.close()
+    return aborted
 
 
 # ── GR top-block ────────────────────────────────────────────────────────────
@@ -1687,6 +1697,12 @@ def main() -> int:
                     _converged_vga = max(0.0, _converged_vga + _adj_db)
     
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
+                if coord:
+                    print(f"  coord: hail decoded — notifying caller (seq=0)", flush=True)
+                    coord.send_received(0)
+                    print(f"  coord: waiting for caller to switch to RX...", flush=True)
+                    coord.wait_for_switch()
+                    print(f"  coord: caller switched to RX — starting ACK TX", flush=True)
                 responder_eph = sc.Ephemeral()
                 resp_eph_priv_peek = responder_eph.peek()
                 dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
@@ -1834,10 +1850,21 @@ def main() -> int:
                     # use session.build_ack() — handles key direction and seq nonce.
                     ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
     
-                    # Retransmit payload ACK for 120s so caller catches it after
-                    # finishing its RLNC TX window (up to 90s after decode).
-                    # Re-encode each burst with an incrementing seq so every
-                    # retransmission uses a unique (key, nonce) — fixes nonce reuse.
+                    # With coord: notify caller immediately so it stops TX'ing
+                    # payload and switches to RX; then TX payload ACK once the
+                    # caller confirms it has switched.
+                    # Without coord: TX for 120s so caller catches it after its
+                    # RLNC TX window expires.
+                    if coord:
+                        print(f"  coord: payload decoded — notifying caller (seq=1)",
+                              flush=True)
+                        coord.send_received(1)
+                        print(f"  coord: waiting for caller to switch to RX...",
+                              flush=True)
+                        coord.wait_for_switch()
+                        print(f"  coord: caller switched to RX — starting payload ACK TX",
+                              flush=True)
+
                     import time as _time
                     _ack_deadline = _time.monotonic() + 120.0
                     _ack_n = 0
@@ -1861,9 +1888,6 @@ def main() -> int:
                               f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
                               flush=True)
                     print("  payload ACK TX complete")
-                    if coord:
-                        coord.send_received(_coord_seq)
-                        coord.wait_for_switch()
                     break  # exit while True: — session complete
                 else:
                     print(f"  payload decode incomplete "
@@ -1925,37 +1949,71 @@ def main() -> int:
 
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
-        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
+        if coord:
+            print(f"  phase 1:       TX hail (coord-driven, loops until respond signals received)")
+        else:
+            print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
         print(f"  phase 2:       RX listening for ACK")
         print(f"  max rounds:    {int(args.duration / (5+12))}")
 
         with SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz) as call_sdr:
             print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
             # ── Phase 1: TX hail ──────────────────────────────────────────
+            import threading as _threading
             phase1_start_time = time.time()
-            initial_repeats = max(1, int(
-                INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
-            print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                  f"({initial_repeats} repeats, "
-                  f"{INITIAL_TX_DURATION:.0f}s continuous)...",
-                  end="", flush=True)
-            print(f"  [DBG phase1] call_sdr.device={call_sdr.device!r}", flush=True)
-            soapy_tx_burst(
-                hail_samples, call_sdr.center_hz,
-                samp_hz=SAMP_RATE_HZ,
-                tx_vga_db=args.tx_vga,
-                tx_amp_on=args.tx_amp,
-                repeats=initial_repeats,
-                device=call_sdr.device,
-            )
-            print(" done", flush=True)
-            # ── Phase 2: RX listen for ACK ────────────────────────────────
-            # Reuse call_sdr.device for RX — avoids the close/reopen USB
-            # cycle that destabilises HackRF after a long TX.  live_rx_decode
-            # with _owns_device=False cleans up via deactivateStream +
-            # closeStream (fast for RX since HackRF streams continuously).
-            _phase2_center_hz = call_sdr.center_hz
+            hail_switch_time = None
 
+            if coord:
+                _hail_received_event = _threading.Event()
+                def _bg_wait_hail_received():
+                    coord.wait_for_received()
+                    _hail_received_event.set()
+                _threading.Thread(target=_bg_wait_hail_received, daemon=True,
+                                  name="coord-wait-hail").start()
+                _hail_pass_repeats = max(1, int(5.0 * chip_rate_hz / len(hail_chips)))
+                hail_pass = 0
+                print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                      f"(coord-driven, {_hail_pass_repeats} repeats/pass)...", flush=True)
+                while True:
+                    hail_pass += 1
+                    print(f"  hail pass {hail_pass}...", end="", flush=True)
+                    aborted = soapy_tx_burst(
+                        hail_samples, call_sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        repeats=_hail_pass_repeats,
+                        device=call_sdr.device,
+                        stop_event=_hail_received_event,
+                    )
+                    if _hail_received_event.is_set():
+                        print(f" aborted — coord: respond received hail"
+                              f" after {hail_pass} pass(es)", flush=True)
+                        hail_switch_time = time.time()
+                        print(f"  coord: switching to RX for ACK — sending switch to respond",
+                              flush=True)
+                        coord.send_switch(0)
+                        break
+                    print(" done", flush=True)
+            else:
+                initial_repeats = max(1, int(
+                    INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
+                print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                      f"({initial_repeats} repeats, "
+                      f"{INITIAL_TX_DURATION:.0f}s continuous)...",
+                      end="", flush=True)
+                soapy_tx_burst(
+                    hail_samples, call_sdr.center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=initial_repeats,
+                    device=call_sdr.device,
+                )
+                print(" done", flush=True)
+
+            # ── Phase 2: RX listen for ACK ────────────────────────────────
+            _phase2_center_hz = call_sdr.center_hz
             print(f"\n  phase 2: \033[36mRX listening for ACK "
                   f"(up to {args.duration:.0f}s)\033[0m", flush=True)
             ack_stats = live_rx_decode(
@@ -1981,7 +2039,7 @@ def main() -> int:
 
             print()
             print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
-            print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED ║\033[0m")
+            print(f"\033[1;32m  ║  SESSION ESTABLISHED — ACK RECEIVED  ║\033[0m")
             print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m",
                   flush=True)
 
@@ -2001,8 +2059,14 @@ def main() -> int:
             #   phase1_start_time + INITIAL_TX_DURATION + ACK_TX_WINDOW
             # Use this as the anchor; fall back to ack_recv_time + ACK_TX_WINDOW
             # if that has already passed (clock drift / long hail decode).
-            _resp_window_end = (phase1_start_time
-                                + INITIAL_TX_DURATION + ACK_TX_WINDOW)
+            if hail_switch_time is not None:
+                # Coord: we know exactly when respond started TX'ing ACK
+                # (immediately after we sent switch). Its window ends at:
+                _resp_window_end = hail_switch_time + ACK_TX_WINDOW
+            else:
+                # No coord: conservatively estimate from phase1 start
+                _resp_window_end = (phase1_start_time
+                                    + INITIAL_TX_DURATION + ACK_TX_WINDOW)
             _phase3_ready_at = max(_resp_window_end, ack_recv_time + 2.0)
             _phase3_delay = _phase3_ready_at - time.time()
             print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
@@ -2118,24 +2182,26 @@ def main() -> int:
                 tx_pass += 1
                 print(f"  TX pass {tx_pass}: {total_sym} symbols "
                       f"({total_dur_s:.0f}s)...", end="", flush=True)
-                soapy_tx_burst(
+                aborted = soapy_tx_burst(
                     all_samples, call_sdr.center_hz,
                     samp_hz=SAMP_RATE_HZ,
                     tx_vga_db=rlnc_tx_vga,
                     tx_amp_on=args.tx_amp,
                     repeats=1,
                     device=call_sdr.device,
+                    stop_event=_received_event if coord else None,
                 )
+                if coord and _received_event.is_set():
+                    print(f" aborted — coord: respond received payload"
+                          f" after {tx_pass} pass(es)", flush=True)
+                    print(f"  coord: switching to RX for payload ACK"
+                          f" — sending switch to respond", flush=True)
+                    coord.send_switch(1)
+                    break
                 print(" done")
-                if coord:
-                    if _received_event.is_set():
-                        print(f"  coord: respond confirmed received "
-                              f"after {tx_pass} TX pass(es) — switching to RX")
-                        coord.send_switch(_coord_seq)
-                        break
-                    print(f"  coord: no received signal yet, re-TX'ing...")
-                else:
+                if not coord:
                     break  # no coord: single pass
+                print(f"  coord: no received signal yet, re-TX'ing...")
 
             comb_id = N_CODED * tx_pass
 
