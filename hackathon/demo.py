@@ -2108,7 +2108,7 @@ def main() -> int:
                 import threading as _threading
                 _received_event = _threading.Event()
                 def _bg_wait_received():
-                    coord.wait_for_received(_coord_seq)
+                    coord.wait_for_received()
                     _received_event.set()
                 _threading.Thread(target=_bg_wait_received, daemon=True,
                                   name="coord-wait-received").start()
