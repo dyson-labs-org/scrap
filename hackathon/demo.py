@@ -1880,55 +1880,56 @@ def main() -> int:
                 )
     
                 recovered = rx_session.recovered_payload()
-                if recovered is None and rlnc_stats.get("hails_decrypted", 0) == 0:
-                    print(f"  RLNC RX timeout — no symbols decoded; looping back to hail listen",
+                if recovered is None:
+                    if coord:
+                        # With coord: can't retry without desyncing the protocol
+                        n_sym = rlnc_stats.get("hails_decrypted", 0)
+                        print(f"  RLNC RX failed ({received_count} symbols,"
+                              f" {n_sym} decrypted) — aborting (coord active)")
+                        return 1
+                    print(f"  RLNC RX timeout — looping back to hail listen",
                           flush=True)
                     continue  # restart while True: → Phase 1 hail listen
-                if recovered is not None:
-                    payload_out = recovered
-                    out_path = args.payload_out
-                    with open(out_path, "wb") as _f:
-                        _f.write(payload_out)
-                    print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
-                    print(f"  content: {payload_out[:80]}")
-    
-                    # Build an RLNCSession with the recovered payload so we can
-                    # use session.build_ack() — handles key direction and seq nonce.
-                    ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
-    
-                    if coord:
-                        coord.send_switch()  # tell call: payload decoded
-                        coord.wait_for_switch()  # wait for call to finish payload TX
 
-                    import time as _time
-                    _ack_deadline = _time.monotonic() + 120.0
-                    _ack_n = 0
-                    print(f"  TX payload ACK (52B, repeating 120s)...", flush=True)
-                    while _time.monotonic() < _ack_deadline:
-                        ack_frame = ack_session.build_ack(seq=_ack_n)
-                        ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
-                        ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
-                        ack_sym_samples = upsample_chips_to_samples(
-                            ack_sym_chips, SAMPS_PER_CHIP)
-                        soapy_tx_burst(
-                            ack_sym_samples, sdr.center_hz,
-                            samp_hz=SAMP_RATE_HZ,
-                            tx_vga_db=args.tx_vga,
-                            tx_amp_on=args.tx_amp,
-                            repeats=5,
-                            device=sdr.device,
-                        )
-                        _ack_n += 1
-                        print(f"  payload ACK burst {_ack_n} done, "
-                              f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
-                              flush=True)
-                    print("  payload ACK TX complete")
-                    if coord:
-                        coord.send_switch()  # tell call: payload ACK done
-                    break  # exit while True: — session complete
-                else:
-                    print(f"  payload decode incomplete "
-                          f"({received_count} symbols received)")
+                payload_out = recovered
+                out_path = args.payload_out
+                with open(out_path, "wb") as _f:
+                    _f.write(payload_out)
+                print(f"\033[1;32m  PAYLOAD RECEIVED ({len(payload_out)}B) → {out_path}\033[0m")
+                print(f"  content: {payload_out[:80]}")
+
+                ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
+
+                if coord:
+                    coord.send_switch()  # tell call: payload decoded
+                    coord.wait_for_switch()  # wait for call to finish payload TX
+
+                import time as _time
+                _ack_deadline = _time.monotonic() + 120.0
+                _ack_n = 0
+                print(f"  TX payload ACK (52B, repeating 120s)...", flush=True)
+                while _time.monotonic() < _ack_deadline:
+                    ack_frame = ack_session.build_ack(seq=_ack_n)
+                    ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
+                    ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
+                    ack_sym_samples = upsample_chips_to_samples(
+                        ack_sym_chips, SAMPS_PER_CHIP)
+                    soapy_tx_burst(
+                        ack_sym_samples, sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        repeats=5,
+                        device=sdr.device,
+                    )
+                    _ack_n += 1
+                    print(f"  payload ACK burst {_ack_n} done, "
+                          f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
+                          flush=True)
+                print("  payload ACK TX complete")
+                if coord:
+                    coord.send_switch()  # tell call: payload ACK done
+                break  # exit while True: — session complete
         # sdr.__exit__ closes device here
         return 0
 
@@ -2013,6 +2014,7 @@ def main() -> int:
                     )
                     if coord.wait_for_switch(timeout=0.1):
                         print(f" done — respond decoded hail", flush=True)
+                        coord.send_switch()  # confirm: hail TX stopped
                         break
                     print(" done", flush=True)
             else:
