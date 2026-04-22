@@ -43,16 +43,23 @@ def _gf_inv(a: int) -> int:
     return _GF256_EXP[255 - _GF256_LOG[a]]
 
 
-# 256×256 multiply table for vectorized byte-array operations.
-_MUL_TABLE = np.zeros((256, 256), dtype=np.uint8)
-for _a in range(256):
-    for _b in range(256):
-        _MUL_TABLE[_a, _b] = _gf_mul(_a, _b)
+# 256×256 multiply table — built via log/antilog outer product (vectorized).
+_GF256_EXP_NP = np.array(_GF256_EXP, dtype=np.uint16)
+_GF256_LOG_NP = np.array(_GF256_LOG, dtype=np.uint16)
+
+_a_idx = np.arange(256, dtype=np.uint16)[:, None]
+_b_idx = np.arange(256, dtype=np.uint16)[None, :]
+_log_sum = (_GF256_LOG_NP[_a_idx] + _GF256_LOG_NP[_b_idx]) % 255
+_MUL_TABLE = _GF256_EXP_NP[_log_sum].astype(np.uint8)
+_MUL_TABLE[0, :] = 0
+_MUL_TABLE[:, 0] = 0
+del _a_idx, _b_idx, _log_sum
 
 # Inverse table (element 0 is undefined; map 0 → 0 as sentinel).
 _INV_TABLE = np.zeros(256, dtype=np.uint8)
-for _a in range(1, 256):
-    _INV_TABLE[_a] = _gf_inv(_a)
+_nz = np.arange(1, 256, dtype=np.uint16)
+_INV_TABLE[1:] = _GF256_EXP_NP[(255 - _GF256_LOG_NP[_nz]) % 255]
+del _nz
 
 
 def _gf_mul_vec(scalar: int, vec: np.ndarray) -> np.ndarray:
@@ -181,132 +188,104 @@ class RLNCDecoder:
     def __init__(self, K: int, session_prk: bytes):
         self._K = K
         self._prk = session_prk
-        # Each entry: (coeff_vec: np.ndarray[K, uint8], data: np.ndarray[frag_size, uint8])
-        self._symbols: list[tuple[np.ndarray, np.ndarray]] = []
-        self._recovered: dict[int, np.ndarray] = {}
         self._seen_ids: set[int] = set()
+        # Incremental RREF state — allocated lazily on first symbol.
+        self._frag_size: int = 0
+        # pivot_coeff[i]: K-wide coefficient row for pivot i (normalized: leading entry = 1)
+        self._pivot_coeff: np.ndarray | None = None   # shape (K, K)
+        # pivot_data[i]: frag_size-wide data row for pivot i
+        self._pivot_data: np.ndarray | None = None    # shape (K, frag_size)
+        self._pivot_cols: list[int] = []              # column index each pivot row reduced on
+        self._n_pivots: int = 0
 
     _MAX_SEEN_IDS = 4096
 
-    def _subtract_recovered(self, coeff_vec: np.ndarray, data: np.ndarray) -> None:
-        """XOR out all already-recovered fragments from a symbol's data."""
-        for i, frag in self._recovered.items():
-            c = int(coeff_vec[i])
-            if c != 0:
-                data ^= _gf_mul_vec(c, frag)
-                coeff_vec[i] = 0
+    def _init_arrays(self, frag_size: int) -> None:
+        self._frag_size = frag_size
+        self._pivot_coeff = np.zeros((self._K, self._K), dtype=np.uint8)
+        self._pivot_data = np.zeros((self._K, frag_size), dtype=np.uint8)
+        self._pivot_cols = [0] * self._K
 
-    def _peel(self) -> None:
-        changed = True
-        while changed and len(self._recovered) < self._K:
-            changed = False
-            for coeff_vec, data in self._symbols:
-                self._subtract_recovered(coeff_vec, data)
-                nonzero = np.flatnonzero(coeff_vec)
-                if len(nonzero) == 1:
-                    idx = int(nonzero[0])
-                    if idx not in self._recovered:
-                        c = int(coeff_vec[idx])
-                        frag = data.copy()
-                        if c != 1:
-                            frag = _gf_mul_vec(int(_INV_TABLE[c]), frag)
-                        self._recovered[idx] = frag
-                        coeff_vec[idx] = 0
-                        changed = True
+    def _add_to_rref(self, coeff_vec: np.ndarray, data: np.ndarray) -> bool:
+        """Add one symbol to the running RREF. Returns True if rank increases."""
+        n = self._n_pivots
+        row_c = coeff_vec.astype(np.uint16)
+        row_d = data.copy()
+
+        if n > 0:
+            pc = self._pivot_cols[:n]                        # (n,) column indices
+            pm_c = self._pivot_coeff[:n]                     # (n, K)
+            pm_d = self._pivot_data[:n]                      # (n, frag_size)
+            # Coefficient of our row at each pivot column.
+            leading = row_c[pc].astype(np.uint8)             # (n,)
+            nz = np.flatnonzero(leading)
+            if len(nz):
+                coeffs = leading[nz]                         # (len(nz),)
+                # XOR scaled pivot coeff rows into row_c
+                # _MUL_TABLE[coeffs[j], pm_c[nz[j], :]] for each j
+                scaled_c = _MUL_TABLE[coeffs[:, None], pm_c[nz]]  # (len(nz), K)
+                row_c ^= np.bitwise_xor.reduce(scaled_c.astype(np.uint16), axis=0)
+                # XOR scaled pivot data rows into row_d
+                scaled_d = _MUL_TABLE[coeffs[:, None], pm_d[nz]]  # (len(nz), frag_size)
+                row_d ^= np.bitwise_xor.reduce(scaled_d, axis=0)
+
+        # Find leftmost nonzero in coeff part after elimination.
+        nz_cols = np.flatnonzero(row_c.astype(np.uint8))
+        if len(nz_cols) == 0:
+            return False   # linearly dependent
+
+        pivot_col = int(nz_cols[0])
+        inv_lead = int(_INV_TABLE[int(row_c[pivot_col])])
+
+        # Normalize: multiply row by inverse of leading coefficient.
+        row_c_u8 = _MUL_TABLE[inv_lead, row_c.astype(np.uint8)]   # (K,)
+        row_d = _MUL_TABLE[inv_lead, row_d]                        # (frag_size,)
+
+        # Back-substitute: eliminate pivot_col from all existing pivot rows.
+        if n > 0:
+            existing = self._pivot_coeff[:n, pivot_col]            # (n,)
+            nz = np.flatnonzero(existing)
+            if len(nz):
+                coeffs = existing[nz]                              # (len(nz),)
+                self._pivot_coeff[nz] ^= _MUL_TABLE[coeffs[:, None], row_c_u8[None, :]]
+                self._pivot_data[nz] ^= _MUL_TABLE[coeffs[:, None], row_d[None, :]]
+
+        self._pivot_coeff[n] = row_c_u8
+        self._pivot_data[n] = row_d
+        self._pivot_cols[n] = pivot_col
+        self._n_pivots += 1
+        return True
 
     def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
         if comb_id in self._seen_ids:
             return self.is_complete
         if len(self._seen_ids) < self._MAX_SEEN_IDS:
             self._seen_ids.add(comb_id)
+
         indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
         coeff_vec = np.zeros(self._K, dtype=np.uint8)
         for idx, c in zip(indices, coeffs):
             coeff_vec[idx] = c
         data = np.frombuffer(encoded_bytes, dtype=np.uint8).copy()
-        self._symbols.append((coeff_vec, data))
-        self._peel()
-        if not self.is_complete:
-            self._gaussian_eliminate()
-            self._peel()
+
+        if self._pivot_coeff is None:
+            self._init_arrays(len(data))
+
+        self._add_to_rref(coeff_vec, data)
         return self.is_complete
 
-    def _gaussian_eliminate(self) -> None:
-        unknown = [i for i in range(self._K) if i not in self._recovered]
-        if not unknown:
-            return
-        idx_map = {frag: col for col, frag in enumerate(unknown)}
-        n = len(unknown)
-
-        # Build reduced coefficient matrix over unknowns only.
-        rows_c: list[np.ndarray] = []
-        rows_d: list[np.ndarray] = []
-        for coeff_vec, data in self._symbols:
-            # Apply known-fragment subtraction first.
-            cv = coeff_vec.copy()
-            d = data.copy()
-            self._subtract_recovered(cv, d)
-            cols = [idx_map[i] for i in unknown if cv[i] != 0]
-            if cols:
-                row = np.zeros(n, dtype=np.uint8)
-                for i in unknown:
-                    if cv[i] != 0:
-                        row[idx_map[i]] = cv[i]
-                rows_c.append(row)
-                rows_d.append(d)
-
-        if not rows_c:
-            return
-
-        frag_size = len(rows_d[0])
-        pivot_row: dict[int, int] = {}
-        row_idx = 0
-
-        for col in range(n):
-            # Find pivot.
-            found = None
-            for r in range(row_idx, len(rows_c)):
-                if rows_c[r][col] != 0:
-                    found = r
-                    break
-            if found is None:
-                continue
-            rows_c[row_idx], rows_c[found] = rows_c[found], rows_c[row_idx]
-            rows_d[row_idx], rows_d[found] = rows_d[found], rows_d[row_idx]
-
-            # Normalize pivot row so pivot coefficient = 1.
-            piv_c = int(rows_c[row_idx][col])
-            if piv_c != 1:
-                inv_piv = int(_INV_TABLE[piv_c])
-                rows_c[row_idx] = _MUL_TABLE[inv_piv][rows_c[row_idx]]
-                rows_d[row_idx] = _gf_mul_vec(inv_piv, rows_d[row_idx])
-
-            pivot_row[col] = row_idx
-
-            # Eliminate this column from all other rows.
-            for r in range(len(rows_c)):
-                if r != row_idx and rows_c[r][col] != 0:
-                    scale = int(rows_c[r][col])
-                    rows_c[r] ^= _MUL_TABLE[scale][rows_c[row_idx]]
-                    rows_d[r] ^= _gf_mul_vec(scale, rows_d[row_idx])
-
-            row_idx += 1
-
-        for col, pr in pivot_row.items():
-            nonzero = np.flatnonzero(rows_c[pr])
-            if len(nonzero) == 1 and nonzero[0] == col:
-                self._recovered[unknown[col]] = rows_d[pr].copy()
-
     def decode(self) -> bytes | None:
-        self._peel()
-        if len(self._recovered) < self._K:
-            self._gaussian_eliminate()
-            self._peel()
-        if len(self._recovered) < self._K:
+        if not self.is_complete:
             return None
-        parts = [self._recovered[i].tobytes() for i in range(self._K)]
-        return b''.join(parts)
+        # pivot_data rows are already in RREF; pivot_cols[i] is the fragment index
+        # for pivot row i.  Assemble in fragment order.
+        fragments: list[bytes | None] = [None] * self._K
+        for i in range(self._n_pivots):
+            fragments[self._pivot_cols[i]] = self._pivot_data[i].tobytes()
+        if any(f is None for f in fragments):
+            return None
+        return b''.join(fragments)  # type: ignore[arg-type]
 
     @property
     def is_complete(self) -> bool:
-        return len(self._recovered) == self._K
+        return self._n_pivots == self._K
