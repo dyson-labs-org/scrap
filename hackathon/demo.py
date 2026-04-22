@@ -1750,6 +1750,7 @@ def main() -> int:
                         samps_per_chip=active_samps_per_chip,
                         exit_on_decrypt=True,
                         device=sdr.device,
+                        disable_auto_ppm=True,
                     )
                     dh = hail_stats.get("_decoded_hail")
                     if dh is not None:
