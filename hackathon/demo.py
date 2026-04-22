@@ -102,7 +102,8 @@ DEMO_PAYLOAD = (
 # hardware); the RX path can use either.
 
 from sdr_devices import (
-    DeviceInfo, DEVICES, PLUGIN_INSTALL_HINTS as _PLUGIN_INSTALL_HINTS,
+    DeviceInfo, DEVICES, DEVICE_PPM as _DEVICE_PPM,
+    PLUGIN_INSTALL_HINTS as _PLUGIN_INSTALL_HINTS,
     format_device_open_error as _format_device_open_error,
     get_device_ppm as _get_device_ppm,
     get_band_min_vga as _get_band_min_vga,
@@ -1196,7 +1197,20 @@ def live_rx_decode(
     # coarse grid that can lock onto spurs.  Capped at _MAX_FREQ_CANDS
     # to bound per-block scoring cost (~27ms each).
     _MAX_FREQ_CANDS = 6
-    _freq_candidates: list[float] = []
+    # Pre-seed candidates from known device PPM values.  The RX device's
+    # PPM is already corrected (center_hz includes it).  The TX device's
+    # crystal error creates a residual offset = -ppm_tx * center_hz.
+    # We don't know which TX device is active, so seed candidates for
+    # ALL known devices.  The parallel pipeline scores them all; the
+    # correct one's MF periodicity dominates.  Also include 0 Hz (both
+    # devices perfectly corrected).
+    _freq_candidates: list[float] = [0.0]
+    for _ppm_val in set(_DEVICE_PPM.values()):
+        if _ppm_val == 0.0:
+            continue
+        _offset_hz = -_ppm_val * center_hz / 1e6
+        _offset_rad = _offset_hz * 2.0 * np.pi / samp_hz
+        _freq_candidates.append(_offset_rad)
 
     def _decode_worker() -> None:
         import os as _os
@@ -1995,7 +2009,10 @@ def main() -> int:
                                 print(f"  [AEAD FAIL] comb_id={_cid} frame[:8]={raw[:8].hex()}",
                                       flush=True)
                     if complete:
-                        return {"status": "decrypt_ok", "decoded_hail": True}
+                        return {**base, "status": "decrypt_ok",
+                                "decoded_hail": True,
+                                "polarity": "rlnc",
+                                "body": f"{received_count} symbols"}
                     # Return a result with real peak diagnostics for _print_live_event.
                     base = acq_sentinel or (sym_results[0] if sym_results else {})
                     status = ("no_signal" if (not sym_results or acq_sentinel)
@@ -2314,7 +2331,9 @@ def main() -> int:
                 if res.get("status") == "decrypt_ok":
                     raw = res["payload_frame_bytes"]
                     if session.verify_ack(raw):
-                        return {"status": "decrypt_ok", "decoded_hail": True}
+                        return {**res, "status": "decrypt_ok",
+                                "decoded_hail": True,
+                                "polarity": "rlnc-ack"}
                     res["status"] = "decrypt_fail"
                 return res
 
