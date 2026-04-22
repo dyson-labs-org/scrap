@@ -1174,6 +1174,8 @@ def live_rx_decode(
 
     _save_file_ref = save_file  # captured by worker closure
 
+    _freq_hint_rad = [None]  # mutable container for cross-block seeding
+
     def _decode_worker() -> None:
         import os as _os
         _os.environ.setdefault("OMP_NUM_THREADS", "2")
@@ -1185,7 +1187,6 @@ def live_rx_decode(
             if block_data is None:
                 result_queue.put(None)
                 return
-            # Compute p99 here so main thread doesn't need block_data for AGC.
             _abs_sub = np.abs(block_data[::10])
             _k99 = int(0.99 * len(_abs_sub))
             sample_p99 = float(np.partition(_abs_sub, _k99)[_k99])
@@ -1194,19 +1195,17 @@ def live_rx_decode(
             if decode_fn is not None:
                 result = decode_fn(block_data)
             else:
-                # TODO (Fix #5): seed freq estimate from prior decode.
-                # After a block returns "decrypt_fail" or "decrypt_ok"
-                # with a freq_offset_hz, save it and pass as
-                # freq_hint_hz to _decode_one_hail_in_block on
-                # subsequent blocks.  Requires adding a freq_hint_hz
-                # parameter to _decode_one_hail_in_block in sisl_rx.py.
                 result = sisl_rx._decode_one_hail_in_block(
                     block_data, responder_static,
                     samps_per_chip=samps_per_chip,
                     samp_hz=samp_hz,
                     signal_threshold=signal_threshold,
                     top_k_soft=top_k_soft,
+                    freq_hint_rad=_freq_hint_rad[0],
                 )
+                # Seed subsequent blocks with the freq from any frame found
+                if result.get("rad_per_sample") is not None:
+                    _freq_hint_rad[0] = result["rad_per_sample"]
             result["sample_p99"] = sample_p99
             result_queue.put(result)
 

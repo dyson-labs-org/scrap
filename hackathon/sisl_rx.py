@@ -380,6 +380,7 @@ def _acquire_and_track(
     samp_hz: float,
     signal_threshold: float,
     fec_total_bits: int = sc.HAIL_FEC_TOTAL_BITS,
+    freq_hint_rad: float | None = None,
 ) -> dict:
     """Frequency estimation, correction, matched filter, periodicity test,
     and per-symbol tracking decode.
@@ -391,18 +392,28 @@ def _acquire_and_track(
         return {"status": "short_block"}
 
     samples = (samples - samples.mean()).astype(np.complex64)
-    # Two-stage frequency estimation:
-    # Stage 1: FFT-squared picks top-K spectral peaks and validates each
-    # via MF (matched filter) periodicity. Returns the best candidate.
-    # Stage 2: Post-MF grid search validates the FFT-squared result and
-    # falls back to a ±50 kHz grid if PLL (Phase-Locked Loop) spurs
-    # caused the FFT-squared estimator to lock onto the wrong peak.
-    fft_rad = sf._estimate_freq_fft_squared(samples)
-    rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
-        samples, fft_rad,
-        samps_per_chip=samps_per_chip,
-        samp_hz=samp_hz,
-    )
+    if freq_hint_rad is not None:
+        # Use the hint from a prior block's successful decode.
+        # Validate it with post-MF scoring; if it still works, skip
+        # the expensive FFT-squared + grid search entirely.
+        rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
+            samples, freq_hint_rad,
+            samps_per_chip=samps_per_chip,
+            samp_hz=samp_hz,
+        )
+    else:
+        # Two-stage frequency estimation:
+        # Stage 1: FFT-squared picks top-K spectral peaks and validates each
+        # via MF periodicity. Returns the best candidate.
+        # Stage 2: Post-MF grid search validates the FFT-squared result and
+        # falls back to a ±50 kHz grid if PLL spurs caused the estimator
+        # to lock onto the wrong peak.
+        fft_rad = sf._estimate_freq_fft_squared(samples)
+        rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
+            samples, fft_rad,
+            samps_per_chip=samps_per_chip,
+            samp_hz=samp_hz,
+        )
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
@@ -683,6 +694,7 @@ def _decode_one_hail_in_block(
     samp_hz: float = 8_000_000.0,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
+    freq_hint_rad: float | None = None,
 ) -> dict:
     """Process one block of baseband samples, try to decode one FEC hail.
 
@@ -704,6 +716,7 @@ def _decode_one_hail_in_block(
     acq = _acquire_and_track(
         samples, samps_per_chip, samp_hz, signal_threshold,
         fec_total_bits=sc.HAIL_FEC_TOTAL_BITS * 3,
+        freq_hint_rad=freq_hint_rad,
     )
     if acq["status"] != "acquired":
         return acq
