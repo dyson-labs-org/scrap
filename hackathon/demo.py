@@ -1508,11 +1508,14 @@ def main() -> int:
                              "bandwidth equals the chip rate, so 2 Mcps "
                              "occupies 2 MHz. TX and RX must use the same "
                              "chip rate.")
-    parser.add_argument("--coord", type=str, default=None,
+    parser.add_argument("--coord", type=str, default="auto",
                         help="TCP coordination for half-duplex TX/RX role swapping. "
                              "Format: host:port. Use 0.0.0.0:PORT to listen (call "
                              "side), or REMOTE_IP:PORT to connect (respond side). "
-                             "Omit for single-pass timing-based behavior.")
+                             "Default: 0.0.0.0:4574 for call, 127.0.0.1:4574 for "
+                             "respond. Use --no-coord to disable.")
+    parser.add_argument("--no-coord", action="store_true",
+                        help="Disable coordination channel (timing-based mode).")
     parser.add_argument("--payload-out", type=str,
                         default="/tmp/sisl_rlnc_payload.bin",
                         help="path where respond side writes received payload "
@@ -1655,14 +1658,16 @@ def main() -> int:
             print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
-    # ── Optional TCP coordination channel (--coord host:port) ────────────
+    # ── TCP coordination channel (--coord host:port) ─────────────────────
     # Half-duplex test harness: alternating-turns protocol via TCP.
-    # coord is None when --coord is omitted; all coord interactions below
-    # are guarded by `if coord:` so existing timing-based behavior is unchanged.
+    # Default on for call/respond; --no-coord disables.
     coord = None
-    if args.coord and args.mode in ("call", "respond"):
+    if args.mode in ("call", "respond") and not args.no_coord:
+        _coord_str = args.coord
+        if _coord_str == "auto":
+            _coord_str = "0.0.0.0:4574" if args.mode == "call" else "127.0.0.1:4574"
         import sisl_coord as _coord_mod
-        _coord_host, _, _coord_port = args.coord.rpartition(":")
+        _coord_host, _, _coord_port = _coord_str.rpartition(":")
         _coord_port = int(_coord_port)
         if _coord_host in ("0.0.0.0", ""):
             coord = _coord_mod.listen(_coord_port)
