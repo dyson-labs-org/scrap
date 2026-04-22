@@ -1775,29 +1775,29 @@ def main() -> int:
                       f"({ack_frame_sec:.1f}s/frame), repeating until timeout")
                 print(f"  nonce echoed:  {decoded_hail.body.body_nonce.hex()}")
     
-                ack_start = time.time()
-                ack_round = 0
-                _ack_early_exit = False
-                try:
-                    while time.time() - ack_start < ACK_TX_WINDOW:
-                        ack_round += 1
-                        burst_repeats = 5
-                        print(f"  ACK burst {ack_round} "
-                              f"({burst_repeats} repeats)...", end="", flush=True)
-                        soapy_tx_burst(
-                            ack_samples, sdr.center_hz,
-                            samp_hz=SAMP_RATE_HZ,
-                            tx_vga_db=args.tx_vga,
-                            tx_amp_on=args.tx_amp,
-                            repeats=burst_repeats,
-                            device=sdr.device,
-                        )
-                        print(" done")
+                _ack_early = False
+                def _ack_gen():
+                    nonlocal _ack_early
+                    _t0 = time.time()
+                    while time.time() - _t0 < ACK_TX_WINDOW:
+                        yield ack_samples
                         if coord and coord.has_data():
-                            coord.wait_for_switch()  # call decoded ACK
+                            coord.wait_for_switch()
                             print("  coord: caller decoded ACK — stopping early")
-                            _ack_early_exit = True
-                            break
+                            _ack_early = True
+                            return
+
+                print(f"  TX ACK: continuous stream"
+                      f"{', coord early-exit' if coord else f', {ACK_TX_WINDOW:.0f}s window'}",
+                      flush=True)
+                try:
+                    soapy_tx_streaming(
+                        _ack_gen(), sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        device=sdr.device,
+                    )
                 except KeyboardInterrupt:
                     print("  interrupted")
                 print()
@@ -1805,10 +1805,8 @@ def main() -> int:
                 print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT      ║\033[0m")
                 print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
                 if coord:
-                    if _ack_early_exit:
-                        print("  coord: ACK TX done (early) — telling caller to TX payload", flush=True)
-                    else:
-                        print("  coord: ACK TX done — telling caller to TX payload", flush=True)
+                    print(f"  coord: ACK TX done{' (early)' if _ack_early else ''}"
+                          f" — telling caller to TX payload", flush=True)
                     coord.send_switch()
 
                 # ── Phase 3: RLNC payload RX ──────────────────────────────────
@@ -1950,32 +1948,31 @@ def main() -> int:
                     print("  coord: caller ready for payload ACK", flush=True)
 
                 import time as _time
-                _ack_deadline = _time.monotonic() + 120.0
-                _ack_n = 0
-                print(f"  TX payload ACK (52B, repeating 120s)...", flush=True)
-                while _time.monotonic() < _ack_deadline:
-                    ack_frame = ack_session.build_ack(seq=_ack_n)
-                    ack_sym_bits = sc.encode_payload_symbol_fec(ack_frame)
-                    ack_sym_chips = sf.tx_bits_to_chips(ack_sym_bits)
-                    ack_sym_samples = upsample_chips_to_samples(
-                        ack_sym_chips, SAMPS_PER_CHIP)
-                    soapy_tx_burst(
-                        ack_sym_samples, sdr.center_hz,
-                        samp_hz=SAMP_RATE_HZ,
-                        tx_vga_db=args.tx_vga,
-                        tx_amp_on=args.tx_amp,
-                        repeats=5,
-                        device=sdr.device,
-                    )
-                    _ack_n += 1
-                    print(f"  payload ACK burst {_ack_n} done, "
-                          f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
-                          flush=True)
-                    if coord and coord.has_data():
-                        coord.wait_for_switch()  # call decoded payload ACK
-                        print("  coord: caller decoded payload ACK — stopping early")
-                        break
-                print("  payload ACK TX complete")
+                _pack_n = [0]
+                def _payload_ack_gen():
+                    _t0 = _time.monotonic()
+                    while _time.monotonic() - _t0 < 120.0:
+                        frame = ack_session.build_ack(seq=_pack_n[0])
+                        bits = sc.encode_payload_symbol_fec(frame)
+                        chips = sf.tx_bits_to_chips(bits)
+                        yield upsample_chips_to_samples(chips, SAMPS_PER_CHIP)
+                        _pack_n[0] += 1
+                        if coord and coord.has_data():
+                            coord.wait_for_switch()
+                            print("  coord: caller decoded payload ACK — stopping early")
+                            return
+
+                print(f"  TX payload ACK: continuous stream"
+                      f"{', coord early-exit' if coord else ', 120s window'}",
+                      flush=True)
+                soapy_tx_streaming(
+                    _payload_ack_gen(), sdr.center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    device=sdr.device,
+                )
+                print(f"  payload ACK TX complete ({_pack_n[0]} frames)")
                 if coord:
                     print("  coord: payload ACK done — session complete", flush=True)
                     coord.send_switch()
