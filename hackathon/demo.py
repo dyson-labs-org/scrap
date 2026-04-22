@@ -1107,6 +1107,22 @@ def live_rx_decode(
         SOAPY_SDR_RX, SOAPY_SDR_CF32, [0], stream_args)
     device.activateStream(stream)
 
+    # Flush ~500ms of samples after activating the RX stream.
+    # After TX→RX transition, the HackRF's analog frontend retains
+    # residual TX energy (PLL settling, DAC ring-down) that correlates
+    # with the DSSS spreading code and produces false FRAME FOUND
+    # detections.  Discarding the first 500ms clears this.
+    _flush_samples = int(0.5 * samp_hz)
+    _flush_buf = np.empty(min(_flush_samples, 65536), dtype=np.complex64)
+    _flushed = 0
+    while _flushed < _flush_samples:
+        _want = min(len(_flush_buf), _flush_samples - _flushed)
+        sr = device.readStream(stream, [_flush_buf[:_want]], _want, timeoutUs=500_000)
+        if sr.ret > 0:
+            _flushed += sr.ret
+        elif sr.ret == -1:  # timeout
+            break
+
     _is_windows = _IS_WINDOWS
     _win_timer_set = False
     if _is_windows:
