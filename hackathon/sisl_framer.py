@@ -219,7 +219,7 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     sq = (s * s).astype(np.complex64)
 
     # FFT with segment averaging for noise reduction
-    nfft = min(N, 2**20)  # cap at 1M-point FFT for speed
+    nfft = min(N, 2**23)  # cap at 8M-point FFT (~4s at 2 Msps)
     n_seg = max(1, N // nfft)
     seg_len = nfft
     accum = np.zeros(nfft, dtype=np.complex128)
@@ -282,7 +282,7 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     # positions, and use the median of those 8 peaks. A real signal
     # gives a high periodic median; a spur gives a high argmax but
     # low periodic median.
-    seg_len = min(N, 4_000_000)  # 2 seconds at 2 Msps
+    seg_len = min(N, 16_000_000)  # use full block (~8s at 2 Msps)
     seg = np.asarray(samples[:seg_len], dtype=np.complex64)
     spc = 2  # always validate at 2 samples/chip
     sym_samples = CHIPS_PER_SYMBOL * spc  # 2046
@@ -302,7 +302,7 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
         first_peak = int(np.argmax(m))
         search_half = sym_samples // 4
         periodic_peaks: list[float] = []
-        for k in range(8):
+        for k in range(32):
             pos = first_peak + k * sym_samples
             if pos + search_half >= len(m):
                 break
@@ -320,6 +320,114 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
             best_rad = cand_rad
 
     return best_rad
+
+
+def _score_freq_candidate_mf(
+    samples: np.ndarray,
+    rad_per_sample: float,
+    samps_per_chip: int = 2,
+    seg_len: int = 100_000,
+) -> float:
+    """Score a frequency candidate by MF periodicity strength.
+
+    Apply freq correction, run the MF (matched filter) on a short segment,
+    measure periodic peak structure at symbol spacing.  Returns a
+    periodicity score (median of symbol-spaced peaks / median noise).
+    Higher is better; real DSSS (Direct-Sequence Spread Spectrum) signal
+    gives score >> 5, spurs give ~1-3.
+
+    samps_per_chip: samples per PN (Pseudo-Noise) chip (=2 for RX path).
+    seg_len: number of samples to use (default 100K = 50ms at 2 Msps).
+    """
+    seg = np.asarray(samples[:seg_len], dtype=np.complex64)
+    sym_samples = CHIPS_PER_SYMBOL * samps_per_chip  # 2046
+
+    if len(seg) < sym_samples * 10:
+        return 0.0
+
+    corrected = apply_freq_correction(seg, rad_per_sample)
+    corr = matched_filter_complex_sample_rate(corrected, samps_per_chip)
+    if len(corr) < sym_samples * 10:
+        return 0.0
+
+    m = np.abs(corr).astype(np.float32)
+    median_noise = float(np.median(m))
+    if median_noise < 1e-12:
+        return 0.0
+
+    # Use column-mean chip-phase (periodic average) to find true DSSS phase,
+    # not argmax which can be a WiFi/BT spike.
+    n_full = (len(m) // sym_samples) * sym_samples
+    phase_avgs = m[:n_full].reshape(-1, sym_samples).mean(axis=0)
+    chip_phase = int(np.argmax(phase_avgs))
+
+    search_half = sym_samples // 4
+    periodic_peaks: list[float] = []
+    for k in range(8):
+        pos = chip_phase + k * sym_samples
+        if pos + search_half >= len(m):
+            break
+        lo = max(0, pos - search_half)
+        hi = min(len(m), pos + search_half + 1)
+        periodic_peaks.append(float(m[lo:hi].max()))
+
+    if len(periodic_peaks) < 4:
+        return 0.0
+
+    return float(np.median(periodic_peaks)) / median_noise
+
+
+def estimate_freq_post_mf(
+    samples: np.ndarray,
+    fft_squared_rad: float,
+    samps_per_chip: int = 2,
+    samp_hz: float = 2_000_000.0,
+    grid_half_hz: float = 50_000.0,
+    grid_step_hz: float = 5_000.0,
+    min_score: float = 3.0,
+) -> tuple[float, float]:
+    """Post-MF frequency grid search: validate FFT-squared estimate, fall back to grid.
+
+    The FFT-squared estimator operates on raw pre-despread samples where the
+    DSSS signal is ~30 dB below noise.  HackRF PLL (Phase-Locked Loop) spurs
+    dominate the squared spectrum, causing wrong frequency estimates.
+
+    This function:
+    1. Scores the FFT-squared candidate via MF periodicity.
+    2. If the score is above min_score, returns it (fast path).
+    3. Otherwise, searches a grid of +/-grid_half_hz in grid_step_hz steps,
+       running the MF for each offset and picking the one with the highest
+       periodicity score.
+
+    Returns (best_rad_per_sample, best_score).
+    """
+    seg_len = min(len(samples), 200_000)  # 100ms at 2 Msps
+
+    # Fast path: check if FFT-squared candidate is good enough.
+    fft_score = _score_freq_candidate_mf(
+        samples, fft_squared_rad, samps_per_chip, seg_len,
+    )
+    if fft_score >= min_score:
+        return fft_squared_rad, fft_score
+
+    # Grid search: try offsets around zero (not around the FFT-squared
+    # estimate, which is likely a spur).
+    best_rad = fft_squared_rad
+    best_score = fft_score
+
+    n_steps = int(grid_half_hz / grid_step_hz)
+    hz_to_rad = 2.0 * np.pi / samp_hz
+    for i in range(-n_steps, n_steps + 1):
+        offset_hz = i * grid_step_hz
+        candidate_rad = offset_hz * hz_to_rad
+        score = _score_freq_candidate_mf(
+            samples, candidate_rad, samps_per_chip, seg_len,
+        )
+        if score > best_score:
+            best_score = score
+            best_rad = candidate_rad
+
+    return best_rad, best_score
 
 
 def estimate_freq_drift_rate(samples: np.ndarray,

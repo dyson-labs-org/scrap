@@ -392,13 +392,17 @@ def _acquire_and_track(
 
     samples = (samples - samples.mean()).astype(np.complex64)
     # Two-stage frequency estimation:
-    # 1. R[1] coarse (± tens of kHz — often wrong at low wideband SNR,
-    # FFT-squared frequency estimation: square the signal to remove
-    # BPSK modulation, FFT to find the spectral line at 2× carrier
-    # offset. No R[1] coarse correction — R[1] is unreliable at DSSS
-    # wideband SNR and applying it can shift the signal to the band
-    # edge where it aliases.
-    rad_per_sample = sf._estimate_freq_fft_squared(samples)
+    # Stage 1: FFT-squared picks top-K spectral peaks and validates each
+    # via MF (matched filter) periodicity. Returns the best candidate.
+    # Stage 2: Post-MF grid search validates the FFT-squared result and
+    # falls back to a ±50 kHz grid if PLL (Phase-Locked Loop) spurs
+    # caused the FFT-squared estimator to lock onto the wrong peak.
+    fft_rad = sf._estimate_freq_fft_squared(samples)
+    rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
+        samples, fft_rad,
+        samps_per_chip=samps_per_chip,
+        samp_hz=samp_hz,
+    )
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
@@ -606,6 +610,30 @@ def _try_fec_decrypt(
             "note": "no soft-correlator candidate cleared the gate",
         }
 
+    # ── Extract additional frame copies at frame-length offsets ──────
+    # The TX loops the same FEC-encoded hail frame continuously.  A
+    # 5.36s block at 1 Mcps holds ~2.5 copies (each frame =
+    # HAIL_FEC_TOTAL_BITS ≈ 2.18s).  The top-K search above finds
+    # candidates near the BEST ASM position but misses copies one or
+    # two frame-lengths away.  Search at ±N×frame_bits offsets from the
+    # best candidate and extract LLRs for the accumulator.
+    if not ack_mode and best_offset >= 0:
+        frame_bits = sc.HAIL_FEC_TOTAL_BITS
+        for mult in (-2, -1, 1, 2):
+            copy_offset = best_offset + mult * frame_bits
+            if copy_offset < 0:
+                continue
+            if copy_offset + fec_total_bits > len(peak_values):
+                continue
+            copy_llr = _extract_llrs_at_position(
+                peak_values, copy_offset,
+                n_fec_bits=fec_total_bits,
+                pilot_bits=pilot_bits,
+            )
+            copy_fec = copy_llr.get("fec_llrs")
+            if copy_fec is not None:
+                extra_fec_llrs.append(copy_fec)
+
     llr_diag = best_attempt["llr_diag"]
     fec_llrs_arr = best_attempt["fec_llrs"]
     base: dict = {
@@ -667,7 +695,16 @@ def _decode_one_hail_in_block(
       decrypt_fail  -- hail frame found but Poly1305 tag mismatch
       decrypt_ok    -- hail decoded and decrypted under responder_static
     """
-    acq = _acquire_and_track(samples, samps_per_chip, samp_hz, signal_threshold)
+    # Request enough symbols to cover the full block, not just ~2 frames.
+    # A 5.36s block at 1 Mcps holds ~2.5 hail frame repetitions (each
+    # frame = HAIL_FEC_TOTAL_BITS = 2128 bits ≈ 2.18s).  The default
+    # target_bytes = 2×HAIL_FEC_TOTAL_BITS covers ~2 copies; requesting
+    # 3× covers the full block so we can extract all frame copies for
+    # LLR (Log-Likelihood Ratio) accumulation.
+    acq = _acquire_and_track(
+        samples, samps_per_chip, samp_hz, signal_threshold,
+        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS * 3,
+    )
     if acq["status"] != "acquired":
         return acq
 

@@ -960,6 +960,7 @@ def live_rx_decode(
     initial_vga_db: float | None = None,
     disable_auto_ppm: bool = False,
     coord_fd: int | None = None,
+    flush_after_tx: bool = False,
 ) -> dict:
     """Stream samples from the selected device, decode SISL hails live.
 
@@ -1112,16 +1113,18 @@ def live_rx_decode(
     # residual TX energy (PLL settling, DAC ring-down) that correlates
     # with the DSSS spreading code and produces false FRAME FOUND
     # detections.  Discarding the first 500ms clears this.
-    _flush_samples = int(0.5 * samp_hz)
-    _flush_buf = np.empty(min(_flush_samples, 65536), dtype=np.complex64)
-    _flushed = 0
-    while _flushed < _flush_samples:
-        _want = min(len(_flush_buf), _flush_samples - _flushed)
-        sr = device.readStream(stream, [_flush_buf[:_want]], _want, timeoutUs=500_000)
-        if sr.ret > 0:
-            _flushed += sr.ret
-        elif sr.ret == -1:  # timeout
-            break
+    # Only needed after TX→RX transitions, not when starting fresh in RX.
+    if flush_after_tx:
+        _flush_samples = int(0.5 * samp_hz)
+        _flush_buf = np.empty(min(_flush_samples, 65536), dtype=np.complex64)
+        _flushed = 0
+        while _flushed < _flush_samples:
+            _want = min(len(_flush_buf), _flush_samples - _flushed)
+            sr = device.readStream(stream, [_flush_buf[:_want]], _want, timeoutUs=500_000)
+            if sr.ret > 0:
+                _flushed += sr.ret
+            elif sr.ret == -1:  # timeout
+                break
 
     _is_windows = _IS_WINDOWS
     _win_timer_set = False
@@ -1191,6 +1194,12 @@ def live_rx_decode(
             if decode_fn is not None:
                 result = decode_fn(block_data)
             else:
+                # TODO (Fix #5): seed freq estimate from prior decode.
+                # After a block returns "decrypt_fail" or "decrypt_ok"
+                # with a freq_offset_hz, save it and pass as
+                # freq_hint_hz to _decode_one_hail_in_block on
+                # subsequent blocks.  Requires adding a freq_hint_hz
+                # parameter to _decode_one_hail_in_block in sisl_rx.py.
                 result = sisl_rx._decode_one_hail_in_block(
                     block_data, responder_static,
                     samps_per_chip=samps_per_chip,
@@ -1938,6 +1947,7 @@ def main() -> int:
                     disable_auto_ppm=True,
                     device=sdr.device,
                     coord_fd=coord.fileno if coord else None,
+                    flush_after_tx=True,
                 )
     
                 recovered = rx_session.recovered_payload()
@@ -2126,6 +2136,7 @@ def main() -> int:
                 exit_on_decrypt=True,
                 decode_fn=_ack_decode_fn,
                 coord_fd=coord.fileno if coord else None,
+                flush_after_tx=True,
             )
             ack_recv_time = time.time()
             dh = ack_stats.get("_decoded_hail")
@@ -2280,6 +2291,7 @@ def main() -> int:
                 initial_vga_db=_phase4_vga,
                 disable_auto_ppm=True,
                 coord_fd=coord.fileno if coord else None,
+                flush_after_tx=True,
             )
         # call_sdr.__exit__ closes device here
 
