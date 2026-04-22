@@ -82,10 +82,26 @@ class CoordClient:
     def __init__(self) -> None:
         self._ws: Any = None
 
-    async def connect(self, host: str, port: int) -> None:
+    async def connect(self, host: str, port: int, retry_s: float = 60.0) -> None:
+        import asyncio, time
         uri = f"ws://{host}:{port}"
-        self._ws = await websockets.connect(uri)
-        print(f"  coord: connected to {uri}")
+        deadline = time.monotonic() + retry_s
+        attempt = 0
+        while True:
+            try:
+                self._ws = await websockets.connect(uri, open_timeout=5)
+                print(f"  coord: connected to {uri}")
+                return
+            except Exception as exc:
+                attempt += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"coord: could not connect to {uri} after {retry_s:.0f}s"
+                    ) from exc
+                wait = min(2.0, remaining)
+                print(f"  coord: waiting for call side ({uri})… attempt {attempt}", flush=True)
+                await asyncio.sleep(wait)
 
     async def send_ready(self, seq: int) -> None:
         await self._ws.send(_encode({"type": "ready", "role": "respond", "seq": seq}))
