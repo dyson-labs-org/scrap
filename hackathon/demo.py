@@ -1722,9 +1722,9 @@ def main() -> int:
             # Single device handle is shared across all three phases.
             # libhackrf ≥ 2026.01.3 fixed the setupStream deadlock so
             # RX → TX → RX cycles on one handle are safe.
-            decoded_hail = None
             stream_errors = 0
             while True:
+                decoded_hail = None
                 while decoded_hail is None:
                     hail_stats = live_rx_decode(
                         duration_s=listen_duration,
@@ -1767,7 +1767,7 @@ def main() -> int:
     
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
                 if coord:
-                    print(f"  coord: hail decoded — notifying caller (seq=0)", flush=True)
+                    print(f"  coord: hail decoded — notifying caller", flush=True)
                     coord.send_received()
                     print(f"  coord: waiting for caller to switch to RX...", flush=True)
                     coord.wait_for_switch()
