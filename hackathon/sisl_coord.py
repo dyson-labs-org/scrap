@@ -21,12 +21,22 @@ import time
 
 
 class Coord:
-    """Half-duplex coordination channel.  Blocking send/recv over TCP."""
+    """Half-duplex coordination channel.  Single-threaded send/recv over TCP.
+
+    NOT thread-safe — all send/recv must be from the same thread.
+    Use `fileno` property for select()-based readability checks from
+    other code (e.g., live_rx_decode stop condition).
+    """
 
     def __init__(self, conn: socket.socket) -> None:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._conn = conn
         self._buf = b""
+
+    @property
+    def fileno(self) -> int:
+        """Socket fd for select() readability checks."""
+        return self._conn.fileno()
 
     def _send(self, msg: dict) -> None:
         self._conn.sendall((json.dumps(msg) + "\n").encode())
@@ -47,6 +57,13 @@ class Coord:
             self._buf += chunk
         line, self._buf = self._buf.split(b"\n", 1)
         return json.loads(line)
+
+    def has_data(self) -> bool:
+        """Non-blocking check: is a message waiting? Does NOT consume it."""
+        if b"\n" in self._buf:
+            return True
+        ready, _, _ = select.select([self._conn], [], [], 0)
+        return bool(ready)
 
     def send_ready(self) -> None:
         self._send({"type": "ready"})
