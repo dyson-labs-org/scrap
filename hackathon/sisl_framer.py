@@ -8,8 +8,10 @@ Assumes chip-aligned start; add a sliding correlator for acquisition.
 
 from __future__ import annotations
 
+import os
 
 import numpy as np
+_FRAMER_DEBUG = bool(os.environ.get("SISL_DEBUG"))
 
 # scipy is a HARD requirement — the matched-filter correlator must be
 # FFT-based for real-time DSP. A numpy np.convolve fallback on multi-
@@ -917,14 +919,33 @@ def dbpsk_decode_from_pilot(
     # ── 4. Pilot-region LLRs (coherent) ──
     pilot_llrs = fully_derotated[:n_pilot].real.astype(np.float32)
 
-    # ── 5. Body-region LLRs (differential, on raw peaks for drift immunity) ──
+    # ── 5. Body-region LLRs (differential, drift-compensated) ──
+    # The differential product y_k * conj(y_{k-1}) has residual phase
+    # delta_theta per symbol from carrier frequency offset.  Without
+    # compensation, the .real projection attenuates the LLR by cos(Δθ)
+    # which is catastrophic when Δθ >> 0.1 rad (e.g. 15 kHz CFO at
+    # 1 ksym/s gives Δθ ≈ 96 rad — essentially random projection).
+    # Apply the same drift rotator as decode_with_freq_tracking.
     raw_body = peaks_arr[n_pilot:]
     n_body = n_data_bits - n_pilot
     if n_body > 0:
         prev_peaks = np.empty(n_body, dtype=np.complex128)
         prev_peaks[0] = peaks_arr[n_pilot - 1]
         prev_peaks[1:] = raw_body[:-1]
-        body_llrs = (raw_body * np.conj(prev_peaks)).real.astype(np.float32)
+        drift_rotator = complex(np.cos(delta_theta), -np.sin(delta_theta))
+        uncomp = (raw_body * np.conj(prev_peaks)).real.astype(np.float32)
+        body_llrs = (raw_body * np.conj(prev_peaks) * drift_rotator).real.astype(np.float32)
+        if _FRAMER_DEBUG:
+            sign_changes = float(np.mean(np.signbit(uncomp) != np.signbit(body_llrs)))
+            print(
+                "       [DBG framer] "
+                f"Δθ={delta_theta:+.4f} rms={rms_residual:.3f} "
+                f"mean|pilot|={float(np.mean(np.abs(pilot_llrs))):.3f} "
+                f"mean|body_unc|={float(np.mean(np.abs(uncomp))):.3f} "
+                f"mean|body_cmp|={float(np.mean(np.abs(body_llrs))):.3f} "
+                f"sign_flip={sign_changes:.3f}",
+                flush=True,
+            )
     else:
         body_llrs = np.zeros(0, dtype=np.float32)
 
@@ -936,7 +957,6 @@ def dbpsk_decode_from_pilot(
     frame_bytes = np.packbits(bits).tobytes()
 
     return frame_bytes, soft, theta0, delta_theta, rms_residual
-
 
 
 

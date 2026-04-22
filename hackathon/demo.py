@@ -1150,6 +1150,7 @@ def live_rx_decode(
         "combined_decrypts": 0,
     }
     t_start = time.time()
+    _last_heartbeat = t_start
 
     accumulator = None
     if combine_copies > 0:
@@ -1178,36 +1179,51 @@ def live_rx_decode(
 
     def _decode_worker() -> None:
         import os as _os
-        _os.environ.setdefault("OMP_NUM_THREADS", "2")
+        _os.environ.setdefault("OMP_NUM_THREADS", "1")
+        _dbg = _os.environ.get("SISL_DEBUG")
         while not decode_stop.is_set():
             try:
                 block_data = raw_queue.get(timeout=1.0)
             except _queue.Empty:
+                if _dbg:
+                    print("  [decode] queue empty", flush=True)
                 continue
             if block_data is None:
                 result_queue.put(None)
                 return
-            _abs_sub = np.abs(block_data[::10])
-            _k99 = int(0.99 * len(_abs_sub))
-            sample_p99 = float(np.partition(_abs_sub, _k99)[_k99])
-            if _save_file_ref is not None:
-                block_data.tofile(_save_file_ref)
-            if decode_fn is not None:
-                result = decode_fn(block_data)
-            else:
-                result = sisl_rx._decode_one_hail_in_block(
-                    block_data, responder_static,
-                    samps_per_chip=samps_per_chip,
-                    samp_hz=samp_hz,
-                    signal_threshold=signal_threshold,
-                    top_k_soft=top_k_soft,
-                    freq_hint_rad=_freq_hint_rad[0],
-                )
-                # Seed subsequent blocks with the freq from any frame found
-                if result.get("rad_per_sample") is not None:
-                    _freq_hint_rad[0] = result["rad_per_sample"]
-            result["sample_p99"] = sample_p99
-            result_queue.put(result)
+            if _dbg:
+                import time as _dbg_time
+                _dbg_t0 = _dbg_time.time()
+                print(f"  [decode] got block: {len(block_data)} samples", flush=True)
+            try:
+                _abs_sub = np.abs(block_data[::10])
+                _k99 = int(0.99 * len(_abs_sub))
+                sample_p99 = float(np.partition(_abs_sub, _k99)[_k99])
+                if _save_file_ref is not None:
+                    block_data.tofile(_save_file_ref)
+                if decode_fn is not None:
+                    result = decode_fn(block_data)
+                else:
+                    result = sisl_rx._decode_one_hail_in_block(
+                        block_data, responder_static,
+                        samps_per_chip=samps_per_chip,
+                        samp_hz=samp_hz,
+                        signal_threshold=signal_threshold,
+                        top_k_soft=top_k_soft,
+                        freq_hint_rad=_freq_hint_rad[0],
+                    )
+                    if result.get("rad_per_sample") is not None:
+                        _freq_hint_rad[0] = result["rad_per_sample"]
+                result["sample_p99"] = sample_p99
+                if _dbg:
+                    print(f"  [decode] done: {result.get('status')} in {_dbg_time.time()-_dbg_t0:.2f}s", flush=True)
+                result_queue.put(result)
+            except Exception as _e:
+                print(f"  [decode worker] exception: {_e}", flush=True)
+                import traceback; traceback.print_exc()
+                result_queue.put({"status": "decode_error", "error": str(_e),
+                                  "sample_p99": 0.0})
+        result_queue.put(None)
 
     reader = threading.Thread(
         target=_usb_reader_thread,
@@ -1227,11 +1243,22 @@ def live_rx_decode(
             try:
                 result = result_queue.get(timeout=2.0)
             except _queue.Empty:
+                now = time.time()
+                if now - _last_heartbeat >= 5.0:
+                    print(
+                        "       waiting for RX blocks... "
+                        f"processed={stats['blocks_processed']} "
+                        f"overflows={stats.get('overflows', 0)} "
+                        f"dropped={stats.get('dropped_blocks', 0)}",
+                        flush=True,
+                    )
+                    _last_heartbeat = now
                 continue
             if result is None:
                 break
 
             stats["blocks_processed"] += 1
+            _last_heartbeat = time.time()
 
             current_overflows = stats["overflows"]
             if current_overflows > overflow_count_at_last_check:
@@ -1283,7 +1310,7 @@ def live_rx_decode(
                     acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
                     print(f"       accumulator: {accumulator.n_copies} "
                           f"frame copies combined, "
-                          f"mean |LLR|={acc_l1:.0f}")
+                          f"mean |LLR|={acc_l1:.3f}")
                     combined = accumulator.try_decrypt(responder_static)
                     if combined is not None:
                         decoded_hail, label, n_flips = combined
@@ -1301,35 +1328,34 @@ def live_rx_decode(
         print("  interrupted")
         raise  # propagate so outer loops exit cleanly
     finally:
-        # Stop decode thread before reader — decode_stop lets the worker exit
-        # its get() loop cleanly without waiting for a None sentinel.
+        # Signal threads to stop, then wait for the decode worker to finish
+        # its current block before touching the device.  Closing the device
+        # while fftconvolve is running in the decode thread causes a segfault
+        # (scipy pocketfft accesses freed memory).
         decode_stop.set()
         reader_stop.set()
-        # hackrf#1570: on Linux, deactivateStream does NOT cancel in-flight
-        # USB transfers, so it blocks indefinitely (observed: 40+ seconds).
-        # Fix: close the device FIRST to cancel all USB transfers, then call
-        # deactivateStream (which returns immediately on a closed device).
-        # CRITICAL ordering: closeStream frees stream memory; never call it
-        # while the reader is still inside readStream → SIGSEGV.
-        # device.close() unblocks readStream with an error, letting reader exit.
-        _reader_forced_close = False
+        # Wait for decode thread FIRST — it may be mid-FFT.
+        decode_thread.join(timeout=8.0)
+        # hackrf#1570: deactivateStream hangs indefinitely when USB transfers
+        # are in-flight.  For _owns_device=True, closing the device cancels
+        # all USB transfers.  For _owns_device=False (shared device handle),
+        # we CANNOT close the device (caller owns it for the next phase).
+        # Instead, skip deactivateStream and just close the stream — the
+        # reader thread exits on its next readStream timeout (50ms).
         if _owns_device:
             try:
                 device.close()
             except Exception:
                 pass
-            _reader_forced_close = True
+        reader.join(timeout=3.0)
         try:
             device.deactivateStream(stream)
         except Exception:
             pass
-        reader.join(timeout=3.0)
-        decode_thread.join(timeout=5.0)
-        if not _reader_forced_close:
-            try:
-                device.closeStream(stream)
-            except Exception:
-                pass
+        try:
+            device.closeStream(stream)
+        except Exception:
+            pass
         if save_file is not None:
             save_file.close()
         if _win_timer_set:
@@ -1640,7 +1666,7 @@ def main() -> int:
         # Minimum block must hold ≥2 FEC frames. Frame duration depends
         # on chip rate: 2096 symbols × 1023 chips/symbol / chip_rate.
         frame_sec = 2096 * 1023 / chip_rate_hz
-        min_block_sec = max(3.0, frame_sec * 2.5)
+        min_block_sec = max(3.0, frame_sec * 1.5)
         if block_sec < min_block_sec:
             block_sec = min_block_sec
         # Apply PPM pre-correction to the initial center frequency.
@@ -1716,7 +1742,11 @@ def main() -> int:
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
 
-        block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 2.5)
+        # One hail frame = 2096 symbols × 1023 chips / chip_rate ≈ 2.14s.
+        # Keep blocks small enough to process in real time (decode takes
+        # ~1.2s for 3M samples at 2 Msps).  Rely on multi-copy LLR
+        # accumulation across blocks rather than fitting 2.5 frames per block.
+        block_sec = max(3.0, 2096 * 1023 / chip_rate_hz * 1.5)
         listen_duration = max(600.0, args.duration)
 
         # Apply --ppm to SoapyDevice so TX (ACK, payload ACK) uses the
@@ -2081,9 +2111,14 @@ def main() -> int:
                 # coord.has_data() between frames (~2s each).
                 def _hail_generator():
                     n = 0
+                    t0 = time.time()
                     while True:
                         n += 1
                         yield hail_samples
+                        if n % 5 == 0:
+                            print(f"  phase 1: sent {n} hail frames "
+                                  f"({time.time() - t0:.0f}s elapsed)",
+                                  flush=True)
                         if coord.has_data():
                             return
 
@@ -2125,7 +2160,7 @@ def main() -> int:
                   f"(up to {args.duration:.0f}s)\033[0m", flush=True)
             ack_stats = live_rx_decode(
                 duration_s=args.duration,
-                block_seconds=5.36,
+                block_seconds=3.0,
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
                 amp_on=args.rx_amp,

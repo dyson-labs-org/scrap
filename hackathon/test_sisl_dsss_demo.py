@@ -263,8 +263,8 @@ def test_llr_accumulator_fec_constructor_validates_n_bits():
     # Requires n_bits == HAIL_FEC_TOTAL_BITS
     try:
         sisl_rx.LlrAccumulator(n_bits=1064)
-        raise AssertionError("expected AssertionError on wrong n_bits")
-    except AssertionError as e:
+        raise AssertionError("expected ValueError on wrong n_bits")
+    except ValueError as e:
         if "n_bits must be" not in str(e) and "HAIL_FEC_TOTAL_BITS" not in str(e):
             raise
     # Correct construction works and allocates body-sized accumulator
@@ -460,6 +460,5 @@ class TestRLNCPayloadLoopback:
             recovered = session.recovered_payload()
             assert recovered is not None
             assert recovered == payload
-
 
 

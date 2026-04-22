@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """OTA loopback test runner for HackRF One devices."""
 import subprocess, time, re, sys
+from pathlib import Path
 
-WORKDIR = "/home/mcelrath/Jobs/perigalacticon/dysonlabs/.worktrees/rlnc/hackathon"
+WORKDIR = Path(__file__).resolve().parent
 
 def run_trial(freq_mhz, tx_vga, tx_amp, rx_lna, rx_vga, rx_amp, duration=60):
-    base = ["python", "demo.py", "--freq", str(freq_mhz)]
+    base = [sys.executable, "demo.py", "--freq", str(freq_mhz)]
 
     resp_cmd = base + ["--mode", "respond",
                        "--rx-lna", str(rx_lna), "--rx-vga", str(rx_vga),
@@ -33,10 +34,10 @@ def run_trial(freq_mhz, tx_vga, tx_amp, rx_lna, rx_vga, rx_amp, duration=60):
     print(f"  call:    {' '.join(call_cmd)}", flush=True)
 
     resp = subprocess.Popen(resp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            cwd=WORKDIR)
+                            cwd=str(WORKDIR))
     time.sleep(2)
     call = subprocess.Popen(call_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            cwd=WORKDIR)
+                            cwd=str(WORKDIR))
 
     try:
         call_out, call_err = call.communicate(timeout=duration + 30)

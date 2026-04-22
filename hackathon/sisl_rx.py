@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import numpy as np
 from cryptography.hazmat.primitives.asymmetric import ec
 
@@ -27,6 +28,7 @@ _PERIODIC_RATIO_MIN = 0.15
 _SOFT_SCORE_MIN_HAIL_ACK = 10.0
 _SOFT_PTS_RATIO_MIN = 3.0
 _SOFT_SCORE_MIN_PAYLOAD = 5.0
+_RX_DEBUG = bool(os.environ.get("SISL_DEBUG"))
 
 
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
@@ -84,10 +86,11 @@ class LlrAccumulator:
         self.freq_flush_hz = freq_flush_hz
         # For hail frames the body starts after the header; for ACK frames
         # all bits are FEC body (no separate header field in sisl_crypto).
-        assert n_bits in (sc.HAIL_FEC_TOTAL_BITS, sc.ACK_FEC_TOTAL_BITS), (
-            f"n_bits must be HAIL_FEC_TOTAL_BITS ({sc.HAIL_FEC_TOTAL_BITS}) "
-            f"or ACK_FEC_TOTAL_BITS ({sc.ACK_FEC_TOTAL_BITS}); got {n_bits}"
-        )
+        if n_bits not in (sc.HAIL_FEC_TOTAL_BITS, sc.ACK_FEC_TOTAL_BITS):
+            raise ValueError(
+                f"n_bits must be HAIL_FEC_TOTAL_BITS ({sc.HAIL_FEC_TOTAL_BITS}) "
+                f"or ACK_FEC_TOTAL_BITS ({sc.ACK_FEC_TOTAL_BITS}); got {n_bits}"
+            )
         if n_bits == sc.HAIL_FEC_TOTAL_BITS:
             self._header_bits = sc.HAIL_FEC_HEADER_BITS
             self._accum_size = sc.HAIL_FEC_BODY_CODED_BITS
@@ -133,6 +136,14 @@ class LlrAccumulator:
         # copies to cancel instead of add (sublinear L1 growth).
         llrs_f64 = llrs[:self.n_bits].astype(np.float64)
         body_llrs = llrs_f64[self._header_bits:]
+        if _RX_DEBUG and self.n_copies > 0:
+            prev_norm = float(np.linalg.norm(self.accumulated))
+            body_norm = float(np.linalg.norm(body_llrs))
+            if prev_norm > 1e-9 and body_norm > 1e-9:
+                cos_sim = float(np.dot(self.accumulated, body_llrs) / (prev_norm * body_norm))
+                print(f"       [DBG acc] cos_sim={cos_sim:+.3f} "
+                      f"mean|llr|={float(np.mean(np.abs(body_llrs))):.3f}",
+                      flush=True)
 
         # Frequency-drift flush: detect carrier shift > freq_flush_hz.
         incoming_freq = result.get("freq_offset_hz")
@@ -531,6 +542,13 @@ def _acquire_and_track(
         track_samples = samples_corr
     else:
         target_bytes = (2 * fec_total_bits + 7) // 8
+        # Cap to what the block can actually track: the MF output has
+        # len(samples) - samples_per_symbol + 1 elements, and each
+        # tracked symbol steps by samples_per_symbol.
+        max_trackable = max(1, (len(samples) - samples_per_symbol) // samples_per_symbol)
+        max_bytes = max_trackable // 8
+        if target_bytes > max_bytes:
+            target_bytes = max_bytes
         track_rad = rad_per_sample
         track_samples = samples
 
@@ -604,6 +622,10 @@ def _try_fec_decrypt(
         }
 
     topk = find_sisl_frame_soft_topk(peak_values, frame_len, k=top_k_soft)
+    if _RX_DEBUG:
+        print(f"       [DBG rx] candidates={len(topk)} "
+              f"peak_values={len(peak_values)} fec_bits={fec_total_bits} "
+              f"Δf={freq_hz:+.0f}Hz", flush=True)
 
     best_attempt: dict | None = None
     best_offset = -1
@@ -644,6 +666,12 @@ def _try_fec_decrypt(
         fec_llrs_arr = llr_diag.get("fec_llrs")
         if fec_llrs_arr is None:
             continue
+        if _RX_DEBUG:
+            body = fec_llrs_arr[sc.ACK_FEC_HEADER_BITS if ack_mode else sc.HAIL_FEC_HEADER_BITS:]
+            print(f"       [DBG rx] cand off={cand_offset} score={cand_score:+.1f} "
+                  f"pts={cand_pts:.2f} mean|body|={float(np.mean(np.abs(body))):.3f} "
+                  f"asm_errs={llr_diag.get('asm_errs_in_coherent')}",
+                  flush=True)
 
         if ack_mode:
             assert caller_static_priv is not None and caller_eph_priv is not None
@@ -781,15 +809,15 @@ def _decode_one_hail_in_block(
       decrypt_fail  -- hail frame found but Poly1305 tag mismatch
       decrypt_ok    -- hail decoded and decrypted under responder_static
     """
-    # Request enough symbols to cover the full block, not just ~2 frames.
-    # A 5.36s block at 1 Mcps holds ~2.5 hail frame repetitions (each
-    # frame = HAIL_FEC_TOTAL_BITS = 2128 bits ≈ 2.18s).  The default
-    # target_bytes = 2×HAIL_FEC_TOTAL_BITS covers ~2 copies; requesting
-    # 3× covers the full block so we can extract all frame copies for
-    # LLR (Log-Likelihood Ratio) accumulation.
+    # Track enough symbols for one full hail frame plus margin for the
+    # frame-copy extraction loop in _try_fec_decrypt.  The target_bytes
+    # formula in _acquire_and_track doubles fec_total_bits, so requesting
+    # 1× gives ~2 frames worth of tracked symbols.  With 3.0s blocks at
+    # 2 Msps this fits comfortably; the old 3× multiplier required 5.36s+
+    # blocks that exceeded real-time decode budget.
     acq = _acquire_and_track(
         samples, samps_per_chip, samp_hz, signal_threshold,
-        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS * 3,
+        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS,
         freq_hint_rad=freq_hint_rad,
     )
     if acq["status"] != "acquired":

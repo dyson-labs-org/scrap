@@ -261,6 +261,31 @@ def test_dbpsk_decode_at_negative_drift():
     assert np.array_equal(decoded_bits, expected)
 
 
+def test_dbpsk_body_drift_compensation_preserves_body_llr_strength():
+    """High residual drift should still yield strong, decodable body LLRs."""
+    rng = np.random.default_rng(seed=91)
+    pilot_bits = np.array([0, 0, 1, 1, 0, 1, 0, 1] * 6, dtype=np.uint8)
+    body_bits = rng.integers(0, 2, 512).astype(np.uint8)
+    delta_theta = 1.2
+    peaks = _make_dbpsk_test_signal(
+        pilot_bits,
+        body_bits,
+        theta0=0.4,
+        delta_theta=delta_theta,
+    )
+
+    # Production path (pilot-fit + drift compensation) should recover fully.
+    result = sf.dbpsk_decode_from_pilot(peaks, pilot_bits, len(peaks))
+    assert result is not None
+    _, soft, _, delta_est, _ = result
+    decoded_bits = (soft < 0).astype(np.uint8)
+    expected = np.concatenate([pilot_bits, body_bits])
+    assert np.array_equal(decoded_bits, expected)
+    assert abs(delta_est - delta_theta) < 0.05
+    body_soft = soft[len(pilot_bits):]
+    assert float(np.mean(np.abs(body_soft))) > 0.3
+
+
 def test_dbpsk_decode_with_awgn():
     """AWGN at high SNR. Tests the LLR sign convention end-to-end with
     noise; threshold accounts for the DBPSK ~2 dB asymptotic loss vs
@@ -658,4 +683,3 @@ def test_decode_with_freq_tracking_lock_floor(
     )
     assert result is not None
     assert len(result["peak_values"]) == n_bits
-
