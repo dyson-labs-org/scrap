@@ -1610,6 +1610,7 @@ def main() -> int:
             _coord_server = _coord_mod.CoordServer()
             _coord_server.start(args.coord_port)
             coord = _coord_server
+            coord.wait_for_ready()  # block until respond side connects and sends "ready"
         else:
             _coord_client = _coord_mod.CoordClient()
             _coord_client.connect("127.0.0.1", args.coord_port)
@@ -2099,23 +2100,49 @@ def main() -> int:
             all_samples = np.concatenate(all_symbol_samples)
             total_sym = N_WARMUP + N_CODED
             total_dur_s = total_sym * sym_duration_s
-            print(f"  TX {total_sym} symbols ({total_dur_s:.0f}s continuous)...",
-                  end="", flush=True)
-            soapy_tx_burst(
-                all_samples, call_sdr.center_hz,
-                samp_hz=SAMP_RATE_HZ,
-                tx_vga_db=rlnc_tx_vga,
-                tx_amp_on=args.tx_amp,
-                repeats=1,
-                device=call_sdr.device,
-            )
-            print(" done")
-            comb_id = N_CODED
+
+            # With --coord-port: loop TX until the respond side confirms it
+            # received the payload, then signal it to switch to TX (ACK).
+            # Without --coord-port: single pass as before.
+            if coord:
+                import threading as _threading
+                _received_event = _threading.Event()
+                def _bg_wait_received():
+                    coord.wait_for_received(_coord_seq)
+                    _received_event.set()
+                _threading.Thread(target=_bg_wait_received, daemon=True,
+                                  name="coord-wait-received").start()
+
+            tx_pass = 0
+            while True:
+                tx_pass += 1
+                print(f"  TX pass {tx_pass}: {total_sym} symbols "
+                      f"({total_dur_s:.0f}s)...", end="", flush=True)
+                soapy_tx_burst(
+                    all_samples, call_sdr.center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=rlnc_tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=1,
+                    device=call_sdr.device,
+                )
+                print(" done")
+                if coord:
+                    if _received_event.is_set():
+                        print(f"  coord: respond confirmed received "
+                              f"after {tx_pass} TX pass(es) — switching to RX")
+                        coord.send_switch(_coord_seq)
+                        break
+                    print(f"  coord: no received signal yet, re-TX'ing...")
+                else:
+                    break  # no coord: single pass
+
+            comb_id = N_CODED * tx_pass
 
             # ── Phase 4: RX payload ACK ───────────────────────────────────
             # Reuse call_sdr.device — same as Phase 2, avoids close/reopen
             # USB destabilization (hackrf#1570).
-            print(f"  TX complete ({comb_id} symbols). "
+            print(f"  TX complete ({comb_id} symbols total). "
                   f"Listening for payload ACK...")
             rlnc_ack_stats = live_rx_decode(
                 duration_s=max(60.0, args.duration),
@@ -2135,9 +2162,6 @@ def main() -> int:
 
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
-            if coord:
-                coord.wait_for_received(_coord_seq)
-                coord.send_switch(_coord_seq)
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")

@@ -39,7 +39,7 @@ class CoordServer:
     def __init__(self) -> None:
         self._inbox: queue.Queue = queue.Queue()
         self._outbox: queue.Queue = queue.Queue()
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop: asyncio.AbstractEventLoop = None  # type: ignore[assignment]
         self._ws: Any = None
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
@@ -93,7 +93,8 @@ class CoordServer:
                 raise TimeoutError("coord: respond side never connected")
             time.sleep(0.2)
         msg = self._recv()
-        assert msg["type"] == "ready", f"unexpected: {msg}"
+        if msg["type"] != "ready":
+            raise RuntimeError(f"coord: expected 'ready', got {msg!r}")
         print(f"  coord: respond side ready (seq={msg['seq']})")
 
     def send_switch(self, seq: int) -> None:
@@ -102,7 +103,8 @@ class CoordServer:
 
     def wait_for_received(self) -> None:
         msg = self._recv()
-        assert msg["type"] == "received", f"unexpected: {msg}"
+        if msg["type"] != "received":
+            raise RuntimeError(f"coord: expected 'received', got {msg!r}")
         print(f"  coord: respond confirmed received (seq={msg['seq']})")
 
     def close(self) -> None:
@@ -115,7 +117,7 @@ class CoordClient:
     def __init__(self) -> None:
         self._inbox: queue.Queue = queue.Queue()
         self._outbox: queue.Queue = queue.Queue()
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop: asyncio.AbstractEventLoop = None  # type: ignore[assignment]
         self._ws: Any = None
         self._thread: threading.Thread | None = None
         self._connected = threading.Event()
@@ -126,16 +128,16 @@ class CoordClient:
         deadline = time.monotonic() + retry_s
         attempt = 0
         while True:
+            loop = asyncio.new_event_loop()
             try:
-                # Run connect attempt in a temporary event loop
-                loop = asyncio.new_event_loop()
                 ws = loop.run_until_complete(
                     websockets.connect(uri, open_timeout=5)
                 )
                 self._ws = ws
                 self._loop = loop
                 break
-            except Exception:
+            except (OSError, websockets.exceptions.WebSocketException):
+                loop.close()
                 attempt += 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -183,7 +185,8 @@ class CoordClient:
             msg = self._inbox.get(timeout=timeout)
         except queue.Empty:
             raise TimeoutError("coord: timed out waiting for switch from call side")
-        assert msg["type"] == "switch", f"unexpected: {msg}"
+        if msg["type"] != "switch":
+            raise RuntimeError(f"coord: expected 'switch', got {msg!r}")
         print(f"  coord: received switch seq={msg['seq']}")
 
     def close(self) -> None:
