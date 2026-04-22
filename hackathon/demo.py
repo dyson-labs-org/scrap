@@ -2356,8 +2356,17 @@ def main() -> int:
 
 if __name__ == "__main__":
     import signal
+    _sigint_count = 0
     def _sigint_handler(sig, frame):
-        print("\n  interrupted — exiting", flush=True)
-        os._exit(130)  # immediate exit, no cleanup (avoids HackRF deactivateStream hang)
+        global _sigint_count
+        _sigint_count += 1
+        if _sigint_count >= 2:
+            print("\n  force exit", flush=True)
+            os._exit(130)
+        print("\n  interrupted — Ctrl-C again to force exit", flush=True)
+        raise KeyboardInterrupt
     signal.signal(signal.SIGINT, _sigint_handler)
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
