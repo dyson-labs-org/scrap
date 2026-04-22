@@ -307,6 +307,7 @@ def _score_freq_candidate_mf(
     samps_per_chip: int = 2,
     seg_len: int = 100_000,
     n_peaks: int = 16,
+    code: np.ndarray | None = None,
 ) -> float:
     """Score a frequency candidate by MF periodicity strength.
 
@@ -316,18 +317,20 @@ def _score_freq_candidate_mf(
     Higher is better; real DSSS (Direct-Sequence Spread Spectrum) signal
     gives score >> 5, spurs give ~1-3.
 
-    samps_per_chip: samples per PN (Pseudo-Noise) chip (=2 for RX path).
-    seg_len: number of samples to use (default 100K = 50ms at 2 Msps).
-    n_peaks: number of periodic peaks to check (default 16).
+    code: spreading code to correlate against.  Default is the full 1023-chip
+    public code.  Pass a shorter code (e.g. first 128 chips) for a wider-
+    bandwidth coarse frequency search at reduced processing gain.
     """
+    if code is None:
+        code = DEFAULT_PUBLIC_CODE
     seg = np.asarray(samples[:seg_len], dtype=np.complex64)
-    sym_samples = CHIPS_PER_SYMBOL * samps_per_chip  # 2046
+    sym_samples = len(code) * samps_per_chip
 
     if len(seg) < sym_samples * 10:
         return 0.0
 
     corrected = apply_freq_correction(seg, rad_per_sample)
-    corr = matched_filter_complex_sample_rate(corrected, samps_per_chip)
+    corr = matched_filter_complex_sample_rate(corrected, samps_per_chip, code=code)
     if len(corr) < sym_samples * 10:
         return 0.0
 
@@ -365,55 +368,83 @@ def estimate_freq_post_mf(
     samp_hz: float = 2_000_000.0,
     grid_half_hz: float = 50_000.0,
     grid_step_hz: float = 5_000.0,
-    # min_score: minimum MF periodicity score to accept the FFT-squared
-    # candidate without falling back to grid search.  The score is
-    # median(symbol-spaced MF peaks) / median(noise).  A real DSSS signal
-    # produces score >> 5 (periodic peaks well above noise); HackRF PLL
-    # spurs produce score ≈ 1-3 (one large peak, rest at noise floor).
-    # 3.0 is a conservative boundary: accepts real signals on the fast
-    # path while forcing spur-dominated blocks into the grid search.
     min_score: float = 3.0,
 ) -> tuple[float, float]:
-    """Post-MF frequency grid search: validate FFT-squared estimate, fall back to grid.
+    """Post-MF periodicity-based frequency acquisition for DSSS signals.
 
-    The FFT-squared estimator operates on raw pre-despread samples where the
-    DSSS signal is ~30 dB below noise.  HackRF PLL (Phase-Locked Loop) spurs
-    dominate the squared spectrum, causing wrong frequency estimates.
+    At DSSS operating points the signal is 30 dB below noise.  Pre-despread
+    estimators (FFT-squared) cannot reliably distinguish signal from HackRF
+    PLL spurs in this regime.  The matched filter is spur-immune: only the
+    real DSSS signal produces periodic symbol-spaced peaks in the MF output.
 
-    This function:
-    1. Scores the FFT-squared candidate via MF periodicity.
-    2. If the score is above min_score, returns it (fast path).
-    3. Otherwise, searches a grid of +/-grid_half_hz in grid_step_hz steps,
-       running the MF for each offset and picking the one with the highest
-       periodicity score.
+    Architecture — hierarchical grid with partial correlator for coarse stage:
+
+    A full-length MF (1023 chips) has a 978 Hz sinc mainlobe — too narrow
+    for a practical coarse grid.  Instead, use a short partial correlator
+    (first 128 chips of the spreading code) for the coarse stage.  Its
+    mainlobe is 15.6 kHz wide, tolerating 5 kHz grid steps with < 4 dB
+    loss at the worst-case residual.  Processing gain drops from 30 dB to
+    21 dB but the periodicity scorer only needs enough SNR to distinguish
+    DSSS structure from noise (~10 dB suffices).
+
+    Stages:
+      1. Coarse: ±grid_half_hz, grid_step_hz steps, 128-chip partial MF.
+      2. Fine: ±grid_step_hz around coarse winner, 500 Hz steps, full MF.
+      3. Sub-bin: FFT-squared on the fine-corrected signal for sub-Hz.
 
     Returns (best_rad_per_sample, best_score).
     """
-    seg_len = min(len(samples), 200_000)  # 100ms at 2 Msps
+    seg_len = min(len(samples), 200_000)
+    hz_to_rad = 2.0 * np.pi / samp_hz
 
-    # Fast path: check if FFT-squared candidate is good enough.
+    # ── Partial correlator code for coarse stage ──────────────────────
+    # First 128 chips of the spreading code, upsampled to samps_per_chip.
+    # Mainlobe width = samp_hz / (128 * samps_per_chip) ≈ 7.8 kHz at 2 spc.
+    # Grid step of 5 kHz gives worst-case residual 2.5 kHz → -2.5 dB loss.
+    _COARSE_CHIPS = 128
+    coarse_code = DEFAULT_PUBLIC_CODE[:_COARSE_CHIPS].copy()
+
+    # ── 1. Coarse grid with partial correlator ────────────────────────
     fft_score = _score_freq_candidate_mf(
         samples, fft_squared_rad, samps_per_chip, seg_len,
+        code=coarse_code,
     )
-    if fft_score >= min_score:
-        return fft_squared_rad, fft_score
-
-    # Grid search: try offsets around zero (not around the FFT-squared
-    # estimate, which is likely a spur).
     best_rad = fft_squared_rad
     best_score = fft_score
 
-    n_steps = int(grid_half_hz / grid_step_hz)
-    hz_to_rad = 2.0 * np.pi / samp_hz
-    for i in range(-n_steps, n_steps + 1):
-        offset_hz = i * grid_step_hz
-        candidate_rad = offset_hz * hz_to_rad
+    n_coarse = int(grid_half_hz / grid_step_hz)
+    for i in range(-n_coarse, n_coarse + 1):
+        candidate_rad = i * grid_step_hz * hz_to_rad
+        score = _score_freq_candidate_mf(
+            samples, candidate_rad, samps_per_chip, seg_len,
+            code=coarse_code,
+        )
+        if score > best_score:
+            best_score = score
+            best_rad = candidate_rad
+
+    # ── 2. Fine grid with full correlator ─────────────────────────────
+    full_kernel_bw = samp_hz / (2.0 * CHIPS_PER_SYMBOL * samps_per_chip)
+    fine_step_hz = max(100.0, full_kernel_bw)  # ~489 Hz
+    coarse_hz = best_rad / hz_to_rad
+    n_fine = int(grid_step_hz / fine_step_hz) + 1
+    for i in range(-n_fine, n_fine + 1):
+        candidate_hz = coarse_hz + i * fine_step_hz
+        candidate_rad = candidate_hz * hz_to_rad
         score = _score_freq_candidate_mf(
             samples, candidate_rad, samps_per_chip, seg_len,
         )
         if score > best_score:
             best_score = score
             best_rad = candidate_rad
+
+    # ── 3. Sub-bin: FFT-squared on the fine-corrected signal ──────────
+    if best_score >= min_score:
+        corrected = apply_freq_correction(samples[:seg_len], best_rad)
+        residual_rad = _estimate_freq_fft_squared(corrected)
+        residual_hz = abs(residual_rad * samp_hz / (2.0 * np.pi))
+        if residual_hz < fine_step_hz:
+            best_rad += residual_rad
 
     return best_rad, best_score
 
