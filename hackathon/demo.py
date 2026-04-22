@@ -1606,22 +1606,20 @@ def main() -> int:
     coord = None
     if args.coord_port and args.mode in ("call", "respond"):
         import sisl_coord as _coord_mod
-        import asyncio as _asyncio
         if args.mode == "call":
             _coord_server = _coord_mod.CoordServer()
-            _asyncio.run(_coord_server.start(args.coord_port))
+            _coord_server.start(args.coord_port)
             coord = _coord_server
         else:
             _coord_client = _coord_mod.CoordClient()
-            _asyncio.run(_coord_client.connect("127.0.0.1", args.coord_port))
+            _coord_client.connect("127.0.0.1", args.coord_port)
             coord = _coord_client
     _coord_seq = 0
 
     # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
         if coord:
-            import asyncio as _asyncio
-            _asyncio.run(coord.send_ready(_coord_seq))
+            coord.send_ready(_coord_seq)
         responder_static = demo_responder_key()
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
@@ -1863,9 +1861,8 @@ def main() -> int:
                               flush=True)
                     print("  payload ACK TX complete")
                     if coord:
-                        import asyncio as _asyncio
-                        _asyncio.run(coord.send_received(_coord_seq))
-                        _asyncio.run(coord.wait_for_switch())
+                        coord.send_received(_coord_seq)
+                        coord.wait_for_switch()
                     break  # exit while True: — session complete
                 else:
                     print(f"  payload decode incomplete "
@@ -2139,9 +2136,8 @@ def main() -> int:
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
             if coord:
-                import asyncio as _asyncio
-                _asyncio.run(coord.wait_for_received(_coord_seq))
-                _asyncio.run(coord.send_switch(_coord_seq))
+                coord.wait_for_received(_coord_seq)
+                coord.send_switch(_coord_seq)
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
