@@ -1,193 +1,162 @@
-"""WebSocket coordination side-channel for TX/RX role swapping.
+"""TCP coordination side-channel for TX/RX role swapping.
 
 Used by --mode call (CoordServer) and --mode respond (CoordClient) when
 --coord-port is specified.  Messages are newline-delimited JSON:
 
-    {"type": "ready",    "role": "call"|"respond", "seq": 0}
-    {"type": "received", "role": "respond",         "seq": 0}
-    {"type": "switch",                              "seq": 0}
+    {"type": "ready"}
+    {"type": "received"}
+    {"type": "switch"}
 
-The call side runs as WS server in a background thread so the main
-synchronous TX/RX path is not blocked.  The respond side connects with
-a retry loop and also runs its WS recv in a background thread.
+The call side binds a TCP server socket and accepts in a background daemon
+thread.  The respond side connects with a retry loop.  All send/recv are
+plain blocking calls on the socket — no asyncio required.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import queue
+import socket
 import threading
 import time
 from typing import Any
 
-import websockets
-import websockets.exceptions
+
+def _encode(msg: dict) -> bytes:
+    return (json.dumps(msg) + "\n").encode()
 
 
-def _encode(msg: dict) -> str:
-    return json.dumps(msg)
-
-
-def _decode(raw: Any) -> dict:
-    return json.loads(raw)
+def _decode(line: str) -> dict:
+    return json.loads(line)
 
 
 class CoordServer:
-    """WS server side (--mode call). Runs in a background thread."""
+    """TCP server side (--mode call)."""
 
     def __init__(self) -> None:
-        self._inbox: queue.Queue = queue.Queue()
-        self._outbox: queue.Queue = queue.Queue()
-        self._loop: asyncio.AbstractEventLoop = None  # type: ignore[assignment]
-        self._ws: Any = None
-        self._thread: threading.Thread | None = None
-        self._ready = threading.Event()
+        self._conn: socket.socket | None = None
+        self._rfile: Any = None
+        self._connected = threading.Event()
 
     def start(self, port: int) -> None:
-        """Start WS server in background thread. Returns immediately."""
-        self._thread = threading.Thread(
-            target=self._run, args=(port,), daemon=True, name="coord-server"
-        )
-        self._thread.start()
-        self._ready.wait(timeout=5)
-        print(f"  coord: listening on ws://0.0.0.0:{port}")
+        """Bind TCP socket and accept the respond side in a background thread."""
+        self._server_sock = socket.create_server(("0.0.0.0", port))
+        threading.Thread(target=self._accept, daemon=True,
+                         name="coord-accept").start()
+        print(f"  coord: listening on tcp://0.0.0.0:{port}")
 
-    def _run(self, port: int) -> None:
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._serve(port))
+    def _accept(self) -> None:
+        conn, _ = self._server_sock.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self._conn = conn
+        self._rfile = conn.makefile("r")
+        self._connected.set()
 
-    async def _serve(self, port: int) -> None:
-        async with websockets.serve(self._handler, "0.0.0.0", port):
-            self._ready.set()
-            # Pump outbox → WS and WS → inbox until closed
-            while True:
-                await asyncio.sleep(0.05)
-                if self._ws is not None:
-                    try:
-                        msg = self._outbox.get_nowait()
-                        await self._ws.send(_encode(msg))
-                    except queue.Empty:
-                        pass
-
-    async def _handler(self, ws: Any) -> None:
-        self._ws = ws
-        try:
-            async for raw in ws:
-                self._inbox.put(_decode(raw))
-        except websockets.exceptions.ConnectionClosed:
-            pass
+    def _send(self, msg: dict) -> None:
+        if not self._connected.wait(timeout=5.0):
+            raise TimeoutError("coord: respond side never connected (send)")
+        assert self._conn is not None
+        self._conn.sendall(_encode(msg))
 
     def _recv(self, timeout: float = 120.0) -> dict:
+        if not self._connected.wait(timeout=timeout):
+            raise TimeoutError("coord: respond side never connected")
+        assert self._conn is not None and self._rfile is not None
+        self._conn.settimeout(timeout)
         try:
-            return self._inbox.get(timeout=timeout)
-        except queue.Empty:
+            line = self._rfile.readline()
+        except OSError:
             raise TimeoutError("coord: timed out waiting for message from respond side")
+        finally:
+            self._conn.settimeout(None)
+        if not line:
+            raise ConnectionError("coord: respond side disconnected")
+        return _decode(line)
 
     def wait_for_ready(self) -> None:
-        # Wait until respond side connects (ws is set)
-        deadline = time.monotonic() + 120.0
-        while self._ws is None:
-            if time.monotonic() > deadline:
-                raise TimeoutError("coord: respond side never connected")
-            time.sleep(0.2)
         msg = self._recv()
         if msg["type"] != "ready":
             raise RuntimeError(f"coord: expected 'ready', got {msg!r}")
-        print(f"  coord: respond side ready (seq={msg['seq']})")
+        print(f"  coord: respond side ready")
 
-    def send_switch(self, seq: int) -> None:
-        self._outbox.put({"type": "switch", "seq": seq})
-        print(f"  coord: sent switch seq={seq}")
+    def send_switch(self) -> None:
+        self._send({"type": "switch"})
+        print(f"  coord: sent switch — respond now TX")
 
     def wait_for_received(self) -> None:
         msg = self._recv()
         if msg["type"] != "received":
             raise RuntimeError(f"coord: expected 'received', got {msg!r}")
-        print(f"  coord: respond confirmed received (seq={msg['seq']})")
+        print(f"  coord: respond confirmed received")
 
-    def close(self) -> None:
-        pass  # daemon thread exits with process
+    def wait_for_received_async(self) -> threading.Event:
+        """Spawn background thread waiting for 'received'; return the Event."""
+        ev = threading.Event()
+        def _run() -> None:
+            self.wait_for_received()
+            ev.set()
+        threading.Thread(target=_run, daemon=True,
+                         name="coord-wait-received").start()
+        return ev
 
 
 class CoordClient:
-    """WS client side (--mode respond). Runs recv in a background thread."""
+    """TCP client side (--mode respond)."""
 
     def __init__(self) -> None:
-        self._inbox: queue.Queue = queue.Queue()
-        self._outbox: queue.Queue = queue.Queue()
-        self._loop: asyncio.AbstractEventLoop = None  # type: ignore[assignment]
-        self._ws: Any = None
-        self._thread: threading.Thread | None = None
-        self._connected = threading.Event()
+        self._conn: socket.socket | None = None
+        self._rfile: Any = None
 
     def connect(self, host: str, port: int, retry_s: float = 120.0) -> None:
         """Connect to CoordServer with retry. Blocks until connected or timeout."""
-        uri = f"ws://{host}:{port}"
+        addr = f"tcp://{host}:{port}"
         deadline = time.monotonic() + retry_s
         attempt = 0
         while True:
-            loop = asyncio.new_event_loop()
             try:
-                ws = loop.run_until_complete(
-                    websockets.connect(uri, open_timeout=5)
-                )
-                self._ws = ws
-                self._loop = loop
+                conn = socket.create_connection((host, port), timeout=5)
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self._conn = conn
+                self._rfile = conn.makefile("r")
                 break
-            except (OSError, websockets.exceptions.WebSocketException):
-                loop.close()
+            except OSError:
                 attempt += 1
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError(
-                        f"coord: could not connect to {uri} after {retry_s:.0f}s"
+                        f"coord: could not connect to {addr} after {retry_s:.0f}s"
                     )
-                wait = min(2.0, remaining)
-                print(f"  coord: waiting for call side ({uri})… attempt {attempt}",
+                print(f"  coord: waiting for call side ({addr})… attempt {attempt}",
                       flush=True)
-                time.sleep(wait)
+                time.sleep(min(2.0, remaining))
+        print(f"  coord: connected to {addr}")
 
-        print(f"  coord: connected to {uri}")
-        # Start background thread to pump messages
-        self._thread = threading.Thread(
-            target=self._run, daemon=True, name="coord-client"
-        )
-        self._thread.start()
+    def _send(self, msg: dict) -> None:
+        assert self._conn is not None
+        self._conn.sendall(_encode(msg))
 
-    def _run(self) -> None:
-        self._loop.run_until_complete(self._pump())
-
-    async def _pump(self) -> None:
+    def _recv(self, timeout: float = 300.0) -> dict:
+        assert self._conn is not None and self._rfile is not None
+        self._conn.settimeout(timeout)
         try:
-            async for raw in self._ws:
-                self._inbox.put(_decode(raw))
-        except websockets.exceptions.ConnectionClosed:
-            pass
+            line = self._rfile.readline()
+        except OSError:
+            raise TimeoutError("coord: timed out waiting for message from call side")
+        finally:
+            self._conn.settimeout(None)
+        if not line:
+            raise ConnectionError("coord: call side disconnected")
+        return _decode(line)
 
-    def _send_sync(self, msg: dict) -> None:
-        fut = asyncio.run_coroutine_threadsafe(
-            self._ws.send(_encode(msg)), self._loop
-        )
-        fut.result(timeout=10)
+    def send_ready(self) -> None:
+        self._send({"type": "ready"})
+        print(f"  coord: sent ready")
 
-    def send_ready(self, seq: int) -> None:
-        self._send_sync({"type": "ready", "role": "respond", "seq": seq})
-        print(f"  coord: sent ready seq={seq}")
+    def send_received(self) -> None:
+        self._send({"type": "received"})
+        print(f"  coord: sent received — waiting for switch")
 
-    def send_received(self, seq: int) -> None:
-        self._send_sync({"type": "received", "role": "respond", "seq": seq})
-        print(f"  coord: sent received seq={seq}")
-
-    def wait_for_switch(self, timeout: float = 300.0) -> None:
-        try:
-            msg = self._inbox.get(timeout=timeout)
-        except queue.Empty:
-            raise TimeoutError("coord: timed out waiting for switch from call side")
+    def wait_for_switch(self) -> None:
+        msg = self._recv()
         if msg["type"] != "switch":
             raise RuntimeError(f"coord: expected 'switch', got {msg!r}")
-        print(f"  coord: received switch seq={msg['seq']}")
-
-    def close(self) -> None:
-        pass  # daemon thread exits with process
+        print(f"  coord: received switch — starting TX")

@@ -1625,12 +1625,11 @@ def main() -> int:
             _coord_client = _coord_mod.CoordClient()
             _coord_client.connect("127.0.0.1", args.coord_port)
             coord = _coord_client
-    _coord_seq = 0
 
     # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
         if coord:
-            coord.send_ready(_coord_seq)
+            coord.send_ready()
         responder_static = demo_responder_key()
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
@@ -1699,7 +1698,7 @@ def main() -> int:
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
                 if coord:
                     print(f"  coord: hail decoded — notifying caller (seq=0)", flush=True)
-                    coord.send_received(0)
+                    coord.send_received()
                     print(f"  coord: waiting for caller to switch to RX...", flush=True)
                     coord.wait_for_switch()
                     print(f"  coord: caller switched to RX — starting ACK TX", flush=True)
@@ -1856,9 +1855,9 @@ def main() -> int:
                     # Without coord: TX for 120s so caller catches it after its
                     # RLNC TX window expires.
                     if coord:
-                        print(f"  coord: payload decoded — notifying caller (seq=1)",
+                        print(f"  coord: payload decoded — notifying caller",
                               flush=True)
-                        coord.send_received(1)
+                        coord.send_received()
                         print(f"  coord: waiting for caller to switch to RX...",
                               flush=True)
                         coord.wait_for_switch()
@@ -1894,7 +1893,6 @@ def main() -> int:
                           f"({received_count} symbols received)")
         # sdr.__exit__ closes device here
         if coord:
-            coord.close()
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -1959,17 +1957,11 @@ def main() -> int:
         with SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz) as call_sdr:
             print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
             # ── Phase 1: TX hail ──────────────────────────────────────────
-            import threading as _threading
             phase1_start_time = time.time()
             hail_switch_time = None
 
             if coord:
-                _hail_received_event = _threading.Event()
-                def _bg_wait_hail_received():
-                    coord.wait_for_received()
-                    _hail_received_event.set()
-                _threading.Thread(target=_bg_wait_hail_received, daemon=True,
-                                  name="coord-wait-hail").start()
+                _hail_received_event = coord.wait_for_received_async()
                 _hail_pass_repeats = max(1, int(5.0 * chip_rate_hz / len(hail_chips)))
                 hail_pass = 0
                 print(f"\n  phase 1: \033[33mTX hail\033[0m "
@@ -1992,7 +1984,7 @@ def main() -> int:
                         hail_switch_time = time.time()
                         print(f"  coord: switching to RX for ACK — sending switch to respond",
                               flush=True)
-                        coord.send_switch(0)
+                        coord.send_switch()
                         break
                     print(" done", flush=True)
             else:
@@ -2169,13 +2161,7 @@ def main() -> int:
             # received the payload, then signal it to switch to TX (ACK).
             # Without --coord-port: single pass as before.
             if coord:
-                import threading as _threading
-                _received_event = _threading.Event()
-                def _bg_wait_received():
-                    coord.wait_for_received()
-                    _received_event.set()
-                _threading.Thread(target=_bg_wait_received, daemon=True,
-                                  name="coord-wait-received").start()
+                _received_event = coord.wait_for_received_async()
 
             tx_pass = 0
             while True:
@@ -2196,7 +2182,7 @@ def main() -> int:
                           f" after {tx_pass} pass(es)", flush=True)
                     print(f"  coord: switching to RX for payload ACK"
                           f" — sending switch to respond", flush=True)
-                    coord.send_switch(1)
+                    coord.send_switch()
                     break
                 print(" done")
                 if not coord:
@@ -2232,7 +2218,6 @@ def main() -> int:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
         if coord:
-            coord.close()
         return 0
 
     # mode == "tx"
