@@ -1867,8 +1867,12 @@ def main() -> int:
     
                 # B+C: pre-seeded VGA (no AGC warmup), static PPM (no wander).
                 # Shared device handle — no reopen between ACK TX and RLNC RX.
+                _n_coded = K + max(120, K * 8)
+                _n_fec = sc.payload_fec_total_bits(n_sym_bytes)
+                _sym_dur = (_n_fec * sf.CHIPS_PER_SYMBOL) / chip_rate_hz
+                _rlnc_rx_timeout = max(120.0, (2 + _n_coded) * _sym_dur * 1.5)
                 rlnc_stats = live_rx_decode(
-                    duration_s=90.0,  # N_CODED=K+max(120,K*8) symbols at ~655ms each; timeout → re-listen
+                    duration_s=_rlnc_rx_timeout,
                     block_seconds=3.0,
                     lna_db=args.rx_lna,
                     vga_db=args.rx_vga,
@@ -2170,7 +2174,11 @@ def main() -> int:
             print(f" done ({n_sent} symbols)")
             if coord:
                 print("  coord: waiting for respond to decode payload...", flush=True)
-                coord.wait_for_switch()
+                try:
+                    coord.wait_for_switch()
+                except (ConnectionError, TimeoutError) as e:
+                    print(f"  coord: respond side failed ({e})", flush=True)
+                    return 1
                 print("  coord: respond decoded — switching to RX for payload ACK", flush=True)
                 coord.send_switch()
 
