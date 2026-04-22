@@ -15,25 +15,9 @@ All calls are blocking.  No background threads.  No asyncio.
 from __future__ import annotations
 
 import json
+import select
 import socket
 import time
-
-
-def _send(conn: socket.socket, msg: dict) -> None:
-    conn.sendall((json.dumps(msg) + "\n").encode())
-
-
-def _recv(conn: socket.socket, rfile, timeout: float = 300.0) -> dict:
-    conn.settimeout(timeout)
-    try:
-        line = rfile.readline()
-    except OSError:
-        raise TimeoutError("coord: timed out waiting for peer")
-    finally:
-        conn.settimeout(None)
-    if not line:
-        raise ConnectionError("coord: peer disconnected")
-    return json.loads(line.decode())
 
 
 class Coord:
@@ -42,24 +26,44 @@ class Coord:
     def __init__(self, conn: socket.socket) -> None:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._conn = conn
-        self._rfile = conn.makefile("rb")
+        self._buf = b""
+
+    def _send(self, msg: dict) -> None:
+        self._conn.sendall((json.dumps(msg) + "\n").encode())
+
+    def _recv(self, timeout: float) -> dict:
+        """Read one newline-delimited JSON message.  Raises TimeoutError."""
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self._buf:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("coord: timed out waiting for peer")
+            ready, _, _ = select.select([self._conn], [], [], remaining)
+            if not ready:
+                raise TimeoutError("coord: timed out waiting for peer")
+            chunk = self._conn.recv(4096)
+            if not chunk:
+                raise ConnectionError("coord: peer disconnected")
+            self._buf += chunk
+        line, self._buf = self._buf.split(b"\n", 1)
+        return json.loads(line)
 
     def send_ready(self) -> None:
-        _send(self._conn, {"type": "ready"})
+        self._send({"type": "ready"})
 
     def wait_for_ready(self) -> None:
-        msg = _recv(self._conn, self._rfile, timeout=120.0)
+        msg = self._recv(timeout=120.0)
         if msg["type"] != "ready":
             raise RuntimeError(f"coord: expected 'ready', got {msg!r}")
 
     def send_switch(self) -> None:
-        _send(self._conn, {"type": "switch"})
+        self._send({"type": "switch"})
 
     def wait_for_switch(self, timeout: float = 300.0) -> bool:
         """Block until 'switch' received.  Returns True on success.
         With short timeout, does a non-blocking peek (returns False if nothing)."""
         try:
-            msg = _recv(self._conn, self._rfile, timeout=max(0.01, timeout))
+            msg = self._recv(timeout=timeout)
         except TimeoutError:
             return False
         if msg["type"] != "switch":
