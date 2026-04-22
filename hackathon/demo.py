@@ -1892,7 +1892,6 @@ def main() -> int:
                     print(f"  payload decode incomplete "
                           f"({received_count} symbols received)")
         # sdr.__exit__ closes device here
-        if coord:
         return 0
 
     # ── mode == "call": TX hail → listen for ACK → session keys ──────────
@@ -2217,7 +2216,6 @@ def main() -> int:
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
-        if coord:
         return 0
 
     # mode == "tx"
