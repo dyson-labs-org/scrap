@@ -1777,6 +1777,7 @@ def main() -> int:
     
                 ack_start = time.time()
                 ack_round = 0
+                _ack_early_exit = False
                 try:
                     while time.time() - ack_start < ACK_TX_WINDOW:
                         ack_round += 1
@@ -1792,6 +1793,11 @@ def main() -> int:
                             device=sdr.device,
                         )
                         print(" done")
+                        if coord and coord.has_data():
+                            coord.wait_for_switch()  # call decoded ACK
+                            print("  coord: caller decoded ACK — stopping early")
+                            _ack_early_exit = True
+                            break
                 except KeyboardInterrupt:
                     print("  interrupted")
                 print()
@@ -1799,7 +1805,10 @@ def main() -> int:
                 print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
                 print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
                 if coord:
-                    print("  coord: ACK TX done — telling caller to TX payload", flush=True)
+                    if _ack_early_exit:
+                        print("  coord: ACK TX done (early) — telling caller to TX payload", flush=True)
+                    else:
+                        print("  coord: ACK TX done — telling caller to TX payload", flush=True)
                     coord.send_switch()
 
                 # ── Phase 3: RLNC payload RX ──────────────────────────────────
@@ -1827,16 +1836,22 @@ def main() -> int:
                       f"static PPM (no auto-retune)")
 
                 received_count = 0
+                # Pre-seed the RLNC RX with the hail-phase frequency offset
+                # so the decoder doesn't waste blocks re-estimating via FFT.
+                _hail_freq_offset = (hail_stats.get("final_center_hz", sdr.center_hz)
+                                     - sdr.center_hz)
+                if abs(_hail_freq_offset) > 1.0:
+                    print(f"  pre-seeded freq offset: {_hail_freq_offset:+.0f} Hz")
 
                 def _payload_sym_fn(block_data):
                     nonlocal received_count
-                    # Decode every RLNC symbol found in this block (continuous stream).
                     sym_results = sisl_rx.decode_all_payload_in_block(
                         block_data, n_sym_bytes,
                         samps_per_chip=2,
                         samp_hz=chip_rate_hz * 2,
                         signal_threshold=args.signal_threshold,
                         max_symbols_per_block=8,
+                        freq_offset_hz=_hail_freq_offset if abs(_hail_freq_offset) > 1.0 else None,
                     )
                     # sym_results may be: [] (truly empty), a sentinel acq-fail
                     # dict wrapped in a list, or a list of decoded symbols.
@@ -1956,6 +1971,10 @@ def main() -> int:
                     print(f"  payload ACK burst {_ack_n} done, "
                           f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
                           flush=True)
+                    if coord and coord.has_data():
+                        coord.wait_for_switch()  # call decoded payload ACK
+                        print("  coord: caller decoded payload ACK — stopping early")
+                        break
                 print("  payload ACK TX complete")
                 if coord:
                     print("  coord: payload ACK done — session complete", flush=True)
@@ -2096,8 +2115,9 @@ def main() -> int:
 
             # ── Phase 3: RLNC payload TX ──────────────────────────────────
             if coord:
-                print("  coord: waiting for respond to finish ACK TX...", flush=True)
-                coord.wait_for_switch()
+                print("  coord: ACK decoded — telling respond to stop ACK TX", flush=True)
+                coord.send_switch()  # tell respond: ACK decoded, stop TX
+                coord.wait_for_switch()  # wait for respond's "ACK TX done"
                 print("  coord: respond done — switching to TX payload", flush=True)
             else:
                 # No coord: estimate when responder's ACK window ends
@@ -2232,11 +2252,9 @@ def main() -> int:
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
             if coord:
-                # live_rx_decode may have exited via coord_fd readability
-                # (respond sent "ACK done") or via exit_on_decrypt.
-                # Consume the "ACK done" switch if present.
-                if coord.has_data():
-                    coord.wait_for_switch()
+                print("  coord: payload ACK decoded — telling respond to stop", flush=True)
+                coord.send_switch()  # tell respond: decoded, stop TX
+                coord.wait_for_switch()  # wait for respond's "ACK TX done"
                 print("  coord: session complete", flush=True)
         else:
             print(f"  timeout — payload ACK not received "
