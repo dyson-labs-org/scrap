@@ -46,28 +46,24 @@ class Coord:
 
     def send_ready(self) -> None:
         _send(self._conn, {"type": "ready"})
-        print("  coord: sent ready", flush=True)
 
     def wait_for_ready(self) -> None:
         msg = _recv(self._conn, self._rfile, timeout=120.0)
         if msg["type"] != "ready":
             raise RuntimeError(f"coord: expected 'ready', got {msg!r}")
-        print("  coord: respond side ready", flush=True)
 
     def send_switch(self) -> None:
         _send(self._conn, {"type": "switch"})
-        print("  coord: sent switch", flush=True)
 
     def wait_for_switch(self, timeout: float = 300.0) -> bool:
         """Block until 'switch' received.  Returns True on success.
-        With timeout=0, does a non-blocking peek (returns False if nothing)."""
+        With short timeout, does a non-blocking peek (returns False if nothing)."""
         try:
             msg = _recv(self._conn, self._rfile, timeout=max(0.01, timeout))
         except TimeoutError:
             return False
         if msg["type"] != "switch":
             raise RuntimeError(f"coord: expected 'switch', got {msg!r}")
-        print("  coord: received switch", flush=True)
         return True
 
 

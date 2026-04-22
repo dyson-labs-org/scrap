@@ -1672,9 +1672,11 @@ def main() -> int:
         if _coord_host in ("0.0.0.0", ""):
             coord = _coord_mod.listen(_coord_port)
             coord.wait_for_ready()
+            print("  coord: respond side ready", flush=True)
         else:
             coord = _coord_mod.connect(_coord_host, _coord_port)
             coord.send_ready()
+            print("  coord: ready, waiting for hail", flush=True)
 
     # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
@@ -1745,8 +1747,10 @@ def main() -> int:
     
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
                 if coord:
-                    coord.send_switch()  # tell call: hail decoded, stop TX'ing
-                    coord.wait_for_switch()  # wait for call to confirm it stopped
+                    print("  coord: hail decoded — telling caller to stop TX", flush=True)
+                    coord.send_switch()
+                    coord.wait_for_switch()
+                    print("  coord: caller stopped — starting ACK TX", flush=True)
                 responder_eph = sc.Ephemeral()
                 resp_eph_priv_peek = responder_eph.peek()
                 dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
@@ -1789,7 +1793,8 @@ def main() -> int:
                 print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
                 print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
                 if coord:
-                    coord.send_switch()  # tell call: ACK TX done, your turn to TX payload
+                    print("  coord: ACK TX done — telling caller to TX payload", flush=True)
+                    coord.send_switch()
 
                 # ── Phase 3: RLNC payload RX ──────────────────────────────────
                 K = args.rlnc_k
@@ -1901,8 +1906,10 @@ def main() -> int:
                 ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
 
                 if coord:
-                    coord.send_switch()  # tell call: payload decoded
-                    coord.wait_for_switch()  # wait for call to finish payload TX
+                    print("  coord: payload decoded — telling caller to stop TX", flush=True)
+                    coord.send_switch()
+                    coord.wait_for_switch()
+                    print("  coord: caller stopped — starting payload ACK TX", flush=True)
 
                 import time as _time
                 _ack_deadline = _time.monotonic() + 120.0
@@ -1928,7 +1935,8 @@ def main() -> int:
                           flush=True)
                 print("  payload ACK TX complete")
                 if coord:
-                    coord.send_switch()  # tell call: payload ACK done
+                    print("  coord: payload ACK done — session complete", flush=True)
+                    coord.send_switch()
                 break  # exit while True: — session complete
         # sdr.__exit__ closes device here
         return 0
@@ -2010,9 +2018,10 @@ def main() -> int:
                         device=call_sdr.device,
                     )
                     if coord.wait_for_switch(timeout=0.1):
-                        print(f"  hail pass {hail_pass} — respond decoded",
+                        print(f"  phase 1: respond decoded hail after "
+                              f"{hail_pass} passes — switching to RX",
                               flush=True)
-                        coord.send_switch()  # confirm: hail TX stopped
+                        coord.send_switch()
                         break
             else:
                 _pass_repeats = max(1, int(
@@ -2064,7 +2073,9 @@ def main() -> int:
 
             # ── Phase 3: RLNC payload TX ──────────────────────────────────
             if coord:
-                coord.wait_for_switch()  # wait for respond to finish ACK TX
+                print("  coord: waiting for respond to finish ACK TX...", flush=True)
+                coord.wait_for_switch()
+                print("  coord: respond done — switching to TX payload", flush=True)
             else:
                 # No coord: estimate when responder's ACK window ends
                 _resp_window_end = (phase1_start_time
@@ -2158,8 +2169,10 @@ def main() -> int:
             )
             print(f" done ({n_sent} symbols)")
             if coord:
-                coord.wait_for_switch()  # wait for respond: payload decoded
-                coord.send_switch()  # tell respond: payload TX done, go ahead with ACK
+                print("  coord: waiting for respond to decode payload...", flush=True)
+                coord.wait_for_switch()
+                print("  coord: respond decoded — switching to RX for payload ACK", flush=True)
+                coord.send_switch()
 
             comb_id = n_sent
 
@@ -2189,7 +2202,9 @@ def main() -> int:
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
             if coord:
-                coord.wait_for_switch()  # wait for respond to finish payload ACK TX
+                print("  coord: waiting for respond to finish payload ACK...", flush=True)
+                coord.wait_for_switch()
+                print("  coord: session complete", flush=True)
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
