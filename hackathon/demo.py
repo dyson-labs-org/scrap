@@ -2035,6 +2035,7 @@ def main() -> int:
 
                 import time as _time
                 _pack_n = [0]
+                _MIN_ACK_FRAMES = 20  # TX at least this many before checking coord
                 def _payload_ack_gen():
                     _t0 = _time.monotonic()
                     while _time.monotonic() - _t0 < 120.0:
@@ -2043,10 +2044,12 @@ def main() -> int:
                         chips = sf.tx_bits_to_chips(bits)
                         yield upsample_chips_to_samples(chips, SAMPS_PER_CHIP)
                         _pack_n[0] += 1
-                        if coord and coord.has_data():
+                        # Don't check coord until we've TX'd enough frames for
+                        # the caller to acquire and decode at least one.
+                        if coord and _pack_n[0] >= _MIN_ACK_FRAMES and coord.has_data():
                             coord.wait_for_switch()
                             print("  coord: caller decoded payload ACK — stopping early")
-                            yield upsample_chips_to_samples(chips, SAMPS_PER_CHIP)  # guard frame — ensures current USB transfer completes cleanly
+                            yield upsample_chips_to_samples(chips, SAMPS_PER_CHIP)
                             return
 
                 print(f"  TX payload ACK: continuous stream"
