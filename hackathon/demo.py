@@ -1903,13 +1903,15 @@ def main() -> int:
                 else:
                     _rlnc_rx_timeout = 600.0  # fallback; coord_fd is primary
 
+                _rlnc_center_hz = hail_stats.get(
+                    "final_center_hz", sdr.center_hz)
                 rlnc_stats = live_rx_decode(
                     duration_s=_rlnc_rx_timeout,
                     block_seconds=3.0,
                     lna_db=args.rx_lna,
                     vga_db=args.rx_vga,
                     amp_on=args.rx_amp,
-                    center_hz=sdr.center_hz,
+                    center_hz=_rlnc_center_hz,
                     device_name=args.device,
                     signal_threshold=args.signal_threshold,
                     samps_per_chip=active_samps_per_chip,
@@ -2238,6 +2240,7 @@ def main() -> int:
                 "final_center_hz", call_sdr.center_hz)
             print(f"  TX complete ({comb_id} symbols total). "
                   f"Listening for payload ACK...")
+            _phase4_vga = ack_stats.get("final_vga_db", float(args.rx_vga))
             rlnc_ack_stats = live_rx_decode(
                 duration_s=600.0 if coord else max(60.0, args.duration),
                 block_seconds=3.0,
@@ -2251,6 +2254,8 @@ def main() -> int:
                 samps_per_chip=active_samps_per_chip,
                 exit_on_decrypt=True,
                 decode_fn=_payload_ack_fn,
+                initial_vga_db=_phase4_vga,
+                disable_auto_ppm=True,
                 coord_fd=coord.fileno if coord else None,
             )
         # call_sdr.__exit__ closes device here
