@@ -2331,8 +2331,12 @@ def main() -> int:
             print(f"  TX complete ({comb_id} symbols total). "
                   f"Listening for payload ACK...")
             _phase4_vga = ack_stats.get("final_vga_db", float(args.rx_vga))
+            # Phase 4 RX must NOT pass coord_fd: the respond side sends
+            # coord messages during payload ACK TX (early-exit check), and
+            # the coord_fd select in live_rx_decode would break out before
+            # the caller has decoded the payload ACK.
             rlnc_ack_stats = live_rx_decode(
-                duration_s=600.0 if coord else max(60.0, args.duration),
+                duration_s=120.0 if coord else max(60.0, args.duration),
                 block_seconds=3.0,
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
@@ -2346,7 +2350,6 @@ def main() -> int:
                 decode_fn=_payload_ack_fn,
                 initial_vga_db=_phase4_vga,
                 disable_auto_ppm=True,
-                coord_fd=coord.fileno if coord else None,
                 flush_after_tx=True,
             )
         # call_sdr.__exit__ closes device here
