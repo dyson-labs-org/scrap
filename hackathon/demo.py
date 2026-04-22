@@ -420,17 +420,12 @@ def soapy_tx_burst(
     repeats: int = 1,
     device_str: str = "driver=hackrf",
     device=None,
-    stop_event=None,
-) -> bool:
+) -> None:
     """Transmit a finite sample buffer via SoapySDR (no GnuRadio).
 
     If `device` is provided (a pre-opened SoapySDR.Device), it is used
     directly and NOT closed on return — the caller owns its lifetime.
     Otherwise a device is opened via `device_str`, used, and closed.
-
-    If `stop_event` (a threading.Event) is provided, the write loop checks
-    it every chunk (~8ms) and aborts early if set.  Returns True if aborted
-    early, False if the full buffer was transmitted.
     """
     import SoapySDR
     from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
@@ -461,11 +456,7 @@ def soapy_tx_burst(
     last_end = len(full)
     t_write = _time_tx2.time()
     _chk = last_end // 6
-    aborted = False
     while offset < last_end:
-        if stop_event is not None and stop_event.is_set():
-            aborted = True
-            break
         end = min(offset + chunk, last_end)
         is_last = (end == last_end)
         flags = SoapySDR.SOAPY_SDR_END_BURST if is_last else 0
@@ -482,7 +473,7 @@ def soapy_tx_burst(
             print(f'  [TX ERROR] writeStream ret={sr.ret}', file=sys.stderr)
             break
     if _sisl_dbg:
-        print(f"  [DBG tx] loop done {_time_tx2.time()-t_write:.2f}s aborted={aborted}", file=_sys_tx.stderr, flush=True)
+        print(f"  [DBG tx] loop done {_time_tx2.time()-t_write:.2f}s", file=_sys_tx.stderr, flush=True)
 
     # Drain USB TX FIFO before deactivating.
     # hackrf#1570: deactivateStream → hackrf_stop_tx → pthread_join hangs on
@@ -508,7 +499,6 @@ def soapy_tx_burst(
         print(f"  [DBG tx] closeStream {_time_tx2.time()-t_cs:.3f}s", file=_sys_tx.stderr, flush=True)
     if _owns_device:
         device.close()
-    return aborted
 
 
 def soapy_tx_streaming(
@@ -518,17 +508,13 @@ def soapy_tx_streaming(
     tx_vga_db: int = HACKRF_TX_VGA_DB,
     tx_amp_on: bool = HACKRF_TX_AMP_ON,
     device=None,
-    stop_event=None,
 ) -> int:
     """Stream-encode TX: encode and transmit symbols one at a time.
 
     `symbol_iter` yields np.ndarray sample buffers.  Each buffer is written
     to the TX stream in sequence without closing — chip-clock coherence is
     preserved across the entire session.  Memory usage is O(1 symbol) instead
-    of O(N symbols).
-
-    If `stop_event` fires, transmission stops between symbols.
-    Returns the number of symbols transmitted.
+    of O(N symbols).  Returns the number of symbols transmitted.
     """
     import SoapySDR
     from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
@@ -547,13 +533,9 @@ def soapy_tx_streaming(
     n_sent = 0
     try:
         for samples in symbol_iter:
-            if stop_event is not None and stop_event.is_set():
-                break
             offset = 0
             last_end = len(samples)
             while offset < last_end:
-                if stop_event is not None and stop_event.is_set():
-                    break
                 end = min(offset + chunk, last_end)
                 sr = device.writeStream(
                     stream, [samples[offset:end]], end - offset,
@@ -1526,11 +1508,11 @@ def main() -> int:
                              "bandwidth equals the chip rate, so 2 Mcps "
                              "occupies 2 MHz. TX and RX must use the same "
                              "chip rate.")
-    parser.add_argument("--coord-port", type=int, default=None,
-                        help="WebSocket coordination port for TX/RX role swapping. "
-                             "call side listens as WS server; respond side connects "
-                             "as client on localhost. Omit to preserve current "
-                             "single-pass behavior exactly.")
+    parser.add_argument("--coord", type=str, default=None,
+                        help="TCP coordination for half-duplex TX/RX role swapping. "
+                             "Format: host:port. Use 0.0.0.0:PORT to listen (call "
+                             "side), or REMOTE_IP:PORT to connect (respond side). "
+                             "Omit for single-pass timing-based behavior.")
     parser.add_argument("--payload-out", type=str,
                         default="/tmp/sisl_rlnc_payload.bin",
                         help="path where respond side writes received payload "
@@ -1673,33 +1655,24 @@ def main() -> int:
             print(f"  combined decrypt:{stats.get('combined_decrypts', 0)}")
         return 0 if stats["hails_decrypted"] > 0 else 1
 
-    # ── Optional WebSocket coordination channel (--coord-port) ───────────
-    # coord is None when --coord-port is omitted; all coord interactions
-    # below are guarded by `if coord:` so existing behavior is unchanged.
-    # TODO(hackathon-ipj): wrap respond/call branches in a role-swap loop:
-    #   while True:
-    #       _run_call(args, coord, seq) / _run_respond(args, coord, seq)
-    #       if coord is None: break
-    #       role, seq = swap(role), seq+1
-    # Currently the coord hookpoints are inline; extraction to _run_call /
-    # _run_respond is deferred because both blocks exceed 200 lines each.
+    # ── Optional TCP coordination channel (--coord host:port) ────────────
+    # Half-duplex test harness: alternating-turns protocol via TCP.
+    # coord is None when --coord is omitted; all coord interactions below
+    # are guarded by `if coord:` so existing timing-based behavior is unchanged.
     coord = None
-    if args.coord_port and args.mode in ("call", "respond"):
+    if args.coord and args.mode in ("call", "respond"):
         import sisl_coord as _coord_mod
-        if args.mode == "call":
-            _coord_server = _coord_mod.CoordServer()
-            _coord_server.start(args.coord_port)
-            coord = _coord_server
-            coord.wait_for_ready()  # block until respond side connects and sends "ready"
+        _coord_host, _, _coord_port = args.coord.rpartition(":")
+        _coord_port = int(_coord_port)
+        if _coord_host in ("0.0.0.0", ""):
+            coord = _coord_mod.listen(_coord_port)
+            coord.wait_for_ready()
         else:
-            _coord_client = _coord_mod.CoordClient()
-            _coord_client.connect("127.0.0.1", args.coord_port)
-            coord = _coord_client
+            coord = _coord_mod.connect(_coord_host, _coord_port)
+            coord.send_ready()
 
     # ── mode == "respond": listen for hail → TX ACK → RLNC RX ────────────
     if args.mode == "respond":
-        if coord:
-            coord.send_ready()
         responder_static = demo_responder_key()
         print(f"respond: listening for hail on {args.freq:.1f} MHz, "
               f"will TX ACK on decrypt")
@@ -1767,11 +1740,7 @@ def main() -> int:
     
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
                 if coord:
-                    print(f"  coord: hail decoded — notifying caller", flush=True)
-                    coord.send_received()
-                    print(f"  coord: waiting for caller to switch to RX...", flush=True)
-                    coord.wait_for_switch()
-                    print(f"  coord: caller switched to RX — starting ACK TX", flush=True)
+                    coord.wait_for_switch()  # wait for call to finish hail TX
                 responder_eph = sc.Ephemeral()
                 resp_eph_priv_peek = responder_eph.peek()
                 dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
@@ -1813,7 +1782,9 @@ def main() -> int:
                 print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
                 print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
                 print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
-    
+                if coord:
+                    coord.send_switch()  # tell call: ACK TX done, your turn to TX payload
+
                 # ── Phase 3: RLNC payload RX ──────────────────────────────────
                 K = args.rlnc_k
                 from sparse_rlnc import fragment_payload as _frag
@@ -1919,20 +1890,8 @@ def main() -> int:
                     # use session.build_ack() — handles key direction and seq nonce.
                     ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
     
-                    # With coord: notify caller immediately so it stops TX'ing
-                    # payload and switches to RX; then TX payload ACK once the
-                    # caller confirms it has switched.
-                    # Without coord: TX for 120s so caller catches it after its
-                    # RLNC TX window expires.
                     if coord:
-                        print(f"  coord: payload decoded — notifying caller",
-                              flush=True)
-                        coord.send_received()
-                        print(f"  coord: waiting for caller to switch to RX...",
-                              flush=True)
-                        coord.wait_for_switch()
-                        print(f"  coord: caller switched to RX — starting payload ACK TX",
-                              flush=True)
+                        coord.wait_for_switch()  # wait for call to finish payload TX
 
                     import time as _time
                     _ack_deadline = _time.monotonic() + 120.0
@@ -1957,6 +1916,8 @@ def main() -> int:
                               f"{max(0, _ack_deadline - _time.monotonic()):.0f}s remaining",
                               flush=True)
                     print("  payload ACK TX complete")
+                    if coord:
+                        coord.send_switch()  # tell call: payload ACK done
                     break  # exit while True: — session complete
                 else:
                     print(f"  payload decode incomplete "
@@ -2016,62 +1977,30 @@ def main() -> int:
 
         print(f"call: hailing on {args.freq:.1f} MHz")
         print(f"  nonce:         {body.body_nonce.hex()}")
-        if coord:
-            print(f"  phase 1:       TX hail (coord-driven, loops until respond signals received)")
-        else:
-            print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
+        print(f"  phase 1:       TX hail for {INITIAL_TX_DURATION:.0f}s (continuous)")
         print(f"  phase 2:       RX listening for ACK")
-        print(f"  max rounds:    {int(args.duration / (5+12))}")
 
         with SoapyDevice(args.device, device_str=_call_device_str, center_hz=center_hz) as call_sdr:
             print(f"call: pinned to HackRF {call_sdr.serial.lstrip('0')[:16]} for TX")
             # ── Phase 1: TX hail ──────────────────────────────────────────
             phase1_start_time = time.time()
-            hail_switch_time = None
-
+            initial_repeats = max(1, int(
+                INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
+            print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                  f"({initial_repeats} repeats, "
+                  f"{INITIAL_TX_DURATION:.0f}s continuous)...",
+                  end="", flush=True)
+            soapy_tx_burst(
+                hail_samples, call_sdr.center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=args.tx_vga,
+                tx_amp_on=args.tx_amp,
+                repeats=initial_repeats,
+                device=call_sdr.device,
+            )
+            print(" done", flush=True)
             if coord:
-                _hail_received_event = coord.wait_for_received_async()
-                _hail_pass_repeats = max(1, int(5.0 * chip_rate_hz / len(hail_chips)))
-                hail_pass = 0
-                print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                      f"(coord-driven, {_hail_pass_repeats} repeats/pass)...", flush=True)
-                while True:
-                    hail_pass += 1
-                    print(f"  hail pass {hail_pass}...", end="", flush=True)
-                    aborted = soapy_tx_burst(
-                        hail_samples, call_sdr.center_hz,
-                        samp_hz=SAMP_RATE_HZ,
-                        tx_vga_db=args.tx_vga,
-                        tx_amp_on=args.tx_amp,
-                        repeats=_hail_pass_repeats,
-                        device=call_sdr.device,
-                        stop_event=_hail_received_event,
-                    )
-                    if _hail_received_event.is_set():
-                        print(f" aborted — coord: respond received hail"
-                              f" after {hail_pass} pass(es)", flush=True)
-                        hail_switch_time = time.time()
-                        print(f"  coord: switching to RX for ACK — sending switch to respond",
-                              flush=True)
-                        coord.send_switch()
-                        break
-                    print(" done", flush=True)
-            else:
-                initial_repeats = max(1, int(
-                    INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
-                print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                      f"({initial_repeats} repeats, "
-                      f"{INITIAL_TX_DURATION:.0f}s continuous)...",
-                      end="", flush=True)
-                soapy_tx_burst(
-                    hail_samples, call_sdr.center_hz,
-                    samp_hz=SAMP_RATE_HZ,
-                    tx_vga_db=args.tx_vga,
-                    tx_amp_on=args.tx_amp,
-                    repeats=initial_repeats,
-                    device=call_sdr.device,
-                )
-                print(" done", flush=True)
+                coord.send_switch()  # tell respond: hail TX done, your turn to TX ACK
 
             # ── Phase 2: RX listen for ACK ────────────────────────────────
             _phase2_center_hz = call_sdr.center_hz
@@ -2105,35 +2034,18 @@ def main() -> int:
                   flush=True)
 
             # ── Phase 3: RLNC payload TX ──────────────────────────────────
-            # Wait until the responder's ACK TX window has expired before
-            # starting RLNC TX. The responder transmits ACKs for ACK_TX_WINDOW
-            # seconds from when it decoded the hail, then switches to payload RX.
-            #
-            # Timing race (hackathon-2sb): anchoring to ack_recv_time alone is
-            # unsafe — if the ACK arrives 40s into the responder's window, the
-            # caller would wait another ACK_TX_WINDOW (50s) and start RLNC TX
-            # at the 90s mark, exactly when the responder's 90s RLNC RX window
-            # expires. Instead, estimate when the responder's ACK window ends:
-            # the responder decoded the hail no later than INITIAL_TX_DURATION
-            # after phase1 started (the last possible moment it could have
-            # received the hail TX). Its ACK window therefore ends by:
-            #   phase1_start_time + INITIAL_TX_DURATION + ACK_TX_WINDOW
-            # Use this as the anchor; fall back to ack_recv_time + ACK_TX_WINDOW
-            # if that has already passed (clock drift / long hail decode).
-            if hail_switch_time is not None:
-                # Coord: we know exactly when respond started TX'ing ACK
-                # (immediately after we sent switch). Its window ends at:
-                _resp_window_end = hail_switch_time + ACK_TX_WINDOW
+            if coord:
+                coord.wait_for_switch()  # wait for respond to finish ACK TX
             else:
-                # No coord: conservatively estimate from phase1 start
+                # No coord: estimate when responder's ACK window ends
                 _resp_window_end = (phase1_start_time
                                     + INITIAL_TX_DURATION + ACK_TX_WINDOW)
-            _phase3_ready_at = max(_resp_window_end, ack_recv_time + 2.0)
-            _phase3_delay = _phase3_ready_at - time.time()
-            print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
-                  flush=True)
-            if _phase3_delay > 0:
-                time.sleep(_phase3_delay)
+                _phase3_ready_at = max(_resp_window_end, ack_recv_time + 2.0)
+                _phase3_delay = _phase3_ready_at - time.time()
+                print(f"  waiting {_phase3_delay:.1f}s for responder ACK window to expire...",
+                      flush=True)
+                if _phase3_delay > 0:
+                    time.sleep(_phase3_delay)
 
             dh2_sess = sc.ecdh(caller_static, dh.responder_eph_pub)
             resp_eph_pub_can = sc.pubkey_to_compressed(dh.responder_eph_pub)
@@ -2192,55 +2104,31 @@ def main() -> int:
                            else args.tx_vga)
 
             # Stream-encode TX: encode and transmit symbols one at a time
-            # through a single open USB stream.  Chip-clock coherence is
-            # preserved (stream never closes between symbols) while memory
-            # is O(1 symbol) instead of O(N symbols).
-            #
-            # Each symbol takes ~10ms to encode and ~655ms to transmit,
-            # so the encoder easily keeps ahead of the TX rate.
+            # through a single open USB stream.  O(1 symbol) memory.
             N_WARMUP = 2
             N_CODED = K + max(120, K * 8)
             total_sym = N_WARMUP + N_CODED
             total_dur_s = total_sym * sym_duration_s
 
-            if coord:
-                _received_event = coord.wait_for_received_async()
-            else:
-                _received_event = None
-
             def _symbol_generator():
                 for _ in range(N_WARMUP):
                     yield _encode_symbol_to_samples(session.next_tx_frame())
-                for i in range(N_CODED):
+                for _ in range(N_CODED):
                     yield _encode_symbol_to_samples(session.next_tx_frame())
 
-            tx_pass = 0
-            while True:
-                tx_pass += 1
-                print(f"  TX pass {tx_pass}: {total_sym} symbols "
-                      f"({total_dur_s:.0f}s, streaming)...",
-                      end="", flush=True)
-                n_sent = soapy_tx_streaming(
-                    _symbol_generator(),
-                    call_sdr.center_hz,
-                    samp_hz=SAMP_RATE_HZ,
-                    tx_vga_db=rlnc_tx_vga,
-                    tx_amp_on=args.tx_amp,
-                    device=call_sdr.device,
-                    stop_event=_received_event,
-                )
-                if _received_event is not None and _received_event.is_set():
-                    print(f" aborted at symbol {n_sent} — coord: respond"
-                          f" received payload after {tx_pass} pass(es)",
-                          flush=True)
-                    print(f"  coord: switching to RX for payload ACK"
-                          f" — sending switch to respond", flush=True)
-                    coord.send_switch()
-                    break
-                print(f" done ({n_sent} symbols)")
-                if not coord:
-                    break  # no coord: single pass
-                print(f"  coord: no received signal yet, re-TX'ing...")
+            print(f"  TX {total_sym} symbols ({total_dur_s:.0f}s, streaming)...",
+                  end="", flush=True)
+            n_sent = soapy_tx_streaming(
+                _symbol_generator(),
+                call_sdr.center_hz,
+                samp_hz=SAMP_RATE_HZ,
+                tx_vga_db=rlnc_tx_vga,
+                tx_amp_on=args.tx_amp,
+                device=call_sdr.device,
+            )
+            print(f" done ({n_sent} symbols)")
+            if coord:
+                coord.send_switch()  # tell respond: payload TX done
 
             comb_id = n_sent
 
@@ -2267,6 +2155,8 @@ def main() -> int:
 
         if rlnc_ack_stats.get("hails_decrypted", 0) > 0:
             print(f"\033[1;32m  PAYLOAD DELIVERED AND ACKNOWLEDGED\033[0m")
+            if coord:
+                coord.wait_for_switch()  # wait for respond to finish payload ACK TX
         else:
             print(f"  timeout — payload ACK not received "
                   f"after {comb_id} symbols TX'd")
