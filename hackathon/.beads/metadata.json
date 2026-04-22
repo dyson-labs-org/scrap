@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "server",
-  "dolt_database": "hackathon",
-  "project_id": "62368b9b-9126-493b-9d14-88a376e46b13"
-}
