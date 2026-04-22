@@ -1299,6 +1299,7 @@ def live_rx_decode(
                         accumulator.reset()
     except KeyboardInterrupt:
         print("  interrupted")
+        raise  # propagate so outer loops exit cleanly
     finally:
         # Stop decode thread before reader — decode_stop lets the worker exit
         # its get() loop cleanly without waiting for a None sentinel.
