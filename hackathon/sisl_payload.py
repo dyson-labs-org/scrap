@@ -5,6 +5,7 @@ import math
 import secrets
 import struct
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 from sisl_crypto import derive_payload_iv, derive_rlnc_ack_iv
@@ -49,13 +50,15 @@ def decode_payload_symbol(
     session_prk: bytes,
     session_id: bytes,
 ) -> tuple[int, bytes]:
+    if len(frame) < 4 + 16:
+        raise AEADDecryptError("payload frame too short")
     comb_id_bytes = frame[:4]
     comb_id = struct.unpack(">I", comb_id_bytes)[0]
     iv = derive_payload_iv(session_prk, comb_id)
     aad = session_id + comb_id_bytes
     try:
         plaintext = ChaCha20Poly1305(direction_key).decrypt(iv, frame[4:], aad)
-    except Exception as e:
+    except InvalidTag as e:
         raise AEADDecryptError("AEAD authentication failed") from e
     return comb_id, plaintext
 
@@ -111,7 +114,7 @@ def decode_ack(
     try:
         h_decrypted = ChaCha20Poly1305(reverse_direction_key).decrypt(
             iv, frame[4:], aad)
-    except Exception:
+    except InvalidTag:
         return False
     block = _padded_block(payload, K)
     expected_hash = hashlib.sha256(session_id + block).digest()

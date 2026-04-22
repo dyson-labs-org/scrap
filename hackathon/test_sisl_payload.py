@@ -62,6 +62,12 @@ def test_payload_tampered_comb_id(session):
         decode_payload_symbol(bytes(frame), keys["p2p_tx_key"], prk, keys["session_id"])
 
 
+def test_payload_short_frame_rejected(session):
+    keys, prk = session
+    with pytest.raises(ValueError):
+        decode_payload_symbol(b"\x00\x01\x02", keys["p2p_tx_key"], prk, keys["session_id"])
+
+
 def test_ack_roundtrip(session):
     keys, prk = session
     payload = b"original payload bytes"

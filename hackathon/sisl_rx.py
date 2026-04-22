@@ -22,6 +22,11 @@ import sisl_framer as sf
 # of 4 admits most real signals and lets the periodicity check do
 # the real rejection. Override with --signal-threshold.
 _SIGNAL_FLOOR_RATIO = 4.0
+_PERIODICITY_BYPASS_MF_SCORE = 3.0
+_PERIODIC_RATIO_MIN = 0.15
+_SOFT_SCORE_MIN_HAIL_ACK = 10.0
+_SOFT_PTS_RATIO_MIN = 3.0
+_SOFT_SCORE_MIN_PAYLOAD = 5.0
 
 
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
@@ -500,7 +505,10 @@ def _acquire_and_track(
         # to WiFi/BT spikes inflating peak_mag.  A score >= 3.0 means the periodic
         # structure is 3x above the noise floor — the signal is real even if a
         # single spike makes periodic_ratio look small.
-        if _mf_score < 3.0 and periodic_ratio < 0.15:
+        if (
+            _mf_score < _PERIODICITY_BYPASS_MF_SCORE
+            and periodic_ratio < _PERIODIC_RATIO_MIN
+        ):
             return {
                 "status": "no_signal",
                 "peak_mag": peak_mag,
@@ -622,7 +630,10 @@ def _try_fec_decrypt(
         # meaningfully above the sidelobe floor — even if their absolute
         # score exceeds 10.0, a low pts_ratio means the candidate is not
         # distinctive relative to other positions in the block.
-        if abs(cand_score) <= 10.0 or cand_pts < 3.0:
+        if (
+            abs(cand_score) <= _SOFT_SCORE_MIN_HAIL_ACK
+            or cand_pts < _SOFT_PTS_RATIO_MIN
+        ):
             continue
 
         llr_diag = _extract_llrs_at_position(
@@ -954,7 +965,7 @@ def _decode_payload_candidates(
         # payload symbol provides a hard cryptographic check, so false
         # positives from lowering the gate are rejected by Poly1305 —
         # the cost is only wasted FEC decode cycles, not false accepts.
-        if abs(cand_score) <= 5.0:
+        if abs(cand_score) <= _SOFT_SCORE_MIN_PAYLOAD:
             continue
         if cand_offset + n_fec_bits > len(peak_values):
             continue

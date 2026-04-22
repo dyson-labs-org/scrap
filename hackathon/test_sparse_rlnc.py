@@ -39,6 +39,16 @@ def test_degree_range():
             assert 1 <= d <= K, f"K={K} u={u} d={d}"
 
 
+def test_robust_soliton_rejects_invalid_params():
+    import pytest
+    with pytest.raises(ValueError):
+        sr.robust_soliton_cdf(0)
+    with pytest.raises(ValueError):
+        sr.robust_soliton_cdf(16, c=0.0)
+    with pytest.raises(ValueError):
+        sr.robust_soliton_cdf(16, delta=1.0)
+
+
 def test_coefficients_unique():
     for K in (16, 32):
         for comb_id in range(5):

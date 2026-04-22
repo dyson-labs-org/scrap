@@ -69,6 +69,13 @@ def _gf_mul_vec(scalar: int, vec: np.ndarray) -> np.ndarray:
 
 @functools.lru_cache(maxsize=32)
 def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> tuple[float, ...]:
+    if K <= 0:
+        raise ValueError(f"K must be > 0, got {K}")
+    if c <= 0.0:
+        raise ValueError(f"c must be > 0, got {c}")
+    if not (0.0 < delta < 1.0):
+        raise ValueError(f"delta must be in (0, 1), got {delta}")
+
     rho = [0.0] * (K + 1)
     rho[1] = 1.0 / K
     for d in range(2, K + 1):
@@ -76,6 +83,7 @@ def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.1) -> tuple[floa
 
     R = c * math.log(K / delta) * math.sqrt(K)
     threshold = int(K / R)
+    threshold = max(1, min(K, threshold))
 
     tau = [0.0] * (K + 1)
     for d in range(1, K + 1):
@@ -127,6 +135,7 @@ def sample_coefficients(
 
     indices: list[int] = []
     coeffs: list[int] = []
+    seen_indices: set[int] = set()
     pos = 2
     attempts = 0
     while len(indices) < d and attempts < max_attempts:
@@ -136,7 +145,8 @@ def sample_coefficients(
         coeff = (coeff_raw % 255) + 1  # map 0..254 → 1..255 (always nonzero)
         pos += 5
         attempts += 1
-        if idx not in indices:
+        if idx not in seen_indices:
+            seen_indices.add(idx)
             indices.append(idx)
             coeffs.append(coeff)
 
