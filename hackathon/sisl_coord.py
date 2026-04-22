@@ -58,11 +58,17 @@ class Coord:
         _send(self._conn, {"type": "switch"})
         print("  coord: sent switch", flush=True)
 
-    def wait_for_switch(self) -> None:
-        msg = _recv(self._conn, self._rfile)
+    def wait_for_switch(self, timeout: float = 300.0) -> bool:
+        """Block until 'switch' received.  Returns True on success.
+        With timeout=0, does a non-blocking peek (returns False if nothing)."""
+        try:
+            msg = _recv(self._conn, self._rfile, timeout=max(0.01, timeout))
+        except TimeoutError:
+            return False
         if msg["type"] != "switch":
             raise RuntimeError(f"coord: expected 'switch', got {msg!r}")
         print("  coord: received switch", flush=True)
+        return True
 
 
 def listen(port: int) -> Coord:

@@ -1745,7 +1745,8 @@ def main() -> int:
     
                 # ── Phase 2: TX ACK ───────────────────────────────────────────
                 if coord:
-                    coord.wait_for_switch()  # wait for call to finish hail TX
+                    coord.send_switch()  # tell call: hail decoded, stop TX'ing
+                    coord.wait_for_switch()  # wait for call to confirm it stopped
                 responder_eph = sc.Ephemeral()
                 resp_eph_priv_peek = responder_eph.peek()
                 dh2_sess = sc.ecdh(resp_eph_priv_peek, decoded_hail.caller_static_pub)
@@ -1896,6 +1897,7 @@ def main() -> int:
                     ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
     
                     if coord:
+                        coord.send_switch()  # tell call: payload decoded
                         coord.wait_for_switch()  # wait for call to finish payload TX
 
                     import time as _time
@@ -1991,21 +1993,42 @@ def main() -> int:
             phase1_start_time = time.time()
             initial_repeats = max(1, int(
                 INITIAL_TX_DURATION * chip_rate_hz / len(hail_chips)))
-            print(f"\n  phase 1: \033[33mTX hail\033[0m "
-                  f"({initial_repeats} repeats, "
-                  f"{INITIAL_TX_DURATION:.0f}s continuous)...",
-                  end="", flush=True)
-            soapy_tx_burst(
-                hail_samples, call_sdr.center_hz,
-                samp_hz=SAMP_RATE_HZ,
-                tx_vga_db=args.tx_vga,
-                tx_amp_on=args.tx_amp,
-                repeats=initial_repeats,
-                device=call_sdr.device,
-            )
-            print(" done", flush=True)
             if coord:
-                coord.send_switch()  # tell respond: hail TX done, your turn to TX ACK
+                # Loop TX hail until respond signals it decoded (sends "switch").
+                hail_pass = 0
+                print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                      f"(coord: loop until respond decoded)...", flush=True)
+                while True:
+                    hail_pass += 1
+                    print(f"  hail pass {hail_pass} "
+                          f"({INITIAL_TX_DURATION:.0f}s)...",
+                          end="", flush=True)
+                    soapy_tx_burst(
+                        hail_samples, call_sdr.center_hz,
+                        samp_hz=SAMP_RATE_HZ,
+                        tx_vga_db=args.tx_vga,
+                        tx_amp_on=args.tx_amp,
+                        repeats=initial_repeats,
+                        device=call_sdr.device,
+                    )
+                    if coord.wait_for_switch(timeout=0.1):
+                        print(f" done — respond decoded hail", flush=True)
+                        break
+                    print(" done", flush=True)
+            else:
+                print(f"\n  phase 1: \033[33mTX hail\033[0m "
+                      f"({initial_repeats} repeats, "
+                      f"{INITIAL_TX_DURATION:.0f}s continuous)...",
+                      end="", flush=True)
+                soapy_tx_burst(
+                    hail_samples, call_sdr.center_hz,
+                    samp_hz=SAMP_RATE_HZ,
+                    tx_vga_db=args.tx_vga,
+                    tx_amp_on=args.tx_amp,
+                    repeats=initial_repeats,
+                    device=call_sdr.device,
+                )
+                print(" done", flush=True)
 
             # ── Phase 2: RX listen for ACK ────────────────────────────────
             _phase2_center_hz = call_sdr.center_hz
@@ -2134,7 +2157,8 @@ def main() -> int:
             )
             print(f" done ({n_sent} symbols)")
             if coord:
-                coord.send_switch()  # tell respond: payload TX done
+                coord.wait_for_switch()  # wait for respond: payload decoded
+                coord.send_switch()  # tell respond: payload TX done, go ahead with ACK
 
             comb_id = n_sent
 
