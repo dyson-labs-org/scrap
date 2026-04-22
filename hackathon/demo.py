@@ -1786,6 +1786,7 @@ def main() -> int:
                             coord.wait_for_switch()
                             print("  coord: caller decoded ACK — stopping early")
                             _ack_early = True
+                            yield ack_samples  # guard frame — ensures current USB transfer completes cleanly
                             return
 
                 print(f"  TX ACK: continuous stream"
@@ -1968,6 +1969,7 @@ def main() -> int:
                         if coord and coord.has_data():
                             coord.wait_for_switch()
                             print("  coord: caller decoded payload ACK — stopping early")
+                            yield upsample_chips_to_samples(chips, SAMPS_PER_CHIP)  # guard frame — ensures current USB transfer completes cleanly
                             return
 
                 print(f"  TX payload ACK: continuous stream"

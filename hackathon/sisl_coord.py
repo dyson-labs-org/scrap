@@ -30,6 +30,11 @@ class Coord:
 
     def __init__(self, conn: socket.socket) -> None:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, 'TCP_KEEPIDLE'):
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
         self._conn = conn
         self._buf = b""
 
@@ -63,7 +68,12 @@ class Coord:
         if b"\n" in self._buf:
             return True
         ready, _, _ = select.select([self._conn], [], [], 0)
-        return bool(ready)
+        if not ready:
+            return False
+        chunk = self._conn.recv(4096, socket.MSG_PEEK)
+        if not chunk:
+            raise ConnectionError("coord: peer disconnected")
+        return True
 
     def send_ready(self) -> None:
         self._send({"type": "ready"})
