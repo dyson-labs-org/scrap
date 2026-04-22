@@ -33,7 +33,7 @@ def _recv(conn: socket.socket, rfile, timeout: float = 300.0) -> dict:
         conn.settimeout(None)
     if not line:
         raise ConnectionError("coord: peer disconnected")
-    return json.loads(line)
+    return json.loads(line.decode())
 
 
 class Coord:
@@ -42,7 +42,7 @@ class Coord:
     def __init__(self, conn: socket.socket) -> None:
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._conn = conn
-        self._rfile = conn.makefile("r")
+        self._rfile = conn.makefile("rb")
 
     def send_ready(self) -> None:
         _send(self._conn, {"type": "ready"})
