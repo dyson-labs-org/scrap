@@ -1802,7 +1802,7 @@ def main() -> int:
                     print("  interrupted")
                 print()
                 print(f"\033[1;32m  ╔══════════════════════════════════════╗\033[0m")
-                print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT     ║\033[0m")
+                print(f"\033[1;32m  ║   HANDSHAKE COMPLETE — ACK SENT      ║\033[0m")
                 print(f"\033[1;32m  ╚══════════════════════════════════════╝\033[0m")
                 if coord:
                     if _ack_early_exit:
