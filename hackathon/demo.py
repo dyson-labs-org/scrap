@@ -511,6 +511,76 @@ def soapy_tx_burst(
     return aborted
 
 
+def soapy_tx_streaming(
+    symbol_iter,
+    center_hz: float,
+    samp_hz: float = SAMP_RATE_HZ,
+    tx_vga_db: int = HACKRF_TX_VGA_DB,
+    tx_amp_on: bool = HACKRF_TX_AMP_ON,
+    device=None,
+    stop_event=None,
+) -> int:
+    """Stream-encode TX: encode and transmit symbols one at a time.
+
+    `symbol_iter` yields np.ndarray sample buffers.  Each buffer is written
+    to the TX stream in sequence without closing — chip-clock coherence is
+    preserved across the entire session.  Memory usage is O(1 symbol) instead
+    of O(N symbols).
+
+    If `stop_event` fires, transmission stops between symbols.
+    Returns the number of symbols transmitted.
+    """
+    import SoapySDR
+    from SoapySDR import SOAPY_SDR_TX, SOAPY_SDR_CF32
+    import time as _t
+
+    assert device is not None
+    device.setSampleRate(SOAPY_SDR_TX, 0, samp_hz)
+    device.setFrequency(SOAPY_SDR_TX, 0, center_hz)
+    device.setGain(SOAPY_SDR_TX, 0, "VGA", float(tx_vga_db))
+    device.setGain(SOAPY_SDR_TX, 0, "AMP", 14.0 if tx_amp_on else 0.0)
+
+    stream = device.setupStream(SOAPY_SDR_TX, SOAPY_SDR_CF32)
+    device.activateStream(stream)
+
+    chunk = 65536
+    n_sent = 0
+    try:
+        for samples in symbol_iter:
+            if stop_event is not None and stop_event.is_set():
+                break
+            offset = 0
+            last_end = len(samples)
+            while offset < last_end:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                end = min(offset + chunk, last_end)
+                sr = device.writeStream(
+                    stream, [samples[offset:end]], end - offset,
+                    0, timeoutUs=1_000_000,
+                )
+                if sr.ret > 0:
+                    offset += sr.ret
+                elif sr.ret == SoapySDR.SOAPY_SDR_TIMEOUT:
+                    continue
+                else:
+                    print(f'  [TX ERROR] writeStream ret={sr.ret}', file=sys.stderr)
+                    break
+            n_sent += 1
+    finally:
+        _t.sleep(0.3)
+        try:
+            device.deactivateStream(stream)
+        except Exception:
+            pass
+        try:
+            device.closeStream(stream)
+        except Exception:
+            pass
+
+    return n_sent
+
+
 # ── GR top-block ────────────────────────────────────────────────────────────
 
 if _HAVE_GR:
@@ -2121,74 +2191,58 @@ def main() -> int:
                            if args.rlnc_tx_vga is not None
                            else args.tx_vga)
 
-            # Continuous single-stream TX: keep the TX stream open for all
-            # symbols so the chip clock is phase-coherent across the entire
-            # RLNC block.  Closing/reopening the stream between symbols resets
-            # the HackRF chip clock to a random phase, making multi-symbol
-            # sliding-ASM decode impossible at the receiver.
+            # Stream-encode TX: encode and transmit symbols one at a time
+            # through a single open USB stream.  Chip-clock coherence is
+            # preserved (stream never closes between symbols) while memory
+            # is O(1 symbol) instead of O(N symbols).
             #
-            # We pre-encode all symbols (2 warmup + K+8 coded) and feed them
-            # through one writeStream loop before closing the stream.
-            #
-            # TX duration: 2 warmup + K coded + 8 extra for erasures, all
-            # back-to-back in a single USB stream session.
+            # Each symbol takes ~10ms to encode and ~655ms to transmit,
+            # so the encoder easily keeps ahead of the TX rate.
             N_WARMUP = 2
-            N_CODED = K + max(120, K * 8)  # adaptive overhead: at least 120, scales with K for high drop rates
-            print(f"  Pre-encoding {N_WARMUP} warmup + {N_CODED} coded symbols...",
-                  end="", flush=True)
-            all_symbol_samples: list[np.ndarray] = []
-            # warmup: N_WARMUP distinct frames (each gets its own comb_id → unique
-            # AEAD nonce); receiver locks chip sync on the first few symbols.
-            for _ in range(N_WARMUP):
-                wf = session.next_tx_frame()
-                wb = sc.encode_payload_symbol_fec(wf)
-                wc = sf.tx_bits_to_chips(wb)
-                all_symbol_samples.append(upsample_chips_to_samples(wc, SAMPS_PER_CHIP))
-            coded_frames = [session.next_tx_frame() for _ in range(N_CODED)]
-            from concurrent.futures import ThreadPoolExecutor as _TPE
-            with _TPE(max_workers=min(4, os.cpu_count() or 1)) as _pool:
-                all_symbol_samples.extend(_pool.map(_encode_symbol_to_samples, coded_frames))
-            print(" done")
-
-            # Concatenate into one contiguous buffer so the TX stream never
-            # closes between symbols.
-            all_samples = np.concatenate(all_symbol_samples)
+            N_CODED = K + max(120, K * 8)
             total_sym = N_WARMUP + N_CODED
             total_dur_s = total_sym * sym_duration_s
 
-            # With --coord-port: loop TX until the respond side confirms it
-            # received the payload, then signal it to switch to TX (ACK).
-            # Without --coord-port: single pass as before.
             if coord:
                 _received_event = coord.wait_for_received_async()
+            else:
+                _received_event = None
+
+            def _symbol_generator():
+                for _ in range(N_WARMUP):
+                    yield _encode_symbol_to_samples(session.next_tx_frame())
+                for i in range(N_CODED):
+                    yield _encode_symbol_to_samples(session.next_tx_frame())
 
             tx_pass = 0
             while True:
                 tx_pass += 1
                 print(f"  TX pass {tx_pass}: {total_sym} symbols "
-                      f"({total_dur_s:.0f}s)...", end="", flush=True)
-                aborted = soapy_tx_burst(
-                    all_samples, call_sdr.center_hz,
+                      f"({total_dur_s:.0f}s, streaming)...",
+                      end="", flush=True)
+                n_sent = soapy_tx_streaming(
+                    _symbol_generator(),
+                    call_sdr.center_hz,
                     samp_hz=SAMP_RATE_HZ,
                     tx_vga_db=rlnc_tx_vga,
                     tx_amp_on=args.tx_amp,
-                    repeats=1,
                     device=call_sdr.device,
-                    stop_event=_received_event if coord else None,
+                    stop_event=_received_event,
                 )
-                if coord and _received_event.is_set():
-                    print(f" aborted — coord: respond received payload"
-                          f" after {tx_pass} pass(es)", flush=True)
+                if _received_event is not None and _received_event.is_set():
+                    print(f" aborted at symbol {n_sent} — coord: respond"
+                          f" received payload after {tx_pass} pass(es)",
+                          flush=True)
                     print(f"  coord: switching to RX for payload ACK"
                           f" — sending switch to respond", flush=True)
                     coord.send_switch()
                     break
-                print(" done")
+                print(f" done ({n_sent} symbols)")
                 if not coord:
                     break  # no coord: single pass
                 print(f"  coord: no received signal yet, re-TX'ing...")
 
-            comb_id = N_CODED * tx_pass
+            comb_id = n_sent
 
             # ── Phase 4: RX payload ACK ───────────────────────────────────
             # Reuse call_sdr.device — same as Phase 2, avoids close/reopen

@@ -44,6 +44,10 @@ class RLNCSession:
         inst._recovered = recovered_payload
         return inst
 
+    def reset_tx(self) -> None:
+        """Reset the TX comb_id counter so a fresh pass uses new AEAD nonces."""
+        self._next_comb_id = 0
+
     def next_tx_frame(self) -> bytes:
         comb_id = self._next_comb_id
         self._next_comb_id += 1
