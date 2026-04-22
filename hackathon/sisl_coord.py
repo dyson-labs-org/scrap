@@ -116,7 +116,7 @@ class Coord:
 
 def listen(port: int) -> Coord:
     """Bind, accept one connection, return Coord.  Blocks."""
-    srv = socket.create_server(("0.0.0.0", port), reuse_port=True)
+    srv = socket.create_server(("0.0.0.0", port))
     print(_sync_msg(f"listening on tcp://0.0.0.0:{port}"))
     conn, addr = srv.accept()
     srv.close()
