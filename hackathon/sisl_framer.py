@@ -219,7 +219,10 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     sq = (s * s).astype(np.complex64)
 
     # FFT with segment averaging for noise reduction
-    nfft = min(N, 2**23)  # cap at 8M-point FFT (~4s at 2 Msps)
+    nfft = min(N, 2**20)  # cap at 1M-point FFT (~0.5s at 2 Msps)
+    # NOTE: 2^23 was tried for +10dB integration gain but took 20s per
+    # block — unusable.  The post-MF grid search (estimate_freq_post_mf)
+    # handles spur rejection at post-despread SNR instead.
     n_seg = max(1, N // nfft)
     seg_len = nfft
     accum = np.zeros(nfft, dtype=np.complex128)
@@ -277,7 +280,9 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     # Validate each candidate with the canonical MF periodicity scorer.
     # Uses column-mean chip-phase (robust to WiFi/BT spikes) instead of
     # argmax. See _score_freq_candidate_mf for details.
-    validator_seg_len = min(N, 16_000_000)  # use full block (~8s at 2 Msps)
+    validator_seg_len = min(N, 200_000)  # ~100ms — fast screening only
+    # Heavy validation is done by estimate_freq_post_mf (grid search)
+    # AFTER the FFT-squared picks the best candidate.  Keep this cheap.
     spc = 2  # always validate at 2 samples/chip
 
     best_rad = candidates[0]
