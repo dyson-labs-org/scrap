@@ -485,6 +485,17 @@ class TestRLNCPayloadLoopback:
         assert ack is not None
         assert session.verify_ack(ack)
 
+    def test_ack_flow_rejects_replay_after_accept(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256)) * 2
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 16, keys)
+        _feed_symbols(session, 16 + 10)
+        ack = session.build_ack(seq=2)
+        assert ack is not None
+        assert session.verify_ack(ack)
+        assert not session.verify_ack(ack)
+
     def test_min_symbols_varies_by_payload_size(self):
         from sisl_payload_session import RLNCSession
         keys = _rlnc_session_keys()
@@ -497,3 +508,26 @@ class TestRLNCPayloadLoopback:
             assert recovered is not None
             assert recovered == payload
 
+    def test_session_reports_budget_exhaustion_reason(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256))
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 16, keys, max_decode_symbols=4)
+        frame = session.next_tx_frame()
+        for _ in range(4):
+            assert not session.rx_frame(frame)
+        assert session.decode_budget_exhausted()
+        assert session.decode_status() == "budget_exhausted"
+        reason = session.decode_failure_reason()
+        assert reason is not None
+        assert "budget exhausted" in reason
+        assert session.recovered_payload() is None
+
+    def test_session_reports_complete_status_on_success(self):
+        from sisl_payload_session import RLNCSession
+        payload = bytes(range(256)) * 2
+        keys = _rlnc_session_keys()
+        session = RLNCSession(payload, 16, keys)
+        assert _feed_symbols(session, 16 + 12)
+        assert session.decode_status() == "complete"
+        assert not session.decode_budget_exhausted()

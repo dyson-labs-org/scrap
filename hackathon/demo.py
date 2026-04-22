@@ -714,6 +714,12 @@ def live_rx_decode(
             sisl_rx._print_live_event(stats["blocks_processed"], result)
 
             s = result["status"]
+            if result.get("stop_rx"):
+                stats["stop_reason"] = s
+                if "stop_detail" in result:
+                    stats["stop_detail"] = result["stop_detail"]
+                decode_stop.set()
+                break
             if s == "decrypt_ok":
                 stats["hails_detected"] += 1
                 stats["hails_decrypted"] += 1
@@ -1117,6 +1123,7 @@ def _run_respond_mode(
                 )
                 acq_sentinel = None
                 complete = False
+                budget_exhausted = False
                 n_decoded = 0
                 base = {}
                 for res in sym_results:
@@ -1145,6 +1152,16 @@ def _run_respond_mode(
                                 comb_id=_cid,
                                 frame_head=raw[:8].hex(),
                             )
+                    if rx_session.decode_budget_exhausted():
+                        budget_exhausted = True
+                        break
+                if budget_exhausted:
+                    return {
+                        **base,
+                        "status": "budget_exhausted",
+                        "stop_rx": True,
+                        "stop_detail": rx_session.decode_failure_reason(),
+                    }
                 if complete:
                     return {**base, "status": "decrypt_ok",
                             "decoded_hail": True,
@@ -1189,6 +1206,12 @@ def _run_respond_mode(
 
             recovered = rx_session.recovered_payload()
             if recovered is None:
+                if rx_session.decode_budget_exhausted():
+                    reason = rx_session.decode_failure_reason() or "decoder budget exhausted"
+                    print(f"  RLNC RX aborted — {reason}", flush=True)
+                    if coord_active:
+                        return 1
+                    continue
                 if coord_active:
                     n_sym = rlnc_stats.get("hails_decrypted", 0)
                     print(f"  RLNC RX failed ({received_count} symbols,"
@@ -1466,7 +1489,10 @@ def _run_call_mode(
                     return {**res, "status": "decrypt_ok",
                             "decoded_hail": True,
                             "polarity": "rlnc-ack"}
-                res["status"] = "decrypt_fail"
+                if _is_debug_output_enabled() and len(raw) >= 4:
+                    seq = int.from_bytes(raw[:4], "big")
+                    print(f"  [DEBUG] payload ACK rejected (seq={seq})", flush=True)
+                res["status"] = "ack_rejected"
             return res
 
         rlnc_tx_vga = (args.rlnc_tx_vga

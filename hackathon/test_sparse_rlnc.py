@@ -192,3 +192,42 @@ def test_decoder_k_minus_one_insufficient():
         _, sym, _ = enc.encode_symbol(comb_id)
         dec.add_symbol(comb_id, sym)
     assert dec.decode() is None
+
+
+def test_decoder_default_symbol_budget_is_4k():
+    K = 16
+    dec = sr.RLNCDecoder(K, PRK)
+    assert dec.max_symbols == 4 * K
+
+
+def test_decoder_budget_exhaustion_sets_status_and_bounds_seen_ids():
+    K = 16
+    payload = bytes(range(128))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    _, sym0, _ = enc.encode_symbol(0)
+
+    for _ in range(dec.max_symbols):
+        dec.add_symbol(0, sym0)
+
+    assert dec.is_budget_exhausted
+    assert dec.status == "budget_exhausted"
+    assert dec.failure_reason is not None
+    assert "budget exhausted" in dec.failure_reason
+    assert dec.received_symbols == dec.max_symbols
+    assert dec.unique_symbol_ids == 1
+    assert dec.decode() is None
+
+
+def test_decoder_completes_before_budget_exhaustion():
+    K = 16
+    payload = bytes(range(256))
+    enc = sr.RLNCEncoder(payload, K, PRK)
+    dec = sr.RLNCDecoder(K, PRK)
+    for comb_id in range(K * 3):
+        _, sym, _ = enc.encode_symbol(comb_id)
+        if dec.add_symbol(comb_id, sym):
+            break
+    assert dec.is_complete
+    assert not dec.is_budget_exhausted
+    assert dec.status == "complete"

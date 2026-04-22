@@ -195,10 +195,28 @@ class RLNCEncoder:
 
 
 class RLNCDecoder:
-    def __init__(self, K: int, session_prk: bytes):
+    _DEFAULT_MAX_SYMBOL_FACTOR = 4
+
+    def __init__(
+        self,
+        K: int,
+        session_prk: bytes,
+        *,
+        max_symbols: int | None = None,
+    ):
         self._K = K
         self._prk = session_prk
+        self._max_symbols = (
+            self._DEFAULT_MAX_SYMBOL_FACTOR * K
+            if max_symbols is None
+            else int(max_symbols)
+        )
+        if self._max_symbols <= 0:
+            raise ValueError(f"max_symbols must be > 0, got {self._max_symbols}")
         self._seen_ids: set[int] = set()
+        self._received_symbols = 0
+        self._status = "in_progress"
+        self._failure_reason: str | None = None
         # Incremental RREF state — allocated lazily on first symbol.
         self._frag_size: int = 0
         # pivot_coeff[i]: K-wide coefficient row for pivot i (normalized: leading entry = 1)
@@ -208,13 +226,20 @@ class RLNCDecoder:
         self._pivot_cols: list[int] = []              # column index each pivot row reduced on
         self._n_pivots: int = 0
 
-    _MAX_SEEN_IDS = 4096
-
     def _init_arrays(self, frag_size: int) -> None:
         self._frag_size = frag_size
         self._pivot_coeff = np.zeros((self._K, self._K), dtype=np.uint8)
         self._pivot_data = np.zeros((self._K, frag_size), dtype=np.uint8)
         self._pivot_cols = [0] * self._K
+
+    def _mark_budget_exhausted(self) -> None:
+        if self.is_complete:
+            return
+        self._status = "budget_exhausted"
+        self._failure_reason = (
+            f"decoder symbol budget exhausted: received={self._received_symbols}, "
+            f"max={self._max_symbols}, rank={self._n_pivots}/{self._K}"
+        )
 
     def _add_to_rref(self, coeff_vec: np.ndarray, data: np.ndarray) -> bool:
         """Add one symbol to the running RREF. Returns True if rank increases."""
@@ -267,10 +292,18 @@ class RLNCDecoder:
         return True
 
     def add_symbol(self, comb_id: int, encoded_bytes: bytes) -> bool:
+        if self.is_complete:
+            self._status = "complete"
+            return True
+        if self._status == "budget_exhausted":
+            return False
+
+        self._received_symbols += 1
         if comb_id in self._seen_ids:
+            if self._received_symbols >= self._max_symbols:
+                self._mark_budget_exhausted()
             return self.is_complete
-        if len(self._seen_ids) < self._MAX_SEEN_IDS:
-            self._seen_ids.add(comb_id)
+        self._seen_ids.add(comb_id)
 
         indices, coeffs = sample_coefficients(comb_id, self._K, self._prk)
         coeff_vec = np.zeros(self._K, dtype=np.uint8)
@@ -282,6 +315,11 @@ class RLNCDecoder:
             self._init_arrays(len(data))
 
         self._add_to_rref(coeff_vec, data)
+        if self.is_complete:
+            self._status = "complete"
+            self._failure_reason = None
+        elif self._received_symbols >= self._max_symbols:
+            self._mark_budget_exhausted()
         return self.is_complete
 
     def decode(self) -> bytes | None:
@@ -299,3 +337,27 @@ class RLNCDecoder:
     @property
     def is_complete(self) -> bool:
         return self._n_pivots == self._K
+
+    @property
+    def is_budget_exhausted(self) -> bool:
+        return self._status == "budget_exhausted"
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def failure_reason(self) -> str | None:
+        return self._failure_reason
+
+    @property
+    def max_symbols(self) -> int:
+        return self._max_symbols
+
+    @property
+    def received_symbols(self) -> int:
+        return self._received_symbols
+
+    @property
+    def unique_symbol_ids(self) -> int:
+        return len(self._seen_ids)

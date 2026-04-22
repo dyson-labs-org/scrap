@@ -2,6 +2,7 @@ import pytest
 
 from sisl_crypto import derive_session_keys, derive_session_prk
 from sisl_payload import decode_ack, decode_payload_symbol, encode_ack, encode_payload_symbol
+from sisl_payload_session import RLNCSession
 
 _CALLER_PRIV_BYTES = bytes(range(32))
 _RESP_PRIV_BYTES = bytes(range(1, 33))
@@ -122,3 +123,28 @@ def test_decode_ack_cross_session_replay(session):
     different_session_id = bytes(b ^ 0xFF for b in keys["session_id"])
     result = decode_ack(ack_frame, payload, keys["p2p_rx_key"], prk, different_session_id)
     assert not result
+
+
+def test_decode_ack_expected_seq(session):
+    keys, prk = session
+    payload = b"secret message"
+    ack_frame = encode_ack(payload, keys["p2p_rx_key"], prk, keys["session_id"], seq=7)
+    assert decode_ack(
+        ack_frame, payload, keys["p2p_rx_key"], prk, keys["session_id"], expected_seq=7
+    )
+    assert not decode_ack(
+        ack_frame, payload, keys["p2p_rx_key"], prk, keys["session_id"], expected_seq=8
+    )
+
+
+def test_session_verify_ack_single_use_and_replay_reject(session):
+    keys, _ = session
+    payload = b"payload for ack replay resistance"
+    ack_session = RLNCSession.for_responder(payload, 8, keys)
+    ack = ack_session.build_ack(seq=3)
+    assert ack is not None
+    assert ack_session.verify_ack(ack)
+    assert not ack_session.verify_ack(ack)
+    later_ack = ack_session.build_ack(seq=4)
+    assert later_ack is not None
+    assert not ack_session.verify_ack(later_ack)

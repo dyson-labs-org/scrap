@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import secrets
 import struct
 
@@ -13,6 +14,11 @@ from sisl_crypto import derive_payload_iv, derive_rlnc_ack_iv
 
 class AEADDecryptError(ValueError):
     """Raised when AEAD authentication/decryption fails."""
+
+
+def _ack_debug(msg: str) -> None:
+    if os.environ.get("SISL_DEBUG"):
+        print(f"  [ACK ERROR] {msg}", flush=True)
 
 
 def _padded_block(payload: bytes, K: int) -> bytes:
@@ -98,6 +104,7 @@ def decode_ack(
     session_prk: bytes,
     session_id: bytes,
     K: int = 1,
+    expected_seq: int | None = None,
 ) -> bool:
     """Decode and verify a payload ACK frame.
 
@@ -106,22 +113,25 @@ def decode_ack(
     block hash using a constant-time comparison.
     """
     if len(frame) < 4 + 32 + 16:
+        _ack_debug(f"frame too short: {len(frame)} bytes")
         return False
     seq_bytes = frame[:4]
     seq = struct.unpack(">I", seq_bytes)[0]
+    if expected_seq is not None and seq != expected_seq:
+        _ack_debug(f"unexpected seq {seq}, expected {expected_seq}")
+        return False
     iv = derive_rlnc_ack_iv(session_prk, seq)
     aad = session_id + b"sisl-ack" + seq_bytes
     try:
         h_decrypted = ChaCha20Poly1305(reverse_direction_key).decrypt(
             iv, frame[4:], aad)
     except InvalidTag:
+        _ack_debug(f"AEAD authentication failed for seq {seq}")
         return False
     block = _padded_block(payload, K)
     expected_hash = hashlib.sha256(session_id + block).digest()
     if not secrets.compare_digest(h_decrypted, expected_hash):
-        import os as _os
-        if _os.environ.get("SISL_DEBUG"):
-            print(f"  [ACK ERROR] hash mismatch: decoded {len(payload)} bytes "
-                  f"(padded block {len(block)}B, K={K})", flush=True)
+        _ack_debug(f"hash mismatch: decoded {len(payload)} bytes "
+                   f"(padded block {len(block)}B, K={K}, seq={seq})")
         return False
     return True
