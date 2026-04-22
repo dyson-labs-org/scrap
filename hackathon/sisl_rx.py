@@ -804,6 +804,43 @@ def _try_fec_decrypt(
     }
 
 
+def _single_freq_pipeline(
+    samples: np.ndarray,
+    freq_rad: float,
+    samps_per_chip: int,
+    samp_hz: float,
+    signal_threshold: float,
+    responder_static: ec.EllipticCurvePrivateKey,
+    top_k_soft: int = 5,
+) -> dict:
+    """Run the full hail decode pipeline at one specific frequency.
+
+    freq correction → MF → track → ASM search → DBPSK → FEC → decrypt.
+    Thread-safe: uses only numpy/scipy (GIL released during FFT).
+    Returns a result dict with status, peak_values, fec_llrs, etc.
+    """
+    acq = _acquire_and_track(
+        samples, samps_per_chip, samp_hz, signal_threshold,
+        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS,
+        freq_offset_hz=freq_rad * samp_hz / (2.0 * np.pi),
+        skip_periodicity=False,
+    )
+    if acq["status"] != "acquired":
+        return acq
+    result = _try_fec_decrypt(
+        peak_values=acq["peak_values"],
+        positions=acq["positions"],
+        responder_static=responder_static,
+        top_k_soft=top_k_soft,
+        freq_hz=acq.get("freq_hz", 0),
+        peak_mag=acq["peak_mag"],
+        median_mag=acq["median_mag"],
+        rad_per_sample=acq.get("rad_per_sample", freq_rad),
+    )
+    result["_freq_rad"] = freq_rad
+    return result
+
+
 def _decode_one_hail_in_block(
     samples: np.ndarray,
     responder_static: ec.EllipticCurvePrivateKey,
@@ -816,27 +853,81 @@ def _decode_one_hail_in_block(
 ) -> dict:
     """Process one block of baseband samples, try to decode one FEC hail.
 
-    Thin dispatcher: calls _acquire_and_track, then _try_fec_decrypt.
+    When freq_candidates has multiple entries, runs full pipelines in
+    parallel threads (scipy fftconvolve releases the GIL).  Returns
+    the best result (decrypt_ok preferred, then highest soft_score).
+    Additional per-frequency results are attached as ``_multi_results``
+    so the caller can feed per-frequency LLRs to separate accumulators.
     """
-    acq = _acquire_and_track(
-        samples, samps_per_chip, samp_hz, signal_threshold,
-        fec_total_bits=sc.HAIL_FEC_TOTAL_BITS,
-        freq_hint_rad=freq_hint_rad,
-        freq_candidates=freq_candidates,
-    )
-    if acq["status"] != "acquired":
-        return acq
+    candidates = list(freq_candidates or [])
+    if freq_hint_rad is not None and freq_hint_rad not in candidates:
+        candidates.append(freq_hint_rad)
 
-    return _try_fec_decrypt(
-        peak_values=acq["peak_values"],
-        positions=acq["positions"],
-        responder_static=responder_static,
-        top_k_soft=top_k_soft,
-        freq_hz=acq["freq_hz"],
-        peak_mag=acq["peak_mag"],
-        median_mag=acq["median_mag"],
-        rad_per_sample=acq["rad_per_sample"],
-    )
+    # ── Screen candidates with full MF scoring ───────────────────────
+    # Score each candidate cheaply (~27ms) to find viable ones.
+    samples_dc = (samples - samples.mean()).astype(np.complex64)
+    seg_len = min(len(samples_dc), 200_000)
+    _TRACKING_THRESHOLD = 5.0
+    viable = []
+    for cand in candidates:
+        score = sf._score_freq_candidate_mf(
+            samples_dc, cand, samps_per_chip, seg_len,
+        )
+        if score >= _TRACKING_THRESHOLD:
+            viable.append((cand, score))
+
+    if not viable:
+        # No candidate scores well — do fresh acquisition
+        fft_rad = sf._estimate_freq_fft_squared(samples_dc)
+        best_rad, best_score = sf.estimate_freq_post_mf(
+            samples_dc, fft_rad,
+            samps_per_chip=samps_per_chip,
+            samp_hz=samp_hz,
+        )
+        viable = [(best_rad, best_score)]
+
+    # ── Run full pipeline at each viable frequency ────────────────────
+    # Sort by score descending; cap at 3 to bound compute.
+    viable.sort(key=lambda x: -x[1])
+    viable = viable[:3]
+
+    if len(viable) == 1:
+        # Single candidate — run directly (no thread overhead)
+        result = _single_freq_pipeline(
+            samples_dc, viable[0][0], samps_per_chip, samp_hz,
+            signal_threshold, responder_static, top_k_soft,
+        )
+        result["_multi_results"] = [result]
+        return result
+
+    # Multiple candidates — run in parallel threads.
+    # scipy.signal.fftconvolve and numpy release the GIL during C-level
+    # computation, so threads achieve real parallelism for the MF.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(viable)) as pool:
+        futures = [
+            pool.submit(
+                _single_freq_pipeline,
+                samples_dc, freq_rad, samps_per_chip, samp_hz,
+                signal_threshold, responder_static, top_k_soft,
+            )
+            for freq_rad, _score in viable
+        ]
+        results = [f.result() for f in futures]
+
+    # Pick the best: decrypt_ok wins, then highest soft_score.
+    best = None
+    for r in results:
+        if r.get("status") == "decrypt_ok":
+            best = r
+            break
+    if best is None:
+        # No decrypt — pick the one with highest soft_score (most likely
+        # to have good LLRs for accumulation).
+        best = max(results, key=lambda r: abs(r.get("soft_score", 0)))
+
+    best["_multi_results"] = results
+    return best
 
 
 # ── ACK decode path (parallel to hail, different frame sizes) ────────────

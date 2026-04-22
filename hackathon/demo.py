@@ -1152,12 +1152,25 @@ def live_rx_decode(
     t_start = time.time()
     _last_heartbeat = t_start
 
-    accumulator = None
-    if combine_copies > 0:
-        accumulator = sisl_rx.LlrAccumulator(
-            n_bits=sc.HAIL_FEC_TOTAL_BITS,
-            max_copies=combine_copies,
-        )
+    # Per-frequency accumulator bank: each candidate frequency gets its
+    # own LLR accumulator.  The correct frequency's accumulator grows
+    # (constructive LLR addition) while wrong frequencies stay flat
+    # (random LLR signs cancel).  Keyed by freq in kHz (rounded).
+    _freq_accumulators: dict[int, sisl_rx.LlrAccumulator] = {}
+    _MAX_FREQ_ACCUMULATORS = 6
+
+    def _get_accumulator(freq_rad: float) -> sisl_rx.LlrAccumulator:
+        freq_khz = int(round(freq_rad * samp_hz / (2.0 * np.pi * 1000)))
+        if freq_khz not in _freq_accumulators:
+            if len(_freq_accumulators) >= _MAX_FREQ_ACCUMULATORS:
+                # Evict the accumulator with the fewest copies
+                worst = min(_freq_accumulators, key=lambda k: _freq_accumulators[k].n_copies)
+                del _freq_accumulators[worst]
+            _freq_accumulators[freq_khz] = sisl_rx.LlrAccumulator(
+                n_bits=sc.HAIL_FEC_TOTAL_BITS,
+                max_copies=combine_copies or 64,
+            )
+        return _freq_accumulators[freq_khz]
 
     agc_ppm = _AgcPpmState(device_name, device, center_hz,
                            vga_db, lna_db,
@@ -1307,43 +1320,65 @@ def live_rx_decode(
 
             agc_ppm.on_block(result)
 
-            if accumulator is not None:
-                # Only feed the accumulator when the frequency estimate
-                # is plausible. At low SNR (5 GHz), the FFT often locks
-                # onto spurs giving |Δf| >> 50 kHz. The body LLRs from
-                # spur-locked blocks are noise that DILUTES the real
-                # signal in the accumulator instead of building it.
-                foff = result.get("freq_offset_hz", 0)
-                freq_ok = abs(foff) < 50_000  # ±50 kHz gate
-                if freq_ok:
-                    added = accumulator.try_add(result)
-                    if added:
+            # ── Per-frequency accumulator bank ─────────────────────
+            # Feed LLRs from each frequency pipeline to its own
+            # accumulator.  The correct frequency builds coherently
+            # (√N gain) while wrong ones cancel.
+            multi = result.get("_multi_results") or [result]
+            for mr in multi:
+                mr_fec = mr.get("fec_llrs")
+                mr_freq = mr.get("_freq_rad") or mr.get("rad_per_sample")
+                if mr_fec is None or mr_freq is None:
+                    continue
+                acc = _get_accumulator(mr_freq)
+                added = acc.try_add({
+                    "fec_llrs": mr_fec,
+                    "freq_offset_hz": mr.get("freq_offset_hz"),
+                })
+                if added:
+                    stats["combined_copies"] += 1
+                # Also add extra frame copies from within the block
+                for extra in mr.get("extra_fec_llrs", []):
+                    if acc.try_add({"fec_llrs": extra}):
                         stats["combined_copies"] += 1
-                    for extra_llrs in result.get("extra_fec_llrs", []):
-                        extra_result = {"fec_llrs": extra_llrs}
-                        if accumulator.try_add(extra_result):
-                            stats["combined_copies"] += 1
-                else:
-                    stats["acc_freq_rejects"] = \
-                        stats.get("acc_freq_rejects", 0) + 1
-                if accumulator.n_copies > 0:
-                    acc_l1 = float(np.mean(np.abs(accumulator.accumulated)))
-                    print(f"       accumulator: {accumulator.n_copies} "
-                          f"frame copies combined, "
-                          f"mean |LLR|={acc_l1:.3f}")
-                    combined = accumulator.try_decrypt(responder_static)
-                    if combined is not None:
-                        decoded_hail, label, n_flips = combined
-                        stats["combined_decrypts"] += 1
-                        stats["hails_decrypted"] += 1
-                        print(f"\033[32m       ACCUMULATOR DECRYPT  "
-                              f"n_copies={accumulator.n_copies}  "
-                              f"pol={label}  "
-                              f"mode=0x{decoded_hail.body.mode:02x}  "
-                              f"nonce="
-                              f"{decoded_hail.body.body_nonce.hex()}"
-                              f"\033[0m")
-                        accumulator.reset()
+
+            # Try decrypt on ALL accumulators
+            for freq_khz, acc in list(_freq_accumulators.items()):
+                if acc.n_copies == 0:
+                    continue
+                combined = acc.try_decrypt(responder_static)
+                if combined is not None:
+                    decoded_hail, label, n_flips = combined
+                    stats["combined_decrypts"] += 1
+                    stats["hails_decrypted"] += 1
+                    print(f"\033[32m       ACCUMULATOR DECRYPT  "
+                          f"freq={freq_khz}kHz  "
+                          f"n_copies={acc.n_copies}  "
+                          f"pol={label}  "
+                          f"nonce="
+                          f"{decoded_hail.body.body_nonce.hex()}"
+                          f"\033[0m")
+                    if "_decoded_hail" not in stats:
+                        stats["_decoded_hail"] = decoded_hail
+                        stats["_decode_peak_mag"] = result.get("peak_mag")
+                        stats["_decode_freq_offset_hz"] = (
+                            freq_khz * 1000.0)
+                    acc.reset()
+                    if exit_on_decrypt:
+                        decode_stop.set()
+
+            # Print accumulator summary (best one)
+            if _freq_accumulators:
+                best_acc = max(_freq_accumulators.values(),
+                               key=lambda a: a.n_copies)
+                if best_acc.n_copies > 0:
+                    acc_l1 = float(np.mean(np.abs(best_acc.accumulated)))
+                    best_khz = [k for k, v in _freq_accumulators.items()
+                                if v is best_acc][0]
+                    print(f"       accumulator: {best_acc.n_copies} copies "
+                          f"@ {best_khz}kHz, "
+                          f"mean |LLR|={acc_l1:.3f}  "
+                          f"({len(_freq_accumulators)} freq bins)")
     except KeyboardInterrupt:
         print("  interrupted")
         raise  # propagate so outer loops exit cleanly
@@ -2023,14 +2058,13 @@ def main() -> int:
                 ack_session = RLNCSession.for_responder(payload_out, K, session_keys)
 
                 if coord:
-                    # live_rx_decode exited because coord_fd became readable
-                    # (call sent "TX done") OR because we decoded the payload.
-                    # Consume the call's "TX done" if we haven't already.
-                    if coord.has_data():
-                        coord.wait_for_switch()  # consume call's "TX done"
+                    # Tell the caller we decoded.  The caller may still be
+                    # TX'ing (early case) or may have finished and sent
+                    # "TX done" already.
                     print("  coord: payload decoded — notifying caller", flush=True)
-                    coord.send_switch()  # tell call: decoded
-                    coord.wait_for_switch()  # wait for call: "go ahead with ACK"
+                    coord.send_switch()           # tell call: decoded
+                    coord.wait_for_switch()        # call: "TX stopped" or "TX done"
+                    coord.wait_for_switch()        # call: "go ahead with payload ACK"
                     print("  coord: caller ready for payload ACK", flush=True)
 
                 import time as _time
@@ -2288,20 +2322,30 @@ def main() -> int:
                            if args.rlnc_tx_vga is not None
                            else args.tx_vga)
 
-            # Stream-encode TX: encode and transmit symbols one at a time
-            # through a single open USB stream.  O(1 symbol) memory.
+            # Stream-encode TX: encode and transmit symbols one at a time.
+            # With coord: check for "payload decoded" between symbols so
+            # the TX stops as soon as the responder has enough.
             N_WARMUP = 2
             N_CODED = K + max(120, K * 8)
             total_sym = N_WARMUP + N_CODED
             total_dur_s = total_sym * sym_duration_s
+            _payload_early = False
 
             def _symbol_generator():
-                for _ in range(N_WARMUP):
+                nonlocal _payload_early
+                for i in range(total_sym):
                     yield _encode_symbol_to_samples(session.next_tx_frame())
-                for _ in range(N_CODED):
-                    yield _encode_symbol_to_samples(session.next_tx_frame())
+                    # After the warmup period, check if the responder has
+                    # decoded the payload.  Each symbol is ~655ms, so this
+                    # checks roughly once per second.
+                    if coord and i >= N_WARMUP and coord.has_data():
+                        print(f"\n  coord: respond decoded payload after "
+                              f"{i+1} symbols — stopping TX", flush=True)
+                        _payload_early = True
+                        return
 
-            print(f"  TX {total_sym} symbols ({total_dur_s:.0f}s, streaming)...",
+            print(f"  TX up to {total_sym} symbols "
+                  f"({total_dur_s:.0f}s max, streaming)...",
                   end="", flush=True)
             n_sent = soapy_tx_streaming(
                 _symbol_generator(),
@@ -2311,18 +2355,34 @@ def main() -> int:
                 tx_amp_on=args.tx_amp,
                 device=call_sdr.device,
             )
-            print(f" done ({n_sent} symbols)")
+            print(f" done ({n_sent} symbols"
+                  f"{', early' if _payload_early else ''})")
             if coord:
-                print("  coord: payload TX done — notifying respond", flush=True)
-                coord.send_switch()  # tell respond: TX done (triggers stop_event)
-                print("  coord: waiting for respond to decode payload...", flush=True)
-                try:
-                    coord.wait_for_switch()
-                except (ConnectionError, TimeoutError) as e:
-                    print(f"  coord: respond side failed ({e})", flush=True)
-                    return 1
-                print("  coord: respond decoded — switching to RX for payload ACK", flush=True)
-                coord.send_switch()  # confirm: go ahead with payload ACK TX
+                # Two cases:
+                # A) _payload_early: respond decoded mid-TX and sent "switch"
+                #    which the generator detected.  Consume it, then send
+                #    our own "switch" so the respond knows TX stopped.
+                # B) Normal: all symbols sent.  Send "TX done" and wait for
+                #    respond's "payload decoded".
+                # In both cases, after the exchange the caller sends one
+                # final "switch" = "go ahead with payload ACK TX".
+                if _payload_early:
+                    coord.wait_for_switch()   # consume respond's "decoded"
+                    print("  coord: respond decoded early", flush=True)
+                    coord.send_switch()       # tell respond: TX stopped
+                else:
+                    print("  coord: payload TX done — notifying respond",
+                          flush=True)
+                    coord.send_switch()       # tell respond: TX done
+                    try:
+                        coord.wait_for_switch()  # respond: decoded
+                    except (ConnectionError, TimeoutError) as e:
+                        print(f"  coord: respond failed ({e})", flush=True)
+                        return 1
+                    print("  coord: respond decoded", flush=True)
+                # Both paths converge: tell respond to TX payload ACK
+                coord.send_switch()
+                print("  coord: told respond to TX payload ACK", flush=True)
 
             comb_id = n_sent
 
