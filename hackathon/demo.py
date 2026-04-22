@@ -2107,12 +2107,17 @@ def main() -> int:
                 samps_per_chip=active_samps_per_chip,
                 exit_on_decrypt=True,
                 decode_fn=_ack_decode_fn,
+                coord_fd=coord.fileno if coord else None,
             )
             ack_recv_time = time.time()
             dh = ack_stats.get("_decoded_hail")
             if not (ack_stats.get("hails_decrypted", 0) > 0
                     and isinstance(dh, sc.DecodedAck)):
-                print(f"\n  timeout — no ACK received")
+                if coord and coord.has_data():
+                    coord.wait_for_switch()  # consume respond's "ACK TX done"
+                    print(f"\n  ACK not decoded — respond finished ACK TX")
+                else:
+                    print(f"\n  timeout — no ACK received")
                 return 1
 
             print()
