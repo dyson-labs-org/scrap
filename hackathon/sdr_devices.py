@@ -79,7 +79,7 @@ DEVICES: dict[str, DeviceInfo] = {
         name="HackRF One",
         driver="driver=hackrf",
         samp_hz=8_000_000,
-        samps_per_chip=8,
+        samps_per_chip=8,  # TX samps_per_chip; RX always uses 2
         freq_min_hz=1_000_000,
         freq_max_hz=6_000_000_000,
         notes="TX + RX, 1 MHz – 6 GHz, 8-bit ADC, 3 gain stages",

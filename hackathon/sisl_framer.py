@@ -274,47 +274,19 @@ def _estimate_freq_fft_squared(samples: np.ndarray,
     if len(candidates) == 1:
         return candidates[0]
 
-    # Validate each candidate with a periodicity-aware MF check.
-    # The real DSSS signal has MF peaks every CHIPS_PER_SYMBOL×spc
-    # samples (one symbol period). Spurs produce a single large peak
-    # or irregular peaks. We score candidates by the PERIODIC peak
-    # strength: find the strongest MF peak, check 8 subsequent symbol
-    # positions, and use the median of those 8 peaks. A real signal
-    # gives a high periodic median; a spur gives a high argmax but
-    # low periodic median.
-    seg_len = min(N, 16_000_000)  # use full block (~8s at 2 Msps)
-    seg = np.asarray(samples[:seg_len], dtype=np.complex64)
+    # Validate each candidate with the canonical MF periodicity scorer.
+    # Uses column-mean chip-phase (robust to WiFi/BT spikes) instead of
+    # argmax. See _score_freq_candidate_mf for details.
+    validator_seg_len = min(N, 16_000_000)  # use full block (~8s at 2 Msps)
     spc = 2  # always validate at 2 samples/chip
-    sym_samples = CHIPS_PER_SYMBOL * spc  # 2046
 
     best_rad = candidates[0]
     best_score = -1.0
     for cand_rad in candidates:
-        corrected = apply_freq_correction(seg, cand_rad)
-        corr = matched_filter_complex_sample_rate(corrected, spc)
-        if len(corr) < sym_samples * 10:
-            continue
-        m = np.abs(corr).astype(np.float32)
-        median_noise = float(np.median(m))
-        if median_noise < 1e-12:
-            continue
-        # Find the strongest peak and check periodic structure
-        first_peak = int(np.argmax(m))
-        search_half = sym_samples // 4
-        periodic_peaks: list[float] = []
-        for k in range(32):
-            pos = first_peak + k * sym_samples
-            if pos + search_half >= len(m):
-                break
-            lo = max(0, pos - search_half)
-            hi = min(len(m), pos + search_half + 1)
-            periodic_peaks.append(float(m[lo:hi].max()))
-        if len(periodic_peaks) < 4:
-            continue
-        # Score = median of periodic peaks / noise median.
-        # Real signal: periodic peaks are consistently high → score >> 5
-        # Spur: only the first peak is high, rest are noise → score ≈ 1-3
-        score = float(np.median(periodic_peaks)) / median_noise
+        score = _score_freq_candidate_mf(
+            samples, cand_rad, samps_per_chip=spc,
+            seg_len=validator_seg_len, n_peaks=32,
+        )
         if score > best_score:
             best_score = score
             best_rad = cand_rad
@@ -327,6 +299,7 @@ def _score_freq_candidate_mf(
     rad_per_sample: float,
     samps_per_chip: int = 2,
     seg_len: int = 100_000,
+    n_peaks: int = 16,
 ) -> float:
     """Score a frequency candidate by MF periodicity strength.
 
@@ -338,6 +311,7 @@ def _score_freq_candidate_mf(
 
     samps_per_chip: samples per PN (Pseudo-Noise) chip (=2 for RX path).
     seg_len: number of samples to use (default 100K = 50ms at 2 Msps).
+    n_peaks: number of periodic peaks to check (default 16).
     """
     seg = np.asarray(samples[:seg_len], dtype=np.complex64)
     sym_samples = CHIPS_PER_SYMBOL * samps_per_chip  # 2046
@@ -363,7 +337,7 @@ def _score_freq_candidate_mf(
 
     search_half = sym_samples // 4
     periodic_peaks: list[float] = []
-    for k in range(8):
+    for k in range(n_peaks):
         pos = chip_phase + k * sym_samples
         if pos + search_half >= len(m):
             break
@@ -384,6 +358,13 @@ def estimate_freq_post_mf(
     samp_hz: float = 2_000_000.0,
     grid_half_hz: float = 50_000.0,
     grid_step_hz: float = 5_000.0,
+    # min_score: minimum MF periodicity score to accept the FFT-squared
+    # candidate without falling back to grid search.  The score is
+    # median(symbol-spaced MF peaks) / median(noise).  A real DSSS signal
+    # produces score >> 5 (periodic peaks well above noise); HackRF PLL
+    # spurs produce score ≈ 1-3 (one large peak, rest at noise floor).
+    # 3.0 is a conservative boundary: accepts real signals on the fast
+    # path while forcing spur-dominated blocks into the grid search.
     min_score: float = 3.0,
 ) -> tuple[float, float]:
     """Post-MF frequency grid search: validate FFT-squared estimate, fall back to grid.
@@ -428,51 +409,6 @@ def estimate_freq_post_mf(
             best_rad = candidate_rad
 
     return best_rad, best_score
-
-
-def estimate_freq_drift_rate(samples: np.ndarray,
-                             n_segments: int = 6) -> tuple[float, float]:
-    """Estimate carrier offset and linear drift rate from sub-block R[1].
-
-    Splits into `n_segments` sub-blocks, fits a line through per-segment
-    R[1] estimates. Returns (rad_per_sample_at_start, drift_rad_per_sample²).
-    """
-    N = len(samples)
-    if N < n_segments * 1000:
-        r = _estimate_freq_offset_r1(_remove_dc(samples))
-        return r, 0.0
-
-    seg_len = N // n_segments
-    freqs = []
-    centers = []
-    for i in range(n_segments):
-        seg = samples[i * seg_len:(i + 1) * seg_len]
-        seg = _remove_dc(seg)
-        f = _estimate_freq_offset_r1(seg)
-        freqs.append(f)
-        centers.append((i + 0.5) * seg_len)  # center sample of segment
-
-    freqs = np.array(freqs)
-    centers = np.array(centers)
-
-    # Robust linear fit (use median of pairwise slopes to reject outliers)
-    if n_segments >= 3:
-        slopes = []
-        for i in range(n_segments):
-            for j in range(i + 1, n_segments):
-                slopes.append((freqs[j] - freqs[i]) / (centers[j] - centers[i]))
-        drift = float(np.median(slopes))
-    else:
-        drift = float((freqs[-1] - freqs[0]) / (centers[-1] - centers[0]))
-
-    # Offset at center of block
-    mid = N / 2.0
-    offset_at_center = float(np.median(freqs - drift * (centers - mid)))
-
-    # Convert to offset at sample 0
-    offset_at_zero = offset_at_center - drift * mid
-
-    return offset_at_zero, drift
 
 
 def estimate_freq_offset_rad_per_sample(samples: np.ndarray,
@@ -569,6 +505,14 @@ def decode_with_freq_tracking(
     n_bytes: int,
     code: np.ndarray | None = None,
     search_half_samples: int | None = None,
+    # lock_threshold_frac: fraction of the initial (or bootstrap-median)
+    # MF peak magnitude used as the lock floor for the per-symbol tracker.
+    # If a symbol's MF peak falls below lock_threshold_frac × reference_peak,
+    # it counts as a "miss" (tracker keeps stepping but flags the symbol).
+    # 0.1 (10%) is empirical: DSSS symbol peaks vary by ≈ ±3 dB due to
+    # fading and noise, but rarely drop below 10% of the median peak
+    # unless the signal is truly gone.  Too high → false track-loss on
+    # fading dips; too low → tracker follows noise after signal ends.
     lock_threshold_frac: float = 0.1,
     freq_offset_rad_per_sample: float | None = None,
     precomputed_corr: np.ndarray | None = None,
@@ -657,6 +601,15 @@ def decode_with_freq_tracking(
     peak_values: list[complex] = []
     positions: list[int] = []
 
+    # BOOTSTRAP: number of initial symbols used to re-anchor lock_floor.
+    # The initial lock_floor is set from the first detected peak (or
+    # peak_hint), which may be spike-inflated.  After 8 symbols the
+    # tracker has enough samples for a robust median that reflects the
+    # true DSSS peak level.  8 symbols ≈ 8 ms at 1 ksym/s — short enough
+    # to re-anchor before fading or drift invalidates the initial estimate,
+    # long enough for the median to suppress 1-2 outlier spikes.  This
+    # also spans the 6-byte (48-bit) pilot header, ensuring the bootstrap
+    # window includes the known-good pilot region.
     BOOTSTRAP = 8
     max_consecutive_misses = max(8, n_bits // 32)
     consecutive_misses = 0
@@ -846,27 +799,6 @@ def fit_phase_from_known_bits(
         return None
 
     return theta0_at_zero, float(delta_hat), rms_residual
-
-
-def refine_freq_from_pilot(
-    peak_values,
-    pilot_bit_offset: int,
-    pilot_bits: np.ndarray,
-    symbol_rate_hz: float,
-) -> tuple[float, float, float | None]:
-    """Convert pilot phase slope Δθ to residual freq offset in Hz.
-
-    f_residual = (Δθ · symbol_rate_hz) / (2π).
-    Returns (f_residual_hz, theta0, rms_residual_rad) or None on failure.
-    """
-    fit = fit_phase_from_known_bits(
-        peak_values, pilot_bit_offset, pilot_bits,
-    )
-    if fit is None:
-        return None
-    theta0, delta_theta, rms_residual = fit
-    f_residual_hz = delta_theta * symbol_rate_hz / (2.0 * np.pi)
-    return f_residual_hz, theta0, rms_residual
 
 
 def estimate_drift_per_symbol(

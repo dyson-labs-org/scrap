@@ -381,18 +381,35 @@ def _acquire_and_track(
     signal_threshold: float,
     fec_total_bits: int = sc.HAIL_FEC_TOTAL_BITS,
     freq_hint_rad: float | None = None,
+    freq_offset_hz: float | None = None,
+    skip_periodicity: bool = False,
+    track_full_block: bool = False,
 ) -> dict:
     """Frequency estimation, correction, matched filter, periodicity test,
     and per-symbol tracking decode.
 
+    freq_offset_hz: pre-seeded carrier offset (Hz).  When provided, uses this
+    value directly instead of FFT-squared + post-MF estimation.
+
+    skip_periodicity: bypass the 16-symbol periodicity gate.  The periodicity
+    gate rejects continuous unique-symbol streams (RLNC payloads).
+
+    track_full_block: track symbols over the entire block instead of limiting
+    to 2x fec_total_bits.  Needed when extracting multiple symbols per block.
+
     Returns a dict with peak_values, positions, freq_hz, peak_mag,
     median_mag, rad_per_sample on success, or a status dict on failure.
     """
-    if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 200:
+    min_symbols = 4 if skip_periodicity else 200
+    if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * min_symbols:
         return {"status": "short_block"}
 
     samples = (samples - samples.mean()).astype(np.complex64)
-    if freq_hint_rad is not None:
+
+    _mf_score = 0.0
+    if freq_offset_hz is not None:
+        rad_per_sample = float(freq_offset_hz) * 2.0 * np.pi / samp_hz
+    elif freq_hint_rad is not None:
         # Use the hint from a prior block's successful decode.
         # Validate it with post-MF scoring; if it still works, skip
         # the expensive FFT-squared + grid search entirely.
@@ -424,6 +441,15 @@ def _acquire_and_track(
     peak_mag = float(mag.max())
     median_mag = float(np.median(mag))
 
+    # Clamp the prefilter threshold to 2.5× peak/median ratio.
+    # The user-facing --signal-threshold (default 4.0) gates the main
+    # signal-presence check, but the periodicity test downstream is the
+    # real discriminator.  We clamp here because a threshold above ~2.5
+    # rejects weak-but-real DSSS signals before they reach the periodicity
+    # check.  Pure Gaussian noise gives peak/median ≈ 5-8 for million-
+    # sample blocks; a real signal at marginal SNR can sit at 2-3×.
+    # Clamping to 2.5 ensures the prefilter only rejects obvious noise
+    # floors while letting marginal signals through to the periodicity gate.
     prefilter_threshold = min(signal_threshold, 2.5)
     if median_mag == 0.0 or peak_mag < prefilter_threshold * median_mag:
         return {
@@ -445,43 +471,66 @@ def _acquire_and_track(
     chip_phase = int(np.argmax(phase_avgs))
     chip_phase_peak = float(phase_avgs[chip_phase])
 
-    # Periodicity check using chip-phase aligned peaks (not spike-biased argmax).
-    search_half = samples_per_symbol // 4
-    test_peaks: list[float] = []
-    for k in range(16):
-        pos_k = chip_phase + k * samples_per_symbol
-        if pos_k + search_half >= len(mag):
-            break
-        lo = max(0, pos_k - search_half)
-        hi = min(len(mag), pos_k + search_half + 1)
-        test_peaks.append(float(mag[lo:hi].max()))
+    if not skip_periodicity:
+        # Periodicity check using chip-phase aligned peaks (not spike-biased argmax).
+        search_half = samples_per_symbol // 4
+        test_peaks: list[float] = []
+        for k in range(16):
+            pos_k = chip_phase + k * samples_per_symbol
+            if pos_k + search_half >= len(mag):
+                break
+            lo = max(0, pos_k - search_half)
+            hi = min(len(mag), pos_k + search_half + 1)
+            test_peaks.append(float(mag[lo:hi].max()))
 
-    if len(test_peaks) < 4:
-        return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
+        if len(test_peaks) < 4:
+            return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
 
-    periodic_ratio = float(np.median(test_peaks)) / peak_mag if peak_mag > 0 else 0.0
-    # The post-MF frequency search already validated the signal using
-    # a median-noise denominator (not spike-dominated peak_mag).
-    # If _mf_score >= 3.0, the signal is real — skip the legacy
-    # periodic_ratio gate which uses peak_mag and fails when WiFi/BT
-    # spikes inflate the denominator.
-    if _mf_score < 3.0 and periodic_ratio < 0.15:
-        return {
-            "status": "no_signal",
-            "peak_mag": peak_mag,
-            "median_mag": median_mag,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "periodic_ratio": periodic_ratio,
-            "note": "spurious spike, no periodic structure",
-        }
+        periodic_ratio = float(np.median(test_peaks)) / peak_mag if peak_mag > 0 else 0.0
+        # Periodicity gate: median of 16 symbol-spaced MF peaks / global peak.
+        # A real DSSS signal produces periodic MF peaks at every symbol boundary
+        # (every CHIPS_PER_SYMBOL x samps_per_chip samples), so the median of
+        # symbol-spaced peaks should be a substantial fraction of the global peak.
+        # 0.15 means the median periodic peak must be at least 15% of the global
+        # peak magnitude — below this, the "peak" is likely a single non-periodic
+        # spike (WiFi/BT interference) rather than a sustained DSSS signal.
+        #
+        # This gate is bypassed when _mf_score >= 3.0 (from estimate_freq_post_mf).
+        # The MF score is median-of-periodic-peaks / median-noise, which is immune
+        # to WiFi/BT spikes inflating peak_mag.  A score >= 3.0 means the periodic
+        # structure is 3x above the noise floor — the signal is real even if a
+        # single spike makes periodic_ratio look small.
+        if _mf_score < 3.0 and periodic_ratio < 0.15:
+            return {
+                "status": "no_signal",
+                "peak_mag": peak_mag,
+                "median_mag": median_mag,
+                "rad_per_sample": rad_per_sample,
+                "freq_offset_hz": freq_hz,
+                "periodic_ratio": periodic_ratio,
+                "note": "spurious spike, no periodic structure",
+            }
 
-    target_bytes = (2 * fec_total_bits + 7) // 8
+    if track_full_block:
+        # Track symbols over the entire block for multi-symbol extraction.
+        # Leave one symbol of margin so the tracking loop does not overrun.
+        n_block_symbols = max(1, (len(corr_c) - samples_per_symbol) // samples_per_symbol)
+        target_bytes = n_block_symbols // 8
+        if target_bytes < 1:
+            return {"status": "short_block", "peak_mag": peak_mag, "median_mag": median_mag}
+        # Frequency correction already applied to samples_corr; pass 0.0.
+        track_rad = 0.0
+        track_samples = samples_corr
+    else:
+        target_bytes = (2 * fec_total_bits + 7) // 8
+        track_rad = rad_per_sample
+        track_samples = samples
+
     track_result = sf.decode_with_freq_tracking(
-        samples,
+        track_samples,
         samps_per_chip=samps_per_chip,
         n_bytes=target_bytes,
-        freq_offset_rad_per_sample=rad_per_sample,
+        freq_offset_rad_per_sample=track_rad,
         precomputed_corr=corr_c,
         start_pos=chip_phase,
         peak_hint=chip_phase_peak,
@@ -559,6 +608,20 @@ def _try_fec_decrypt(
     for cand_offset, cand_score, cand_pts in topk:
         if cand_offset + fec_total_bits > len(peak_values):
             continue
+        # Soft ASM score gate for hail/ACK frames: require |score| > 10.0.
+        # The soft score is the 31-element differential ASM template correlated
+        # against the normalized differential dot-products of consecutive MF
+        # peaks.  Perfect alignment gives score = ±31 (all 31 differentials
+        # match); pure noise gives score ~ N(0, sqrt(31)) ≈ std 5.6.
+        # A threshold of 10.0 ≈ 1.8σ above noise mean — conservative enough
+        # to admit marginal signals while rejecting most noise candidates.
+        #
+        # pts_ratio gate: |score| / median(|scores|), a CFAR-style
+        # peak-to-sidelobe ratio.  Clean signal gives pts_ratio > 5; noise
+        # gives ~2-3.  The 3.0 threshold rejects candidates that are not
+        # meaningfully above the sidelobe floor — even if their absolute
+        # score exceeds 10.0, a low pts_ratio means the candidate is not
+        # distinctive relative to other positions in the block.
         if abs(cand_score) <= 10.0 or cand_pts < 3.0:
             continue
 
@@ -690,7 +753,7 @@ def _try_fec_decrypt(
 def _decode_one_hail_in_block(
     samples: np.ndarray,
     responder_static: ec.EllipticCurvePrivateKey,
-    samps_per_chip: int = 8,
+    samps_per_chip: int = 2,
     samp_hz: float = 8_000_000.0,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
@@ -853,6 +916,79 @@ _PAYLOAD_PILOT_BITS = np.unpackbits(
 ).astype(np.uint8)
 
 
+def _decode_payload_candidates(
+    peak_values: list,
+    n_payload_bytes: int,
+    n_fec_bits: int,
+    base: dict,
+    max_candidates: int = 5,
+    min_separation: int = 4,
+    return_first: bool = False,
+) -> list[dict]:
+    """DBPSK decode + FEC decode for payload ASM candidates.
+
+    Shared candidate-processing loop for both decode_one_payload_in_block
+    and decode_all_payload_in_block.
+
+    peak_values: symbol-rate MF peak complex values from tracking.
+    return_first: if True, return after the first successful decode (for
+    decode_one); if False, collect all successful decodes (for decode_all).
+
+    Returns a list of result dicts with status decrypt_ok, or a single-element
+    list with status decrypt_fail if no candidate succeeded.
+    """
+    frame_len_bytes = n_payload_bytes + sc.PAYLOAD_HEADER_LEN
+    topk = find_sisl_frame_soft_topk(
+        peak_values, frame_len_bytes,
+        k=max_candidates,
+        min_separation=min_separation,
+    )
+
+    results = []
+    for cand_offset, cand_score, _cand_pts in topk:
+        # Soft ASM score gate for payload frames: require |score| > 5.0.
+        # Lower than the hail/ACK gate (10.0) because payload frames are
+        # sent once each (unique RLNC symbols), so there is no multi-copy
+        # LLR accumulation to recover from a missed frame.  The AEAD
+        # (Authenticated Encryption with Associated Data) tag on each
+        # payload symbol provides a hard cryptographic check, so false
+        # positives from lowering the gate are rejected by Poly1305 —
+        # the cost is only wasted FEC decode cycles, not false accepts.
+        if abs(cand_score) <= 5.0:
+            continue
+        if cand_offset + n_fec_bits > len(peak_values):
+            continue
+
+        aligned = peak_values[int(cand_offset):]
+        if len(aligned) < n_fec_bits:
+            continue
+
+        dbpsk = sf.dbpsk_decode_from_pilot(aligned, _PAYLOAD_PILOT_BITS, n_fec_bits)
+        if dbpsk is None:
+            continue
+
+        _, fec_soft, _, _, _ = dbpsk
+        for polarity in (1.0, -1.0):
+            raw = sc.decode_payload_symbol_fec_from_llrs(
+                polarity * fec_soft, n_payload_bytes,
+            )
+            if raw is not None and len(raw) == n_payload_bytes:
+                results.append({
+                    "status": "decrypt_ok",
+                    "payload_frame_bytes": raw,
+                    "asm_at_byte": f"soft-bit{int(cand_offset)}",
+                    "soft_score": float(cand_score),
+                    **base,
+                })
+                if return_first:
+                    return results
+                break
+
+    if not results:
+        return [{"status": "decrypt_fail", **base}]
+    return results
+
+
 def decode_one_payload_in_block(
     samples: np.ndarray,
     n_payload_bytes: int,
@@ -888,45 +1024,12 @@ def decode_one_payload_in_block(
     if len(peak_values) < n_fec_bits:
         return {"status": "track_lost", **base}
 
-    topk = find_sisl_frame_soft_topk(peak_values, n_payload_bytes + sc.PAYLOAD_HEADER_LEN, k=top_k_soft)
-    best_bytes = None
-    best_offset = -1
-    best_score = 0.0
-
-    for cand_offset, cand_score, cand_pts in topk:
-        if cand_offset + n_fec_bits > len(peak_values):
-            continue
-        if abs(cand_score) <= 5.0:
-            continue
-
-        aligned = peak_values[int(cand_offset):]
-        if len(aligned) < n_fec_bits:
-            continue
-
-        dbpsk = sf.dbpsk_decode_from_pilot(aligned, _PAYLOAD_PILOT_BITS, n_fec_bits)
-        if dbpsk is None:
-            continue
-
-        _, fec_soft, _, _, _ = dbpsk
-        for polarity in (1.0, -1.0):
-            raw = sc.decode_payload_symbol_fec_from_llrs(polarity * fec_soft, n_payload_bytes)
-            if raw is not None and len(raw) == n_payload_bytes:
-                if best_bytes is None or abs(cand_score) > abs(best_score):
-                    best_bytes = raw
-                    best_offset = int(cand_offset)
-                    best_score = float(cand_score)
-                break
-
-    if best_bytes is None:
-        return {"status": "decrypt_fail", **base}
-
-    return {
-        "status": "decrypt_ok",
-        "payload_frame_bytes": best_bytes,
-        "asm_at_byte": f"soft-bit{best_offset}",
-        "soft_score": best_score,
-        **base,
-    }
+    results = _decode_payload_candidates(
+        peak_values, n_payload_bytes, n_fec_bits, base,
+        max_candidates=top_k_soft,
+        return_first=True,
+    )
+    return results[0]
 
 
 def decode_all_payload_in_block(
@@ -942,8 +1045,9 @@ def decode_all_payload_in_block(
 
     Unlike decode_one_payload_in_block, this function bypasses the
     _acquire_and_track periodicity gate (which was designed for repeated hail
-    frames and rejects continuous unique-symbol streams).  Instead it does a
-    direct MF + sliding ASM correlator over the full block.
+    frames and rejects continuous unique-symbol streams).  Instead it uses
+    _acquire_and_track with skip_periodicity=True and track_full_block=True
+    to track symbols over the entire block.
 
     Each symbol boundary is identified by the fixed 48-bit header
     (ASM + SISL_VERSION + MSG_PAYLOAD) that encode_payload_symbol_fec
@@ -960,126 +1064,27 @@ def decode_all_payload_in_block(
     """
     n_fec_bits = sc.payload_fec_total_bits(n_payload_bytes)
 
-    if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * 4:
-        return [{"status": "short_block", "peak_mag": 0.0, "median_mag": 0.0}]
+    acq = _acquire_and_track(
+        samples, samps_per_chip, samp_hz, signal_threshold,
+        fec_total_bits=n_fec_bits,
+        freq_offset_hz=freq_offset_hz,
+        skip_periodicity=True,
+        track_full_block=True,
+    )
+    if acq["status"] != "acquired":
+        return [acq]
 
-    # ── 1. Frequency correction ───────────────────────────────────────────
-    samples = (samples - samples.mean()).astype(np.complex64)
-    if freq_offset_hz is not None:
-        rad_per_sample = float(freq_offset_hz) * 2.0 * np.pi / samp_hz
-    else:
-        rad_per_sample = sf._estimate_freq_fft_squared(samples)
-    freq_hz = rad_per_sample * samp_hz / (2.0 * np.pi)
-    samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
-
-    # ── 2. Matched filter ─────────────────────────────────────────────────
-    corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
-    if len(corr_c) == 0:
-        return [{"status": "short_block", "peak_mag": 0.0, "median_mag": 0.0}]
-
-    mag = np.abs(corr_c).astype(np.float32)
-    peak_mag = float(mag.max())
-    median_mag = float(np.median(mag))
-
-    # ── 3. Cheap signal-presence gate (peak/median ratio) ────────────────
-    # DSSS MF output peaks once per PN period (~1 ms = 2046 samples at
-    # 2 Msps), so the peaks occupy <0.1% of all samples.  The p95 of the
-    # magnitude always falls at the noise floor regardless of signal
-    # presence.  Use peak/median instead.  WiFi spikes that lift peak/median
-    # without a real DSSS signal will be rejected by find_sisl_frame_soft_topk
-    # (the 31-bit ASM correlator score gate) and the FEC/Poly1305 check.
-    if peak_mag == 0 or peak_mag < signal_threshold * median_mag:
-        return [{"status": "no_signal", "peak_mag": peak_mag,
-                 "median_mag": median_mag, "freq_offset_hz": freq_hz}]
-
+    peak_values = acq["peak_values"]
     base = {
-        "peak_mag": peak_mag,
-        "median_mag": median_mag,
-        "rad_per_sample": rad_per_sample,
-        "freq_offset_hz": freq_hz,
+        "peak_mag": acq["peak_mag"],
+        "median_mag": acq["median_mag"],
+        "rad_per_sample": acq["rad_per_sample"],
+        "freq_offset_hz": acq["freq_hz"],
     }
 
-    samps_per_symbol = sf.CHIPS_PER_SYMBOL * samps_per_chip
-    if len(corr_c) < n_fec_bits * samps_per_symbol:
-        return [{**base, "status": "short_block"}]
-
-    # ── 4. Symbol-rate tracking (handles TX/RX clock mismatch) ───────────
-    # Simple static decimation (corr_c[phase::samps_per_symbol]) fails
-    # because the TX and RX HackRF clocks differ by up to ±30 ppm.
-    # Over 640 symbols (one RLNC frame) that's ~77 samples of drift —
-    # enough to miss the 2-sample-wide MF peak entirely by mid-frame.
-    #
-    # decode_with_freq_tracking tracks the MF peak per-symbol, handling
-    # this drift.  We set n_bytes to cover the full block so we get
-    # symbol-rate peak_values for every PN period in the block.
-    # We bypass only the periodicity check (which rejects unique symbols).
-    # Leave one symbol of margin so the tracking loop does not run off
-    # the end of the buffer.  decode_with_freq_tracking returns None (not
-    # break) when lo > hi, so an over-run discards all collected data.
-    n_block_symbols = max(1, (len(corr_c) - samps_per_symbol) // samps_per_symbol)
-    n_track_bytes = n_block_symbols // 8  # floor: n_bits = n_track_bytes*8 ≤ n_block_symbols
-    if n_track_bytes < 1:
-        return [{**base, "status": "short_block"}]
-
-    # ── 4a. DSSS chip-phase estimation ───────────────────────────────────
-    # The global MF peak may be a WiFi/BT spike that is not phase-aligned
-    # with the periodic DSSS peaks (every samps_per_symbol samples).
-    # Average the MF magnitude at each phase offset across the whole block.
-    # This exploits the periodicity of DSSS to identify the true chip phase
-    # and suppress non-periodic spikes (WiFi/BT).
-    n_full = (len(mag) // samps_per_symbol) * samps_per_symbol
-    phase_avgs = mag[:n_full].reshape(-1, samps_per_symbol).mean(axis=0)
-    chip_phase = int(np.argmax(phase_avgs))
-
-    track = sf.decode_with_freq_tracking(
-        samples_corr, samps_per_chip,
-        n_bytes=n_track_bytes,
-        freq_offset_rad_per_sample=0.0,   # already applied above
-        precomputed_corr=corr_c,
-        start_pos=chip_phase,
-        peak_hint=float(phase_avgs[chip_phase]),  # avg DSSS peak, not spike
-    )
-    if track is None:
-        return [{**base, "status": "track_lost"}]
-    peak_values = track["peak_values"]
-    # ── 5. Sliding ASM search across full block ───────────────────────────
-    frame_len_bytes = n_payload_bytes + sc.PAYLOAD_HEADER_LEN
-    topk = find_sisl_frame_soft_topk(
-        peak_values, frame_len_bytes,
-        k=max_symbols_per_block,
+    return _decode_payload_candidates(
+        peak_values, n_payload_bytes, n_fec_bits, base,
+        max_candidates=max_symbols_per_block,
         min_separation=n_fec_bits // 2,
+        return_first=False,
     )
-
-    results = []
-    for cand_offset, cand_score, _ in topk:
-        if abs(cand_score) <= 5.0:
-            continue
-        if cand_offset + n_fec_bits > len(peak_values):
-            continue
-
-        aligned = peak_values[int(cand_offset):]
-        if len(aligned) < n_fec_bits:
-            continue
-
-        dbpsk = sf.dbpsk_decode_from_pilot(aligned, _PAYLOAD_PILOT_BITS, n_fec_bits)
-        if dbpsk is None:
-            continue
-
-        _, fec_soft, theta0, delta_theta, rms_res = dbpsk
-        for polarity in (1.0, -1.0):
-            raw = sc.decode_payload_symbol_fec_from_llrs(
-                polarity * fec_soft, n_payload_bytes,
-            )
-            if raw is not None and len(raw) == n_payload_bytes:
-                results.append({
-                    "status": "decrypt_ok",
-                    "payload_frame_bytes": raw,
-                    "asm_at_byte": f"soft-bit{int(cand_offset)}",
-                    "soft_score": float(cand_score),
-                    **base,
-                })
-                break
-
-    if not results:
-        return [{**base, "status": "decrypt_fail"}]
-    return results
