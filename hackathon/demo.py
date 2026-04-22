@@ -2102,7 +2102,8 @@ def main() -> int:
                     raw = res["payload_frame_bytes"]
                     if session.verify_ack(raw):
                         return {"status": "decrypt_ok", "decoded_hail": True}
-                return {**res, "status": "no_signal"}
+                    res["status"] = "decrypt_fail"
+                return res
 
             rlnc_tx_vga = (args.rlnc_tx_vga
                            if args.rlnc_tx_vga is not None
@@ -2138,8 +2139,10 @@ def main() -> int:
             comb_id = n_sent
 
             # ── Phase 4: RX payload ACK ───────────────────────────────────
-            # Reuse call_sdr.device — same as Phase 2, avoids close/reopen
-            # USB destabilization (hackrf#1570).
+            # Reuse Phase 2's converged center frequency (includes AUTO-PPM
+            # retune) so the payload ACK signal lands near 0 Hz offset.
+            _phase4_center_hz = ack_stats.get(
+                "final_center_hz", call_sdr.center_hz)
             print(f"  TX complete ({comb_id} symbols total). "
                   f"Listening for payload ACK...")
             rlnc_ack_stats = live_rx_decode(
@@ -2148,7 +2151,7 @@ def main() -> int:
                 lna_db=args.rx_lna,
                 vga_db=args.rx_vga,
                 amp_on=args.rx_amp,
-                center_hz=call_sdr.center_hz,
+                center_hz=_phase4_center_hz,
                 device_name=args.device,
                 device=call_sdr.device,
                 signal_threshold=args.signal_threshold,
