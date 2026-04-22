@@ -2355,8 +2355,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
+    import signal
+    def _sigint_handler(sig, frame):
         print("\n  interrupted — exiting", flush=True)
-        sys.exit(130)
+        os._exit(130)  # immediate exit, no cleanup (avoids HackRF deactivateStream hang)
+    signal.signal(signal.SIGINT, _sigint_handler)
+    sys.exit(main())
