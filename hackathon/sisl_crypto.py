@@ -37,6 +37,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 import sisl_fec
 import sisl_framer as sf  # for differential_encode_bits used in encode_hail_fec
+from sisl_types import SessionKeys
 
 
 # ── Protocol constants ──────────────────────────────────────────────────────
@@ -69,83 +70,80 @@ ELLIGATOR_LEN = 64
 COMPRESSED_PUBKEY_LEN = 33
 TAG_LEN = 16
 
-# ── FEC frame layout ───────────────────────────────────────────────────────
-#
-# The FEC variant of the hail leaves the first 6 bytes (ASM + version + type)
-# UNCODED so the receiver's coherent decoder can use them as a known pilot
-# for phase tracking, and rate-1/2 K=9 convolutionally encodes the rest of
-# the frame (eph_enc + ciphertext + tag = 127 bytes = 1016 bits).
-#
-# Channel layout:
-#   [0   ..   48)   uncoded header bits (ASM + ver + type) — pilot
-#   [48  .. 2096)   coded body bits (FEC over 1016 payload bits)
-#
-# Total channel bits: 48 + 2*(1016 + 8) = 48 + 2048 = 2096 (262 bytes).
-HAIL_HEADER_LEN = 6                                          # ASM+ver+type
-HAIL_BODY_PAYLOAD_LEN = HAIL_FRAME_LEN - HAIL_HEADER_LEN     # 127
-HAIL_FEC_HEADER_BITS = HAIL_HEADER_LEN * 8                   # 48
-HAIL_FEC_BODY_PAYLOAD_BITS = HAIL_BODY_PAYLOAD_LEN * 8       # 1016
-HAIL_FEC_BODY_CODED_BITS = sisl_fec.coded_length(
-    HAIL_FEC_BODY_PAYLOAD_BITS)                              # 2048
-HAIL_FEC_TOTAL_BITS = HAIL_FEC_HEADER_BITS + HAIL_FEC_BODY_CODED_BITS  # 2096
+@dataclass
+class FecFrameLayout:
+    """Shared FEC layout parameters for hail/ACK frame wrapping."""
 
-# ── Block interleaver for FEC body bits ────────────────────────────────────
-#
-# A burst of interference (e.g., a WiFi frame at 2.4 GHz) wipes out a
-# contiguous run of symbols. Without interleaving, those errors hit
-# adjacent coded bits and exceed Viterbi's burst-correction capability.
-# A block interleaver writes bits row-wise into a matrix and reads them
-# column-wise (or vice versa), spreading any contiguous burst across the
-# entire codeword so Viterbi sees scattered single-bit errors instead.
-#
-# Matrix dimensions: 32 rows × 64 columns = 2048 bits = HAIL_FEC_BODY_CODED_BITS.
-# A 64-symbol burst (65 ms at 1 Mcps) becomes 64 single-bit errors
-# spaced 32 symbols apart — well within Viterbi's correction capability
-# (d_free = 12, can correct ~6 adjacent errors per constraint length).
+    frame_len: int
+    msg_type: int
+    header_len: int = 6
+    interleave_rows: int = 32
 
-_INTERLEAVE_ROWS = 32
-_INTERLEAVE_COLS = HAIL_FEC_BODY_CODED_BITS // _INTERLEAVE_ROWS  # 64
-assert _INTERLEAVE_ROWS * _INTERLEAVE_COLS == HAIL_FEC_BODY_CODED_BITS
-
-# Pre-computed permutation indices (row-major write, column-major read)
-_INTERLEAVE_PERM = np.arange(HAIL_FEC_BODY_CODED_BITS).reshape(
-    _INTERLEAVE_ROWS, _INTERLEAVE_COLS
-).T.ravel()
-_DEINTERLEAVE_PERM = np.argsort(_INTERLEAVE_PERM)
+    def __post_init__(self) -> None:
+        self.body_payload_len = self.frame_len - self.header_len
+        self.fec_header_bits = self.header_len * 8
+        self.fec_body_payload_bits = self.body_payload_len * 8
+        self.fec_body_coded_bits = sisl_fec.coded_length(self.fec_body_payload_bits)
+        self.fec_total_bits = self.fec_header_bits + self.fec_body_coded_bits
+        interleave_cols = self.fec_body_coded_bits // self.interleave_rows
+        if self.interleave_rows * interleave_cols != self.fec_body_coded_bits:
+            raise ValueError(
+                f"invalid interleaver shape {self.interleave_rows}x{interleave_cols} "
+                f"for {self.fec_body_coded_bits} bits"
+            )
+        self.interleave_cols = interleave_cols
+        self.interleave_perm = np.arange(self.fec_body_coded_bits).reshape(
+            self.interleave_rows, self.interleave_cols
+        ).T.ravel()
+        self.deinterleave_perm = np.argsort(self.interleave_perm)
+        self.header_bytes = ASM + bytes([SISL_VERSION, self.msg_type])
 
 
-def _interleave_bits(bits: np.ndarray) -> np.ndarray:
+# ── FEC frame layouts (hail + ACK) ──────────────────────────────────────────
+#
+# Both layouts leave the first 6 bytes (ASM + version + type) uncoded as a
+# coherent-decoder pilot and FEC-wrap only the body payload.
+HAIL_FEC_LAYOUT = FecFrameLayout(frame_len=HAIL_FRAME_LEN, msg_type=MSG_HAIL)
+ACK_FEC_LAYOUT = FecFrameLayout(frame_len=ACK_FRAME_LEN, msg_type=MSG_ACK)
+
+# Backward-compatible exported constants (used by demo/tests/sisl_rx).
+HAIL_HEADER_LEN = HAIL_FEC_LAYOUT.header_len
+HAIL_BODY_PAYLOAD_LEN = HAIL_FEC_LAYOUT.body_payload_len
+HAIL_FEC_HEADER_BITS = HAIL_FEC_LAYOUT.fec_header_bits
+HAIL_FEC_BODY_PAYLOAD_BITS = HAIL_FEC_LAYOUT.fec_body_payload_bits
+HAIL_FEC_BODY_CODED_BITS = HAIL_FEC_LAYOUT.fec_body_coded_bits
+HAIL_FEC_TOTAL_BITS = HAIL_FEC_LAYOUT.fec_total_bits
+ACK_HEADER_LEN = ACK_FEC_LAYOUT.header_len
+ACK_BODY_PAYLOAD_LEN = ACK_FEC_LAYOUT.body_payload_len
+ACK_FEC_HEADER_BITS = ACK_FEC_LAYOUT.fec_header_bits
+ACK_FEC_BODY_PAYLOAD_BITS = ACK_FEC_LAYOUT.fec_body_payload_bits
+ACK_FEC_BODY_CODED_BITS = ACK_FEC_LAYOUT.fec_body_coded_bits
+ACK_FEC_TOTAL_BITS = ACK_FEC_LAYOUT.fec_total_bits
+
+# Backward-compatible interleaver aliases.
+_INTERLEAVE_ROWS = HAIL_FEC_LAYOUT.interleave_rows
+_INTERLEAVE_COLS = HAIL_FEC_LAYOUT.interleave_cols
+_INTERLEAVE_PERM = HAIL_FEC_LAYOUT.interleave_perm
+_DEINTERLEAVE_PERM = HAIL_FEC_LAYOUT.deinterleave_perm
+_ACK_INTERLEAVE_ROWS = ACK_FEC_LAYOUT.interleave_rows
+_ACK_INTERLEAVE_COLS = ACK_FEC_LAYOUT.interleave_cols
+_ACK_INTERLEAVE_PERM = ACK_FEC_LAYOUT.interleave_perm
+_ACK_DEINTERLEAVE_PERM = ACK_FEC_LAYOUT.deinterleave_perm
+
+
+def _interleave_bits(bits: np.ndarray, layout: FecFrameLayout) -> np.ndarray:
     """Block-interleave FEC coded body bits (uint8 array)."""
-    return bits[_INTERLEAVE_PERM]
+    return bits[layout.interleave_perm]
 
 
-# ── ACK FEC frame layout ──────────────────────────────────────────────────
-ACK_HEADER_LEN = 6                                          # ASM+ver+type
-ACK_BODY_PAYLOAD_LEN = ACK_FRAME_LEN - ACK_HEADER_LEN       # 89
-ACK_FEC_HEADER_BITS = ACK_HEADER_LEN * 8                    # 48
-ACK_FEC_BODY_PAYLOAD_BITS = ACK_BODY_PAYLOAD_LEN * 8        # 712
-ACK_FEC_BODY_CODED_BITS = sisl_fec.coded_length(
-    ACK_FEC_BODY_PAYLOAD_BITS)                              # 1440
-ACK_FEC_TOTAL_BITS = ACK_FEC_HEADER_BITS + ACK_FEC_BODY_CODED_BITS  # 1488
-
-_ACK_INTERLEAVE_ROWS = 32
-_ACK_INTERLEAVE_COLS = ACK_FEC_BODY_CODED_BITS // _ACK_INTERLEAVE_ROWS  # 45
-assert _ACK_INTERLEAVE_ROWS * _ACK_INTERLEAVE_COLS == ACK_FEC_BODY_CODED_BITS
-
-_ACK_INTERLEAVE_PERM = np.arange(ACK_FEC_BODY_CODED_BITS).reshape(
-    _ACK_INTERLEAVE_ROWS, _ACK_INTERLEAVE_COLS
-).T.ravel()
-_ACK_DEINTERLEAVE_PERM = np.argsort(_ACK_INTERLEAVE_PERM)
-
-
-def _deinterleave_llrs(llrs: np.ndarray) -> np.ndarray:
+def _deinterleave_llrs(llrs: np.ndarray, layout: FecFrameLayout) -> np.ndarray:
     """Undo block interleaving on soft LLR array (float32)."""
-    return llrs[_DEINTERLEAVE_PERM]
+    return llrs[layout.deinterleave_perm]
 
 
 def deinterleave_hail_body_llrs(llrs: np.ndarray) -> np.ndarray:
-    """Public alias for hail body LLR deinterleaving (used by sisl_rx)."""
-    return llrs[_DEINTERLEAVE_PERM]
+    """Public hail deinterleaver alias (used by sisl_rx)."""
+    return _deinterleave_llrs(llrs, HAIL_FEC_LAYOUT)
 
 
 # ── Key utilities ───────────────────────────────────────────────────────────
@@ -449,11 +447,7 @@ def decode_hail(
 
 def _encode_frame_to_fec_bits(
     frame: bytes,
-    header_len: int,
-    body_payload_len: int,
-    interleave_perm: np.ndarray,
-    fec_total_bits: int,
-    fec_header_bits: int,
+    layout: FecFrameLayout,
 ) -> np.ndarray:
     """Encode a raw frame into FEC-coded channel bits.
 
@@ -464,26 +458,40 @@ def _encode_frame_to_fec_bits(
 
     Returns a uint8 ndarray of fec_total_bits bits.
     """
-    header_bytes = frame[:header_len]
-    body_bytes = frame[header_len:]
-    if len(body_bytes) != body_payload_len:
-        raise ValueError(f"expected {body_payload_len} bytes, got {len(body_bytes)}")
+    header_bytes = frame[:layout.header_len]
+    body_bytes = frame[layout.header_len:]
+    if len(body_bytes) != layout.body_payload_len:
+        raise ValueError(f"expected {layout.body_payload_len} bytes, got {len(body_bytes)}")
 
     header_bits = np.unpackbits(np.frombuffer(header_bytes, dtype=np.uint8))
     body_bits = np.unpackbits(np.frombuffer(body_bytes, dtype=np.uint8))
     coded_body_bits = sisl_fec.encode(body_bits)
-    if len(coded_body_bits) != len(interleave_perm):
+    if len(coded_body_bits) != layout.fec_body_coded_bits:
         raise ValueError(
-            f"expected {len(interleave_perm)} coded bits, got {len(coded_body_bits)}")
+            f"expected {layout.fec_body_coded_bits} coded bits, got {len(coded_body_bits)}")
 
-    coded_body_bits = coded_body_bits[interleave_perm]
+    coded_body_bits = _interleave_bits(coded_body_bits, layout)
     seed = int(header_bits[-1])
     diff_coded_body = sf.differential_encode_bits(coded_body_bits, seed=seed)
 
-    out = np.empty(fec_total_bits, dtype=np.uint8)
-    out[:fec_header_bits] = header_bits
-    out[fec_header_bits:] = diff_coded_body
+    out = np.empty(layout.fec_total_bits, dtype=np.uint8)
+    out[:layout.fec_header_bits] = header_bits
+    out[layout.fec_header_bits:] = diff_coded_body
     return out
+
+
+def _decode_fec_body_from_llrs(
+    llrs: np.ndarray,
+    layout: FecFrameLayout,
+) -> tuple[np.ndarray, bytes]:
+    """Decode one FEC body from channel LLRs using the provided layout."""
+    llrs = np.asarray(llrs[:layout.fec_total_bits], dtype=np.float32)
+    coded_body_llrs = _deinterleave_llrs(llrs[layout.fec_header_bits:], layout)
+    body_bits = sisl_fec.decode(coded_body_llrs, layout.fec_body_payload_bits)
+    body_bytes = np.packbits(body_bits).tobytes()
+    if len(body_bytes) != layout.body_payload_len:
+        raise ValueError(f"expected {layout.body_payload_len} bytes, got {len(body_bytes)}")
+    return llrs, body_bytes
 
 
 # ── FEC-wrapped hail encode / decode ───────────────────────────────────────
@@ -530,10 +538,7 @@ def encode_hail_fec(
     coherently-recovered last pilot symbol.
     """
     frame = encode_hail(caller_eph, responder_static_pub, body)
-    return _encode_frame_to_fec_bits(
-        frame, HAIL_HEADER_LEN, HAIL_BODY_PAYLOAD_LEN,
-        _INTERLEAVE_PERM, HAIL_FEC_TOTAL_BITS, HAIL_FEC_HEADER_BITS,
-    )
+    return _encode_frame_to_fec_bits(frame, HAIL_FEC_LAYOUT)
 
 
 def decode_hail_fec_from_llrs(
@@ -550,9 +555,9 @@ def decode_hail_fec_from_llrs(
     HAIL_FEC_BODY_PAYLOAD_BITS payload bits and reassembled into the
     standard 133-byte hail frame for the existing decode_hail pipeline.
     """
-    if len(llrs) < HAIL_FEC_TOTAL_BITS:
+    if len(llrs) < HAIL_FEC_LAYOUT.fec_total_bits:
         return None
-    llrs = np.asarray(llrs[:HAIL_FEC_TOTAL_BITS], dtype=np.float32)
+    _, body_bytes = _decode_fec_body_from_llrs(llrs, HAIL_FEC_LAYOUT)
 
     # The uncoded header (48 bits = ASM + version + msg_type) has no FEC
     # protection. At marginal SNR a few header bits may be wrong even
@@ -561,13 +566,7 @@ def decode_hail_fec_from_llrs(
     # + Poly1305 tag be the definitive integrity check. The header bytes
     # used below are the KNOWN canonical values, not the received bits.
 
-    coded_body_llrs = _deinterleave_llrs(llrs[HAIL_FEC_HEADER_BITS:])
-    body_bits = sisl_fec.decode(coded_body_llrs, HAIL_FEC_BODY_PAYLOAD_BITS)
-    body_bytes = np.packbits(body_bits).tobytes()
-    if len(body_bytes) != HAIL_BODY_PAYLOAD_LEN:
-        raise ValueError(f"expected {HAIL_BODY_PAYLOAD_LEN} bytes, got {len(body_bytes)}")
-
-    header_bytes = ASM + bytes([SISL_VERSION, MSG_HAIL])
+    header_bytes = HAIL_FEC_LAYOUT.header_bytes
     frame = header_bytes + body_bytes
     return decode_hail(frame, my_static_priv)
 
@@ -751,10 +750,7 @@ def encode_ack_fec(
     Same pipeline as encode_hail_fec but for the 95-byte ACK frame.
     """
     frame = encode_ack_frame(responder_eph, decoded_hail, status)
-    return _encode_frame_to_fec_bits(
-        frame, ACK_HEADER_LEN, ACK_BODY_PAYLOAD_LEN,
-        _ACK_INTERLEAVE_PERM, ACK_FEC_TOTAL_BITS, ACK_FEC_HEADER_BITS,
-    )
+    return _encode_frame_to_fec_bits(frame, ACK_FEC_LAYOUT)
 
 
 def decode_ack_fec_from_llrs(
@@ -767,24 +763,18 @@ def decode_ack_fec_from_llrs(
     """Trial-decrypt a FEC-coded ACK from per-bit LLRs."""
     import os as _os
     _ACK_DEBUG = _os.environ.get("SISL_ACK_DEBUG")
-    if len(llrs) < ACK_FEC_TOTAL_BITS:
+    if len(llrs) < ACK_FEC_LAYOUT.fec_total_bits:
         return None
-    llrs = np.asarray(llrs[:ACK_FEC_TOTAL_BITS], dtype=np.float32)
-
-    coded_body_llrs = llrs[ACK_FEC_HEADER_BITS:][_ACK_DEINTERLEAVE_PERM]
-    body_bits = sisl_fec.decode(coded_body_llrs, ACK_FEC_BODY_PAYLOAD_BITS)
-    body_bytes = np.packbits(body_bits).tobytes()
-    if len(body_bytes) != ACK_BODY_PAYLOAD_LEN:
-        raise ValueError(f"expected {ACK_BODY_PAYLOAD_LEN} bytes, got {len(body_bytes)}")
+    llrs, body_bytes = _decode_fec_body_from_llrs(llrs, ACK_FEC_LAYOUT)
 
     if _ACK_DEBUG:
         # Check how many LLR bits have low confidence (near zero)
-        low_conf = int(np.sum(np.abs(llrs[ACK_FEC_HEADER_BITS:]) < 1.0))
-        print(f"  [ACK_DEBUG] FEC decode: {ACK_FEC_BODY_PAYLOAD_BITS} payload bits, "
-              f"low-conf LLRs={low_conf}/{ACK_FEC_BODY_CODED_BITS}, "
+        low_conf = int(np.sum(np.abs(llrs[ACK_FEC_LAYOUT.fec_header_bits:]) < 1.0))
+        print(f"  [ACK_DEBUG] FEC decode: {ACK_FEC_LAYOUT.fec_body_payload_bits} payload bits, "
+              f"low-conf LLRs={low_conf}/{ACK_FEC_LAYOUT.fec_body_coded_bits}, "
               f"body[0:4]={body_bytes[:4].hex()}", flush=True)
 
-    header_bytes = ASM + bytes([SISL_VERSION, MSG_ACK])
+    header_bytes = ACK_FEC_LAYOUT.header_bytes
     frame = header_bytes + body_bytes
     return decode_ack_frame(frame, caller_static_priv, caller_eph_priv,
                             dh1, expected_nonce_echo)
@@ -796,7 +786,7 @@ def derive_session_keys(
     dh1: bytes, dh2: bytes, dh3: bytes,
     caller_eph_pub_canonical: bytes,
     responder_eph_pub_canonical: bytes,
-) -> dict:
+) -> SessionKeys:
     """Derive v3 session keys from full X3DH shared secret.
 
     All three DH terms are combined: dh1||dh2||dh3 = 96 bytes. Both sides
@@ -815,7 +805,7 @@ def derive_session_keys(
     }
 
 
-def derive_session_prk(session_keys: dict) -> bytes:
+def derive_session_prk(session_keys: SessionKeys) -> bytes:
     ikm = (session_keys["p2p_tx_key"] + session_keys["p2p_rx_key"]
            + session_keys["session_id"])
     return hkdf_sha256(ikm, b"SISL-RLNC-v1", b"", 32)

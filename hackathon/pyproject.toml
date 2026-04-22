@@ -17,5 +17,6 @@ py-modules = [
     "sisl_dsss",
     "sisl_fec",
     "sisl_framer",
+    "sisl_types",
     "sisl_rx",
 ]

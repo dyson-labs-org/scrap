@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
-import os
 import numpy as np
 from cryptography.hazmat.primitives.asymmetric import ec
+from collections.abc import Callable
 
 import sisl_crypto as sc
 import sisl_fec
 import sisl_framer as sf
+from sisl_types import (
+    AccumulatorInput,
+    AcquireTrackResult,
+    CandidateWindow,
+    FrameDecodeResult,
+    LlrExtractionResult,
+    PayloadDecodeResult,
+    SoftAsmCandidate,
+)
 
 
 # Initial signal-presence prefilter — a cheap peak/median ratio test
@@ -28,9 +37,6 @@ _PERIODIC_RATIO_MIN = 0.15
 _SOFT_SCORE_MIN_HAIL_ACK = 10.0
 _SOFT_PTS_RATIO_MIN = 3.0
 _SOFT_SCORE_MIN_PAYLOAD = 5.0
-_RX_DEBUG = bool(os.environ.get("SISL_DEBUG"))
-
-
 # Bit-unpacked ASM for sliding-bit-offset search. MSB-first to match
 # bytes_to_bits / rx_chips_to_bytes conventions.
 _ASM_BITS = np.unpackbits(
@@ -51,6 +57,94 @@ _ACK_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_ACK])
 _ACK_PILOT_BITS = np.unpackbits(
     np.frombuffer(_ACK_PILOT_BYTES, dtype=np.uint8)
 ).astype(np.uint8)
+
+_RAD_PER_SAMPLE_MAX_ABS = float(np.pi)
+
+
+def _require_finite_real(name: str, value: float) -> float:
+    value_f = float(value)
+    if not np.isfinite(value_f):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+    return value_f
+
+
+def _require_rad_per_sample(name: str, value: float) -> float:
+    value_f = _require_finite_real(name, value)
+    if abs(value_f) > _RAD_PER_SAMPLE_MAX_ABS:
+        raise ValueError(
+            f"{name} must be in [-pi, +pi] rad/sample, got {value_f:.6g}"
+        )
+    return value_f
+
+
+def _require_freq_hz(name: str, value: float, samp_hz: float) -> float:
+    value_f = _require_finite_real(name, value)
+    nyquist_hz = 0.5 * float(samp_hz)
+    if abs(value_f) > nyquist_hz:
+        raise ValueError(
+            f"{name}={value_f:.6g}Hz exceeds Nyquist ({nyquist_hz:.6g}Hz)"
+        )
+    return value_f
+
+
+def _require_accumulator_layout(n_bits: int, header_bits: int, accum_size: int) -> None:
+    if header_bits < 0 or header_bits > n_bits:
+        raise ValueError(
+            f"invalid accumulator header_bits={header_bits} for n_bits={n_bits}"
+        )
+    expected_accum = n_bits - header_bits
+    if accum_size != expected_accum:
+        raise ValueError(
+            f"invalid accumulator body size: expected {expected_accum}, got {accum_size}"
+        )
+
+
+def _validate_fec_llrs(llrs, expected_bits: int, *, context: str) -> np.ndarray:
+    arr = np.asarray(llrs)
+    if arr.ndim != 1:
+        raise ValueError(f"{context}: fec_llrs must be 1-D, got shape {arr.shape}")
+    if len(arr) != expected_bits:
+        raise ValueError(
+            f"{context}: fec_llrs length {len(arr)} != expected {expected_bits}"
+        )
+    return arr.astype(np.float64, copy=False)
+
+
+def _require_hail_or_ack_args(
+    *,
+    responder_static,
+    caller_static_priv,
+    caller_eph_priv,
+    dh1,
+    expected_nonce_echo,
+) -> bool:
+    ack_fields = (caller_static_priv, caller_eph_priv, dh1, expected_nonce_echo)
+    ack_mode = any(v is not None for v in ack_fields)
+    if ack_mode and not all(v is not None for v in ack_fields):
+        raise ValueError(
+            "ACK decode requires caller_static_priv, caller_eph_priv, dh1, "
+            "and expected_nonce_echo"
+        )
+    if not ack_mode and responder_static is None:
+        raise ValueError("HAIL decode requires responder_static")
+    return ack_mode
+
+
+def _try_decode_llrs_polarities(
+    llrs: np.ndarray,
+    decode_fn: Callable[[np.ndarray], object | None],
+    *,
+    polarity_pos: str,
+    polarity_inv: str,
+) -> tuple[object | None, str]:
+    """Try both LLR polarities with the same decoder function."""
+    attempt = decode_fn(llrs)
+    if attempt is not None:
+        return attempt, polarity_pos
+    attempt = decode_fn(-llrs)
+    if attempt is not None:
+        return attempt, polarity_inv
+    return None, polarity_pos
 
 
 class LlrAccumulator:
@@ -98,6 +192,7 @@ class LlrAccumulator:
             # ACK frame: accumulate all FEC bits as body.
             self._header_bits = 0
             self._accum_size = n_bits
+        _require_accumulator_layout(self.n_bits, self._header_bits, self._accum_size)
         self.accumulated = np.zeros(self._accum_size, dtype=np.float64)
         self.n_copies = 0
         self._running_freq_hz: float | None = None
@@ -108,7 +203,7 @@ class LlrAccumulator:
         self.n_copies = 0
         self._running_freq_hz = None
 
-    def try_add(self, result: dict) -> bool:
+    def try_add(self, result: AccumulatorInput) -> bool:
         """Try to add a block-decode result to the accumulator.
 
         Returns True if the result was accepted and added, False otherwise.
@@ -124,8 +219,11 @@ class LlrAccumulator:
         llrs = result.get("fec_llrs")
         if llrs is None:
             return False
-        if len(llrs) < self.n_bits:
-            return False
+        llrs_f64 = _validate_fec_llrs(
+            llrs,
+            self.n_bits,
+            context=f"{self.__class__.__name__}.try_add",
+        )
         # The soft-Viterbi + Poly1305 gate at try_decrypt is the real
         # quality oracle. Skip phase_rms and asm_errs gates -- the FEC +
         # crypto layer rejects bad copies after combining.
@@ -134,20 +232,31 @@ class LlrAccumulator:
         # of absolute phase theta_0. NO polarity vote -- applying one flips
         # correct body LLRs based on noisy pilot phase, causing ~half the
         # copies to cancel instead of add (sublinear L1 growth).
-        llrs_f64 = llrs[:self.n_bits].astype(np.float64)
         body_llrs = llrs_f64[self._header_bits:]
-        if _RX_DEBUG and self.n_copies > 0:
+        if len(body_llrs) != self._accum_size:
+            raise ValueError(
+                f"{self.__class__.__name__}.try_add: body LLR length {len(body_llrs)} "
+                f"!= accumulator size {self._accum_size}"
+            )
+        if sf.SISL_DEBUG and self.n_copies > 0:
             prev_norm = float(np.linalg.norm(self.accumulated))
             body_norm = float(np.linalg.norm(body_llrs))
             if prev_norm > 1e-9 and body_norm > 1e-9:
                 cos_sim = float(np.dot(self.accumulated, body_llrs) / (prev_norm * body_norm))
-                print(f"       [DBG acc] cos_sim={cos_sim:+.3f} "
-                      f"mean|llr|={float(np.mean(np.abs(body_llrs))):.3f}",
-                      flush=True)
+                sf.debug_telemetry(
+                    "acc",
+                    status="llr_add",
+                    cos_sim=cos_sim,
+                    mean_abs_llr=float(np.mean(np.abs(body_llrs))),
+                )
 
         # Frequency-drift flush: detect carrier shift > freq_flush_hz.
         incoming_freq = result.get("freq_offset_hz")
         if incoming_freq is not None:
+            incoming_freq = _require_finite_real(
+                f"{self.__class__.__name__}.try_add freq_offset_hz",
+                incoming_freq,
+            )
             if (self._running_freq_hz is not None
                     and abs(incoming_freq - self._running_freq_hz) > self.freq_flush_hz):
                 # New carrier offset — stale LLRs would cancel, not add.
@@ -179,15 +288,25 @@ class LlrAccumulator:
         """
         if self.n_copies == 0:
             return None
+        if self.n_bits != sc.HAIL_FEC_TOTAL_BITS:
+            raise RuntimeError("try_decrypt supports hail accumulators only")
         body_llrs_f32 = sc.deinterleave_hail_body_llrs(
             self.accumulated.astype(np.float32))
         body_bits = sisl_fec.decode(
             body_llrs_f32, sc.HAIL_FEC_BODY_PAYLOAD_BITS,
         )
         body_bytes = np.packbits(body_bits).tobytes()
-        assert len(body_bytes) == sc.HAIL_BODY_PAYLOAD_LEN
+        if len(body_bytes) != sc.HAIL_BODY_PAYLOAD_LEN:
+            raise ValueError(
+                f"decoded hail body length {len(body_bytes)} "
+                f"!= expected {sc.HAIL_BODY_PAYLOAD_LEN}"
+            )
         header = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_HAIL])
         frame = header + body_bytes
+        if len(frame) != sc.HAIL_FRAME_LEN:
+            raise ValueError(
+                f"decoded hail frame length {len(frame)} != expected {sc.HAIL_FRAME_LEN}"
+            )
         decoded = sc.decode_hail(frame, responder_static)
         if decoded is not None:
             return decoded, "fec-acc", 0
@@ -222,7 +341,7 @@ def make_ack_decode_fn(
         max_copies=max_copies,
     )
 
-    def _decode(block_data: "np.ndarray") -> dict:
+    def _decode(block_data: "np.ndarray") -> FrameDecodeResult | AcquireTrackResult:
         result = decode_one_ack_in_block(
             block_data,
             caller_static_priv=caller_static_priv,
@@ -284,7 +403,7 @@ def find_sisl_frame_soft_topk(
     frame_len: int = sc.HAIL_FRAME_LEN,
     k: int = 5,
     min_separation: int = 4,
-) -> list:
+) -> list[SoftAsmCandidate]:
     """Return the top-K ASM candidate positions by |soft_score|.
 
     At marginal SNR, the argmax soft score may be a noise-driven winner
@@ -353,7 +472,7 @@ def _extract_llrs_at_position(
     peak_offset: int,
     n_fec_bits: int | None = None,
     pilot_bits: np.ndarray | None = None,
-) -> dict:
+) -> LlrExtractionResult:
     """Run the DBPSK decoder at one ASM offset and return FEC LLRs.
 
     Handles both hail frames (default) and ACK frames via n_fec_bits /
@@ -367,7 +486,7 @@ def _extract_llrs_at_position(
         n_fec_bits = sc.HAIL_FEC_TOTAL_BITS
     if pilot_bits is None:
         pilot_bits = _PILOT_BITS
-    out: dict = {
+    out: LlrExtractionResult = {
         "fec_llrs": None,
         "phase_rms_residual_rad": None,
         "asm_errs_in_coherent": None,
@@ -376,12 +495,26 @@ def _extract_llrs_at_position(
     if len(aligned_peaks) < n_fec_bits:
         return out
 
-    dbpsk = sf.dbpsk_decode_from_pilot(
-        aligned_peaks, pilot_bits, n_fec_bits,
-    )
+    try:
+        dbpsk = sf.dbpsk_decode_from_pilot(
+            aligned_peaks, pilot_bits, n_fec_bits,
+        )
+    except ValueError:
+        # Candidate-level decode failures should not abort the worker loop.
+        # Keep scanning remaining candidates in this block.
+        return out
     if dbpsk is None:
         return out
     fec_frame, fec_soft, _, _, rms = dbpsk
+    if len(fec_soft) != n_fec_bits:
+        raise ValueError(
+            f"dbpsk fec_llrs length {len(fec_soft)} != expected {n_fec_bits}"
+        )
+    expected_frame_len = (n_fec_bits + 7) // 8
+    if len(fec_frame) != expected_frame_len:
+        raise ValueError(
+            f"dbpsk frame byte length {len(fec_frame)} != expected {expected_frame_len}"
+        )
     out["fec_llrs"] = fec_soft
     out["phase_rms_residual_rad"] = rms
     c_bits_first32 = np.unpackbits(
@@ -401,7 +534,7 @@ def _acquire_and_track(
     freq_offset_hz: float | None = None,
     skip_periodicity: bool = False,
     track_full_block: bool = False,
-) -> dict:
+) -> AcquireTrackResult:
     """Frequency estimation, correction, matched filter, periodicity test,
     and per-symbol tracking decode.
 
@@ -419,6 +552,18 @@ def _acquire_and_track(
     median_mag, rad_per_sample, mf_score on success, or status dict on failure.
     """
     min_symbols = 4 if skip_periodicity else 200
+    if samps_per_chip <= 0:
+        raise ValueError(f"samps_per_chip must be > 0, got {samps_per_chip}")
+    samp_hz = _require_finite_real("samp_hz", samp_hz)
+    if samp_hz <= 0.0:
+        raise ValueError(f"samp_hz must be > 0, got {samp_hz}")
+    if freq_hint_rad is not None:
+        _require_rad_per_sample("freq_hint_rad", freq_hint_rad)
+    if freq_candidates is not None:
+        for i, cand in enumerate(freq_candidates):
+            _require_rad_per_sample(f"freq_candidates[{i}]", cand)
+    if freq_offset_hz is not None:
+        _require_freq_hz("freq_offset_hz", freq_offset_hz, samp_hz)
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * min_symbols:
         return {"status": "short_block"}
 
@@ -427,6 +572,7 @@ def _acquire_and_track(
     _mf_score = 0.0
     if freq_offset_hz is not None:
         rad_per_sample = float(freq_offset_hz) * 2.0 * np.pi / samp_hz
+        rad_per_sample = _require_rad_per_sample("rad_per_sample", rad_per_sample)
     else:
         # Build candidate list: all prior good frequencies + FFT-squared
         candidates = list(freq_candidates or [])
@@ -462,7 +608,9 @@ def _acquire_and_track(
                 samps_per_chip=samps_per_chip,
                 samp_hz=samp_hz,
             )
+    rad_per_sample = _require_rad_per_sample("rad_per_sample", rad_per_sample)
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
+    _require_freq_hz("freq_hz", freq_hz, samp_hz)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
     corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
@@ -611,7 +759,7 @@ def _try_fec_decrypt(
     caller_eph_priv: ec.EllipticCurvePrivateKey | None = None,
     dh1: bytes | None = None,
     expected_nonce_echo: bytes | None = None,
-) -> dict:
+) -> FrameDecodeResult:
     """FEC fast path: soft correlator search, DBPSK decode, Viterbi, decrypt.
 
     Handles both hail frames (pass responder_static) and ACK frames (pass
@@ -619,7 +767,13 @@ def _try_fec_decrypt(
 
     Returns a result dict with status decrypt_ok, decrypt_fail, or track_lost.
     """
-    ack_mode = caller_static_priv is not None
+    ack_mode = _require_hail_or_ack_args(
+        responder_static=responder_static,
+        caller_static_priv=caller_static_priv,
+        caller_eph_priv=caller_eph_priv,
+        dh1=dh1,
+        expected_nonce_echo=expected_nonce_echo,
+    )
     fec_total_bits = sc.ACK_FEC_TOTAL_BITS if ack_mode else sc.HAIL_FEC_TOTAL_BITS
     frame_len = sc.ACK_FRAME_LEN if ack_mode else sc.HAIL_FRAME_LEN
     pilot_bits = _ACK_PILOT_BITS if ack_mode else None
@@ -637,20 +791,39 @@ def _try_fec_decrypt(
         }
 
     topk = find_sisl_frame_soft_topk(peak_values, frame_len, k=top_k_soft)
-    if _RX_DEBUG:
-        print(f"       [DBG rx] candidates={len(topk)} "
-              f"peak_values={len(peak_values)} fec_bits={fec_total_bits} "
-              f"Δf={freq_hz:+.0f}Hz", flush=True)
+    if sf.SISL_DEBUG:
+        sf.debug_telemetry(
+            "rx",
+            status="candidate_scan",
+            candidates=len(topk),
+            freq_hz=freq_hz,
+            peak_values=len(peak_values),
+            fec_bits=fec_total_bits,
+        )
 
-    best_attempt: dict | None = None
+    best_attempt: dict[str, object] | None = None
     best_offset = -1
     best_score = 0.0
     best_pts_ratio = 0.0
     decoded = None
     polarity_label = polarity_pos
     extra_fec_llrs: list[np.ndarray] = []
+    if ack_mode:
+        def _decode_candidate(llrs: np.ndarray):
+            return sc.decode_ack_fec_from_llrs(
+                llrs, caller_static_priv, caller_eph_priv, dh1, expected_nonce_echo
+            )
+    else:
+        def _decode_candidate(llrs: np.ndarray):
+            return sc.decode_hail_fec_from_llrs(llrs, responder_static)
 
     for cand_offset, cand_score, cand_pts in topk:
+        _candidate_window = CandidateWindow(
+            bit_offset=int(cand_offset),
+            frame_bits=fec_total_bits,
+            soft_score=float(cand_score),
+            pts_ratio=float(cand_pts),
+        )
         if cand_offset + fec_total_bits > len(peak_values):
             continue
         # Soft ASM score gate for hail/ACK frames: require |score| > 10.0.
@@ -681,36 +854,25 @@ def _try_fec_decrypt(
         fec_llrs_arr = llr_diag.get("fec_llrs")
         if fec_llrs_arr is None:
             continue
-        if _RX_DEBUG:
+        if sf.SISL_DEBUG:
             body = fec_llrs_arr[sc.ACK_FEC_HEADER_BITS if ack_mode else sc.HAIL_FEC_HEADER_BITS:]
-            print(f"       [DBG rx] cand off={cand_offset} score={cand_score:+.1f} "
-                  f"pts={cand_pts:.2f} mean|body|={float(np.mean(np.abs(body))):.3f} "
-                  f"asm_errs={llr_diag.get('asm_errs_in_coherent')}",
-                  flush=True)
+            sf.debug_telemetry(
+                "rx",
+                status="candidate_eval",
+                asm_errs=llr_diag.get("asm_errs_in_coherent"),
+                mean_abs_llr=float(np.mean(np.abs(body))),
+                candidate_offset=_candidate_window.bit_offset,
+                candidate_score=_candidate_window.soft_score,
+                pts_ratio=_candidate_window.pts_ratio,
+            )
 
-        if ack_mode:
-            assert caller_static_priv is not None and caller_eph_priv is not None
-            assert dh1 is not None and expected_nonce_echo is not None
-            attempt = sc.decode_ack_fec_from_llrs(
-                fec_llrs_arr, caller_static_priv, caller_eph_priv,
-                dh1, expected_nonce_echo)
-            if attempt is None:
-                attempt = sc.decode_ack_fec_from_llrs(
-                    -fec_llrs_arr, caller_static_priv, caller_eph_priv,
-                    dh1, expected_nonce_echo)
-                if attempt is not None:
-                    polarity_label = polarity_inv
-            else:
-                polarity_label = polarity_pos
-        else:
-            assert responder_static is not None
-            attempt = sc.decode_hail_fec_from_llrs(fec_llrs_arr, responder_static)
-            if attempt is None:
-                attempt = sc.decode_hail_fec_from_llrs(-fec_llrs_arr, responder_static)
-                if attempt is not None:
-                    polarity_label = polarity_inv
-            else:
-                polarity_label = polarity_pos
+        attempt, cand_polarity = _try_decode_llrs_polarities(
+            fec_llrs_arr,
+            _decode_candidate,
+            polarity_pos=polarity_pos,
+            polarity_inv=polarity_inv,
+        )
+        polarity_label = cand_polarity
 
         if attempt is not None:
             decoded = attempt
@@ -764,7 +926,7 @@ def _try_fec_decrypt(
 
     llr_diag = best_attempt["llr_diag"]
     fec_llrs_arr = best_attempt["fec_llrs"]
-    base: dict = {
+    base: dict[str, object] = {
         "start_sample": positions[0] if positions else 0,
         "asm_at_byte": f"soft-bit{best_offset}",
         "peak_mag": peak_mag,
@@ -812,7 +974,7 @@ def _single_freq_pipeline(
     signal_threshold: float,
     responder_static: ec.EllipticCurvePrivateKey,
     top_k_soft: int = 5,
-) -> dict:
+) -> FrameDecodeResult | AcquireTrackResult:
     """Run the full hail decode pipeline at one specific frequency.
 
     freq correction → MF → track → ASM search → DBPSK → FEC → decrypt.
@@ -850,7 +1012,7 @@ def _decode_one_hail_in_block(
     top_k_soft: int = 5,
     freq_hint_rad: float | None = None,
     freq_candidates: list[float] | None = None,
-) -> dict:
+) -> FrameDecodeResult | AcquireTrackResult:
     """Process one block of baseband samples, try to decode one FEC hail.
 
     When freq_candidates has multiple entries, runs full pipelines in
@@ -943,7 +1105,7 @@ def decode_one_ack_in_block(
     samp_hz: float = 2_000_000.0,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
-) -> dict:
+) -> FrameDecodeResult | AcquireTrackResult:
     """Process one block, try to decode an ACK frame.
 
     Parallel to _decode_one_hail_in_block but for the 95-byte ACK.
@@ -976,12 +1138,9 @@ def decode_one_ack_in_block(
     )
 
 
-def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
+def _print_live_event_debug(block_num: int, result: dict, quiet: bool = False) -> None:
     s = result["status"]
     foff = result.get("freq_offset_hz", 0.0)
-    # Signal power estimate: peak/median of MF output in dB.
-    # peak_mag = signal + noise at the symbol peak, median_mag ≈ noise.
-    # SNR ≈ (peak/median)² in linear → 20*log10(peak/median) in dB.
     pk = result.get("peak_mag", 0)
     md = result.get("median_mag", 0)
     if md > 0 and pk > 0:
@@ -996,12 +1155,10 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         pol = result.get("polarity", "?")
         detail = ""
         if b is not None and hasattr(b, "body_nonce"):
-            # HailBody
             detail = (f"nonce={b.body_nonce.hex()}  "
                       f"freq=+{b.center_freq_offset}MHz  "
                       f"mode=0x{b.mode:02x}")
         elif b is not None and hasattr(b, "nonce_echo"):
-            # AckBody
             detail = (f"status={b.status}  "
                       f"nonce_echo={b.nonce_echo.hex()}")
         print(f"{_GREEN}[{block_num:4d}] DECRYPTED  "
@@ -1044,6 +1201,36 @@ def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None
         print(f"[{block_num:4d}] short block (processing gap)", flush=True)
 
 
+def _print_live_event(block_num: int, result: dict, quiet: bool = False) -> None:
+    if sf.SISL_DEBUG:
+        _print_live_event_debug(block_num, result, quiet=quiet)
+        return
+
+    s = result["status"]
+
+    if s == "decrypt_ok":
+        b = result.get("body")
+        if b is not None and hasattr(b, "body_nonce"):
+            summary = "HAIL decrypted"
+        elif b is not None and hasattr(b, "nonce_echo"):
+            summary = "ACK decrypted"
+        else:
+            summary = "frame decrypted"
+        print(f"[{block_num:4d}] ✅ {summary}", flush=True)
+    elif s == "decrypt_fail":
+        print(f"[{block_num:4d}] ⚠️ Frame detected, but decrypt failed", flush=True)
+    elif s == "track_lost":
+        print(f"[{block_num:4d}] ⚠️ Signal detected, but tracking was lost", flush=True)
+    elif quiet:
+        return
+    elif s == "no_signal":
+        if block_num > 2:
+            return
+        print(f"[{block_num:4d}] … Listening: no usable signal yet", flush=True)
+    elif s == "short_block":
+        print(f"[{block_num:4d}] … Waiting: short block (processing gap)", flush=True)
+
+
 _PAYLOAD_PILOT_BYTES = sc.ASM + bytes([sc.SISL_VERSION, sc.MSG_PAYLOAD])
 _PAYLOAD_PILOT_BITS = np.unpackbits(
     np.frombuffer(_PAYLOAD_PILOT_BYTES, dtype=np.uint8)
@@ -1054,11 +1241,11 @@ def _decode_payload_candidates(
     peak_values: list,
     n_payload_bytes: int,
     n_fec_bits: int,
-    base: dict,
+    base: PayloadDecodeResult,
     max_candidates: int = 5,
     min_separation: int = 4,
     return_first: bool = False,
-) -> list[dict]:
+) -> list[PayloadDecodeResult]:
     """DBPSK decode + FEC decode for payload ASM candidates.
 
     Shared candidate-processing loop for both decode_one_payload_in_block
@@ -1077,8 +1264,15 @@ def _decode_payload_candidates(
         k=max_candidates,
         min_separation=min_separation,
     )
+    def _decode_payload_candidate(llrs: np.ndarray):
+        raw_candidate = sc.decode_payload_symbol_fec_from_llrs(
+            llrs, n_payload_bytes,
+        )
+        if raw_candidate is None or len(raw_candidate) != n_payload_bytes:
+            return None
+        return raw_candidate
 
-    results = []
+    results: list[PayloadDecodeResult] = []
     for cand_offset, cand_score, _cand_pts in topk:
         # Soft ASM score gate for payload frames: require |score| > 5.0.
         # Lower than the hail/ACK gate (10.0) because payload frames are
@@ -1102,21 +1296,23 @@ def _decode_payload_candidates(
             continue
 
         _, fec_soft, _, _, _ = dbpsk
-        for polarity in (1.0, -1.0):
-            raw = sc.decode_payload_symbol_fec_from_llrs(
-                polarity * fec_soft, n_payload_bytes,
-            )
-            if raw is not None and len(raw) == n_payload_bytes:
-                results.append({
-                    "status": "decrypt_ok",
-                    "payload_frame_bytes": raw,
-                    "asm_at_byte": f"soft-bit{int(cand_offset)}",
-                    "soft_score": float(cand_score),
-                    **base,
-                })
-                if return_first:
-                    return results
-                break
+
+        raw, _ = _try_decode_llrs_polarities(
+            fec_soft,
+            _decode_payload_candidate,
+            polarity_pos="payload-fec",
+            polarity_inv="payload-fec-inv",
+        )
+        if raw is not None:
+            results.append({
+                "status": "decrypt_ok",
+                "payload_frame_bytes": raw,
+                "asm_at_byte": f"soft-bit{int(cand_offset)}",
+                "soft_score": float(cand_score),
+                **base,
+            })
+            if return_first:
+                return results
 
     if not results:
         return [{"status": "decrypt_fail", **base}]
@@ -1130,7 +1326,7 @@ def decode_one_payload_in_block(
     samp_hz: float = 2_000_000.0,
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
-) -> dict:
+) -> PayloadDecodeResult | AcquireTrackResult:
     """Process one block, try to decode one RLNC payload symbol.
 
     n_payload_bytes — expected encode_payload_symbol() output length.
@@ -1174,7 +1370,7 @@ def decode_all_payload_in_block(
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     max_symbols_per_block: int = 8,
     freq_offset_hz: float | None = None,
-) -> list[dict]:
+) -> list[PayloadDecodeResult | AcquireTrackResult]:
     """Process one block and decode every RLNC payload symbol found in it.
 
     Unlike decode_one_payload_in_block, this function bypasses the
