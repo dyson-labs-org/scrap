@@ -1175,7 +1175,15 @@ def live_rx_decode(
 
     _save_file_ref = save_file  # captured by worker closure
 
-    _freq_hint_rad = [None]  # mutable container for cross-block seeding
+    # Frequency candidate bank: parallel correlator architecture.
+    # Each entry is a rad/sample value from a prior block where a frame
+    # was detected (decrypt_ok or decrypt_fail).  All candidates are
+    # scored with the full MF each block; the best-scoring one enters
+    # tracking mode (cheap fine refinement), avoiding the expensive
+    # coarse grid that can lock onto spurs.  Capped at _MAX_FREQ_CANDS
+    # to bound per-block scoring cost (~27ms each).
+    _MAX_FREQ_CANDS = 6
+    _freq_candidates: list[float] = []
 
     def _decode_worker() -> None:
         import os as _os
@@ -1210,10 +1218,22 @@ def live_rx_decode(
                         samp_hz=samp_hz,
                         signal_threshold=signal_threshold,
                         top_k_soft=top_k_soft,
-                        freq_hint_rad=_freq_hint_rad[0],
+                        freq_candidates=_freq_candidates or None,
                     )
-                    if result.get("rad_per_sample") is not None:
-                        _freq_hint_rad[0] = result["rad_per_sample"]
+                    # Add new frequency candidates from blocks where a frame
+                    # was actually found.  Deduplicate within 1 kHz to avoid
+                    # clustering around the same frequency.
+                    _s = result.get("status", "")
+                    if _s in ("decrypt_ok", "decrypt_fail"):
+                        _rad = result.get("rad_per_sample")
+                        if _rad is not None:
+                            _hz = _rad * samp_hz / (2.0 * np.pi)
+                            _dup = any(abs(_hz - c * samp_hz / (2.0 * np.pi)) < 1000.0
+                                       for c in _freq_candidates)
+                            if not _dup:
+                                _freq_candidates.append(_rad)
+                                if len(_freq_candidates) > _MAX_FREQ_CANDS:
+                                    _freq_candidates.pop(0)
                 result["sample_p99"] = sample_p99
                 if _dbg:
                     print(f"  [decode] done: {result.get('status')} in {_dbg_time.time()-_dbg_t0:.2f}s", flush=True)

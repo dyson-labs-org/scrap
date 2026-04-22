@@ -397,6 +397,7 @@ def _acquire_and_track(
     signal_threshold: float,
     fec_total_bits: int = sc.HAIL_FEC_TOTAL_BITS,
     freq_hint_rad: float | None = None,
+    freq_candidates: list[float] | None = None,
     freq_offset_hz: float | None = None,
     skip_periodicity: bool = False,
     track_full_block: bool = False,
@@ -405,16 +406,17 @@ def _acquire_and_track(
     and per-symbol tracking decode.
 
     freq_offset_hz: pre-seeded carrier offset (Hz).  When provided, uses this
-    value directly instead of FFT-squared + post-MF estimation.
+    value directly instead of any estimation.
 
-    skip_periodicity: bypass the 16-symbol periodicity gate.  The periodicity
-    gate rejects continuous unique-symbol streams (RLNC payloads).
+    freq_candidates: list of candidate frequencies (rad/sample) from prior
+    blocks.  All are scored with the full MF; the best-scoring one wins
+    (tracking mode).  Falls back to full grid acquisition only if no
+    candidate scores above the tracking threshold.
 
-    track_full_block: track symbols over the entire block instead of limiting
-    to 2x fec_total_bits.  Needed when extracting multiple symbols per block.
+    freq_hint_rad: legacy single hint (deprecated; use freq_candidates).
 
     Returns a dict with peak_values, positions, freq_hz, peak_mag,
-    median_mag, rad_per_sample on success, or a status dict on failure.
+    median_mag, rad_per_sample, mf_score on success, or status dict on failure.
     """
     min_symbols = 4 if skip_periodicity else 200
     if len(samples) < sf.CHIPS_PER_SYMBOL * samps_per_chip * min_symbols:
@@ -425,28 +427,41 @@ def _acquire_and_track(
     _mf_score = 0.0
     if freq_offset_hz is not None:
         rad_per_sample = float(freq_offset_hz) * 2.0 * np.pi / samp_hz
-    elif freq_hint_rad is not None:
-        # Use the hint from a prior block's successful decode.
-        # Validate it with post-MF scoring; if it still works, skip
-        # the expensive FFT-squared + grid search entirely.
-        rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
-            samples, freq_hint_rad,
-            samps_per_chip=samps_per_chip,
-            samp_hz=samp_hz,
-        )
     else:
-        # Two-stage frequency estimation:
-        # Stage 1: FFT-squared picks top-K spectral peaks and validates each
-        # via MF periodicity. Returns the best candidate.
-        # Stage 2: Post-MF grid search validates the FFT-squared result and
-        # falls back to a ±50 kHz grid if PLL spurs caused the estimator
-        # to lock onto the wrong peak.
-        fft_rad = sf._estimate_freq_fft_squared(samples)
-        rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
-            samples, fft_rad,
-            samps_per_chip=samps_per_chip,
-            samp_hz=samp_hz,
-        )
+        # Build candidate list: all prior good frequencies + FFT-squared
+        candidates = list(freq_candidates or [])
+        if freq_hint_rad is not None and freq_hint_rad not in candidates:
+            candidates.append(freq_hint_rad)
+
+        # Score all candidates with the full MF (cheap: ~27ms each)
+        seg_len = min(len(samples), 200_000)
+        best_cand_rad = None
+        best_cand_score = 0.0
+        for cand in candidates:
+            score = sf._score_freq_candidate_mf(
+                samples, cand, samps_per_chip, seg_len,
+            )
+            if score > best_cand_score:
+                best_cand_score = score
+                best_cand_rad = cand
+
+        # If any candidate scores above tracking threshold, use it
+        # (with fine refinement).  Otherwise fall back to full acquisition.
+        _TRACKING_THRESHOLD = 5.0
+        if best_cand_rad is not None and best_cand_score >= _TRACKING_THRESHOLD:
+            rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
+                samples, best_cand_rad,
+                samps_per_chip=samps_per_chip,
+                samp_hz=samp_hz,
+            )
+        else:
+            # Full acquisition: FFT-squared as one more candidate seed
+            fft_rad = sf._estimate_freq_fft_squared(samples)
+            rad_per_sample, _mf_score = sf.estimate_freq_post_mf(
+                samples, fft_rad,
+                samps_per_chip=samps_per_chip,
+                samp_hz=samp_hz,
+            )
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
@@ -797,28 +812,17 @@ def _decode_one_hail_in_block(
     signal_threshold: float = _SIGNAL_FLOOR_RATIO,
     top_k_soft: int = 5,
     freq_hint_rad: float | None = None,
+    freq_candidates: list[float] | None = None,
 ) -> dict:
     """Process one block of baseband samples, try to decode one FEC hail.
 
     Thin dispatcher: calls _acquire_and_track, then _try_fec_decrypt.
-
-    Statuses:
-      short_block   -- fewer than one code-period of samples
-      no_signal     -- CORRECTED peak/median below threshold
-      track_lost    -- tracker lost lock partway through the frame
-      decrypt_fail  -- hail frame found but Poly1305 tag mismatch
-      decrypt_ok    -- hail decoded and decrypted under responder_static
     """
-    # Track enough symbols for one full hail frame plus margin for the
-    # frame-copy extraction loop in _try_fec_decrypt.  The target_bytes
-    # formula in _acquire_and_track doubles fec_total_bits, so requesting
-    # 1× gives ~2 frames worth of tracked symbols.  With 3.0s blocks at
-    # 2 Msps this fits comfortably; the old 3× multiplier required 5.36s+
-    # blocks that exceeded real-time decode budget.
     acq = _acquire_and_track(
         samples, samps_per_chip, samp_hz, signal_threshold,
         fec_total_bits=sc.HAIL_FEC_TOTAL_BITS,
         freq_hint_rad=freq_hint_rad,
+        freq_candidates=freq_candidates,
     )
     if acq["status"] != "acquired":
         return acq
