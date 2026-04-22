@@ -114,10 +114,16 @@ class Coord:
         return True
 
 
-def listen(port: int) -> Coord:
-    """Bind, accept one connection, return Coord.  Blocks."""
-    srv = socket.create_server(("0.0.0.0", port))
-    print(_sync_msg(f"listening on tcp://0.0.0.0:{port}"))
+def listen(port: int, host: str = "127.0.0.1") -> Coord:
+    """Bind, accept one connection, return Coord.  Blocks.
+
+    Default host is 127.0.0.1 (loopback only).  On Windows this avoids
+    the firewall prompt that 0.0.0.0 triggers — loopback connections
+    bypass Windows Firewall.  Use 0.0.0.0 only when caller and respond
+    are on different machines.
+    """
+    srv = socket.create_server((host, port))
+    print(_sync_msg(f"listening on tcp://{host}:{port}"))
     conn, addr = srv.accept()
     srv.close()
     print(_sync_msg(f"peer connected from {addr[0]}:{addr[1]}"))

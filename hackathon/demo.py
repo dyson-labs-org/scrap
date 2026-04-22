@@ -1885,7 +1885,7 @@ def main() -> int:
     if args.mode in ("call", "respond") and not args.no_coord:
         _coord_str = args.coord
         if _coord_str == "auto":
-            _coord_str = "0.0.0.0:4574" if args.mode == "call" else "127.0.0.1:4574"
+            _coord_str = "127.0.0.1:4574"
         import sisl_coord as _coord_mod
         _coord_host, _, _coord_port = _coord_str.rpartition(":")
         _coord_port = int(_coord_port)
