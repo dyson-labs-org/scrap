@@ -1104,11 +1104,16 @@ def _run_respond_mode(
                       f"static PPM (no auto-retune)")
 
             received_count = 0
-            _hail_freq_offset = hail_stats.get("_decode_freq_offset_hz", 0.0)
-            if abs(_hail_freq_offset) < 1.0:
-                _hail_freq_offset = (hail_stats.get("final_center_hz", sdr.center_hz)
-                                     - sdr.center_hz)
-            if abs(_hail_freq_offset) > 1.0 and _is_debug_output_enabled():
+            # Always pre-seed the payload phase with the hail's frequency.
+            # A value of 0 Hz is valid (well-calibrated devices) and must NOT
+            # be treated as "no offset" — dropping it forces full frequency
+            # acquisition on every payload block, which is slow and spur-prone.
+            _hail_freq_offset = hail_stats.get("_decode_freq_offset_hz")
+            if _hail_freq_offset is None:
+                _fallback = hail_stats.get("final_center_hz")
+                if _fallback is not None:
+                    _hail_freq_offset = _fallback - sdr.center_hz
+            if _is_debug_output_enabled() and _hail_freq_offset is not None:
                 print(f"  pre-seeded freq offset: {_hail_freq_offset:+.0f} Hz")
 
             def _payload_sym_fn(block_data):
@@ -1119,7 +1124,7 @@ def _run_respond_mode(
                     samp_hz=chip_rate_hz * 2,
                     signal_threshold=args.signal_threshold,
                     max_symbols_per_block=8,
-                    freq_offset_hz=_hail_freq_offset if abs(_hail_freq_offset) > 1.0 else None,
+                    freq_offset_hz=_hail_freq_offset,
                 )
                 acq_sentinel = None
                 complete = False
