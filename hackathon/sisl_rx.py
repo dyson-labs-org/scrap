@@ -432,25 +432,6 @@ def _acquire_and_track(
             samp_hz=samp_hz,
         )
     freq_hz = rad_per_sample * samp_hz / (2 * np.pi)
-
-    # Early out: if the post-MF scoring found no signal on a short segment,
-    # skip the expensive full-block matched filter (~2.5s for 10M samples).
-    # This keeps per-block time under the 5.36s collection time for noise blocks.
-    # Note: pure noise gives _mf_score ~3.3 (MF kernel auto-correlation).
-    # Real DSSS at 20dB SNR gives ~5.1; at 30dB+ gives >> 10.
-    # Threshold 4.0 rejects most noise blocks (saving ~4s/block) while
-    # admitting signals just barely above the noise floor.
-    if _mf_score < 4.0:
-        return {
-            "status": "no_signal",
-            "peak_mag": 0.0,
-            "median_mag": 0.0,
-            "rad_per_sample": rad_per_sample,
-            "freq_offset_hz": freq_hz,
-            "periodic_ratio": 0.0,
-            "note": f"no signal on short MF segment (score={_mf_score:.1f} < 4.0)",
-        }
-
     samples_corr = sf.apply_freq_correction(samples, rad_per_sample)
 
     corr_c = sf.matched_filter_complex_sample_rate(samples_corr, samps_per_chip)
