@@ -2014,10 +2014,15 @@ def main() -> int:
                                 "decoded_hail": True,
                                 "polarity": "rlnc",
                                 "body": f"{received_count} symbols"}
-                    # Return a result with real peak diagnostics for _print_live_event.
                     base = acq_sentinel or (sym_results[0] if sym_results else {})
-                    status = ("no_signal" if (not sym_results or acq_sentinel)
-                              else ("decrypt_fail" if n_decoded == 0 else "no_signal"))
+                    if not sym_results or (acq_sentinel and n_decoded == 0):
+                        status = "no_signal"
+                    elif n_decoded == 0:
+                        status = "decrypt_fail"
+                    else:
+                        # Symbols decoded but RLNC not yet complete — suppress
+                        # _print_live_event output (symbols already printed above).
+                        status = "rlnc_partial"
                     return {**base, "status": status}
     
                 # B+C: pre-seeded VGA (no AGC warmup), static PPM (no wander).
