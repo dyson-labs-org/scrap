@@ -65,6 +65,10 @@
   button.primary { background:var(--accent); color:#04101f; border-color:var(--accent); font-weight:600; }
   button.danger { background:#241317; border-color:#5a2730; color:#ffb3ba; }
   button.danger:hover { border-color:var(--bad); }
+  button.danger.active { background:var(--bad); border-color:var(--bad); color:#1a0509; font-weight:600; }
+  .tamper-group { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+  .tamper-label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.6px;
+    color:var(--dim); margin-bottom:9px; }
   button:disabled { opacity:.4; cursor:default; }
   .tag { display:inline-block; font:11px var(--mono); padding:2px 7px; border-radius:5px;
     background:#16203200; border:1px solid var(--line); color:var(--dim); }
@@ -117,10 +121,14 @@
     <div class="scenario" id="scenario"></div>
     <div class="controls" style="margin-top:16px">
       <button class="primary" id="btnAudit">▶ Run independent audit</button>
-      <button class="danger" id="btnForge">Tamper: forge token (widen capability)</button>
-      <button class="danger" id="btnModel">Tamper: executor swaps in unauthorized model</button>
-      <button class="danger" id="btnRegion">Tamper: result leaves authorized region</button>
-      <button id="btnReset">Reset (honest run)</button>
+    </div>
+    <div class="tamper-group">
+      <span class="tamper-label">Tamper (click to apply, click again to undo):</span>
+      <div class="controls">
+        <button class="danger" id="btnForge">Forge token (widen capability)</button>
+        <button class="danger" id="btnModel">Executor swaps in unauthorized model</button>
+        <button class="danger" id="btnRegion">Result leaves authorized region</button>
+      </div>
     </div>
   </div>
 
@@ -491,15 +499,23 @@ function runAudit() {
 }
 
 // Wiring ------------------------------------------------------------------------
-function setScenario(s, mutate){ reset(); state.scenario = s; mutate && mutate(); render(); }
+const TAMPERS = {
+  forge:  { btn:'btnForge',  apply:() => { state.tokenCap = ["cmd:compute:inference","cmd:propulsion:burn"]; state.tokenSigValid = false; } },
+  model:  { btn:'btnModel',  apply:() => { state.ranModel = "tiny-cheap-v1"; state.ranModelHash = h("tiny-cheap-v1-weights"); } },
+  region: { btn:'btnRegion', apply:() => { state.ranRegion = "US"; } },
+};
+// Click a tamper to apply it; click the same one again to undo (back to honest).
+function toggleScenario(name) {
+  const turnOff = (state.scenario === name);
+  reset();
+  if (!turnOff) { state.scenario = name; TAMPERS[name].apply(); }
+  for (const [n, t] of Object.entries(TAMPERS))
+    document.getElementById(t.btn).classList.toggle('active', n === state.scenario);
+  render();
+}
 document.getElementById('btnAudit').onclick = runAudit;
-document.getElementById('btnReset').onclick = () => { setScenario('', null); };
-document.getElementById('btnForge').onclick = () =>
-  setScenario('forge', () => { state.tokenCap = ["cmd:compute:inference","cmd:propulsion:burn"]; state.tokenSigValid = false; });
-document.getElementById('btnModel').onclick = () =>
-  setScenario('model', () => { state.ranModel = "tiny-cheap-v1"; state.ranModelHash = h("tiny-cheap-v1-weights"); });
-document.getElementById('btnRegion').onclick = () =>
-  setScenario('region', () => { state.ranRegion = "US"; });
+for (const name of Object.keys(TAMPERS))
+  document.getElementById(TAMPERS[name].btn).onclick = () => toggleScenario(name);
 
 document.getElementById('foot').textContent =
   'Real secp256k1 ECDSA + SHA-256, computed in your browser — no network, no mockups.  ' +
