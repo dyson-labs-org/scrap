@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<!--
+  SCRAP audit demo — cross-operator on-orbit AI inference with an independently
+  auditable execution receipt. Self-contained: real secp256k1 ECDSA + SHA-256 in
+  pure JS, no network, no build. Open the file in any browser.
+
+  Story: a customer buys compute on someone else's satellite (Satlyt marketplace).
+  SCRAP proves WHAT model ran, on WHOSE data, WHERE, and binds it to payment — so a
+  third party who trusts neither operator can audit the receipt from public keys
+  alone. Normative spec: ../spec/SCRAP.md · wire format: ../schemas/scap.cddl
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCRAP — Verifiable Execution Receipts for On-Orbit Compute</title>
+<style>
+  :root {
+    --bg:#0a0e17; --panel:#121826; --panel2:#0e1320; --ink:#e6edf3; --dim:#8b97a8;
+    --line:#222c3d; --accent:#4ea1ff; --ok:#37d67a; --bad:#ff5d6c; --warn:#ffb454;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:28px 40px 18px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#0d1320,#0a0e17); }
+  header h1 { margin:0 0 4px; font-size:24px; letter-spacing:.2px; }
+  header h1 span { color:var(--accent); }
+  header p { margin:0; color:var(--dim); font-size:14px; }
+  .wrap { max-width:1080px; margin:0 auto; padding:24px 40px 80px; }
+  .parties { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin:22px 0 30px; }
+  .party { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .party .role { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--accent); }
+  .party .name { font-weight:600; margin:3px 0 6px; }
+  .party .key { font:11px/1.4 var(--mono); color:var(--dim); word-break:break-all; }
+  .step { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:20px 22px; margin:16px 0; }
+  .step h2 { margin:0 0 4px; font-size:17px; display:flex; align-items:center; gap:10px; }
+  .step h2 .n { background:var(--accent); color:#04101f; width:26px; height:26px; border-radius:50%;
+    display:inline-grid; place-items:center; font-size:14px; font-weight:700; }
+  .step .sub { color:var(--dim); font-size:13px; margin:0 0 14px 36px; }
+  pre { background:var(--panel2); border:1px solid var(--line); border-radius:8px;
+    padding:14px 16px; overflow-x:auto; font:12.5px/1.5 var(--mono); margin:0; }
+  pre .k { color:var(--accent); } pre .s { color:#9ee6a0; } pre .num { color:var(--warn); }
+  pre .hl { background:rgba(255,93,108,.18); border-radius:3px; }
+  .meta { color:var(--dim); font-size:12px; margin-top:8px; font-family:var(--mono); }
+  .checks { list-style:none; padding:0; margin:6px 0 0; }
+  .checks li { display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:7px;
+    margin:4px 0; background:var(--panel2); border:1px solid var(--line); font-size:14px;
+    opacity:.25; transform:translateX(-4px); transition:opacity .25s, transform .25s; }
+  .checks li.show { opacity:1; transform:none; }
+  .checks li .badge { font:11px/1 var(--mono); font-weight:700; padding:4px 7px; border-radius:5px; }
+  .checks li.pass .badge { background:rgba(55,214,122,.15); color:var(--ok); }
+  .checks li.fail .badge { background:rgba(255,93,108,.15); color:var(--bad); }
+  .checks li.fail { border-color:rgba(255,93,108,.4); }
+  .verdict { margin-top:14px; padding:13px 16px; border-radius:9px; font-weight:600;
+    display:none; align-items:center; gap:10px; }
+  .verdict.ok { display:flex; background:rgba(55,214,122,.1); border:1px solid rgba(55,214,122,.5); color:var(--ok); }
+  .verdict.bad { display:flex; background:rgba(255,93,108,.1); border:1px solid rgba(255,93,108,.5); color:var(--bad); }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; margin-top:4px; }
+  button { font:14px inherit; cursor:pointer; border-radius:8px; padding:10px 16px;
+    border:1px solid var(--line); background:#1a2334; color:var(--ink); transition:.15s; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#04101f; border-color:var(--accent); font-weight:600; }
+  button.danger { background:#241317; border-color:#5a2730; color:#ffb3ba; }
+  button.danger:hover { border-color:var(--bad); }
+  button:disabled { opacity:.4; cursor:default; }
+  .tag { display:inline-block; font:11px var(--mono); padding:2px 7px; border-radius:5px;
+    background:#16203200; border:1px solid var(--line); color:var(--dim); }
+  .tag.opt { color:var(--warn); border-color:rgba(255,180,84,.4); }
+  .tag.req { color:var(--ok); border-color:rgba(55,214,122,.4); }
+  .scenario { margin-top:8px; font-size:13px; color:var(--warn); min-height:18px; }
+  .integration { background:var(--panel2); }
+  .integration table { width:100%; border-collapse:collapse; font-size:13px; }
+  .integration td { padding:6px 8px; border-bottom:1px solid var(--line); }
+  .integration td:first-child { font-family:var(--mono); color:var(--dim); white-space:nowrap; }
+  code { font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .foot { color:var(--dim); font-size:12px; margin-top:26px; font-family:var(--mono); }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>SCRAP</span> — Verifiable Execution Receipts for On-Orbit Compute</h1>
+  <p>A customer buys AI inference on another operator's satellite. SCRAP proves what ran, on whose data, within which limits — auditable by a third party from public keys alone.</p>
+</header>
+
+<div class="wrap">
+  <div class="parties">
+    <div class="party"><div class="role">Issuer</div><div class="name" id="p-op">Operator&nbsp;A — task authority</div><div class="key" id="k-op"></div></div>
+    <div class="party"><div class="role">Executor</div><div class="name" id="p-ex">Satlyt node (DiskSat-07)</div><div class="key" id="k-ex"></div></div>
+    <div class="party"><div class="role">Auditor</div><div class="name" id="p-au">Regulator / counterparty — holds no keys</div><div class="key">verifies using only the two public keys above</div></div>
+  </div>
+
+  <!-- 1 -->
+  <div class="step">
+    <h2><span class="n">1</span>Authorization packet <span class="tag">SAT-CAP capability token</span></h2>
+    <p class="sub">Operator A signs a token granting exactly one capability, fenced by policy: which model may run, runtime ceiling, and a data-sovereignty region. Capabilities can only narrow downstream — never widen.</p>
+    <pre id="tokenView"></pre>
+    <div class="meta" id="tokenMeta"></div>
+  </div>
+
+  <!-- 2 -->
+  <div class="step">
+    <h2><span class="n">2</span>Execution receipt <span class="tag">signed proof-of-execution</span></h2>
+    <p class="sub">The Satlyt node runs the job and returns a receipt binding the input it was given, the model that actually ran, the output, runtime/energy, and the payment hash — all under the executor's signature.</p>
+    <pre id="receiptView"></pre>
+    <div class="meta" id="receiptMeta"></div>
+  </div>
+
+  <!-- 3 -->
+  <div class="step">
+    <h2><span class="n">3</span>Independent audit <span class="tag">no secret keys required</span></h2>
+    <p class="sub">Anyone — the customer's operator, a regulator, the Kenya Space Agency — re-verifies the receipt later from public keys only. Signatures prove authenticity; the policy checks prove the job stayed inside what was authorized.</p>
+    <ul class="checks" id="checks"></ul>
+    <div class="verdict" id="verdict"></div>
+    <div class="scenario" id="scenario"></div>
+    <div class="controls" style="margin-top:16px">
+      <button class="primary" id="btnAudit">▶ Run independent audit</button>
+      <button class="danger" id="btnForge">Tamper: forge token (widen capability)</button>
+      <button class="danger" id="btnModel">Tamper: executor swaps in unauthorized model</button>
+      <button class="danger" id="btnRegion">Tamper: result leaves authorized region</button>
+      <button id="btnReset">Reset (honest run)</button>
+    </div>
+  </div>
+
+  <!-- 4 -->
+  <div class="step integration">
+    <h2><span class="n">4</span>Integration as an optional layer</h2>
+    <p class="sub">SCRAP is additive. It follows OGC-API / STAPI conformance classes — an operator advertises only what they run. An existing compute marketplace adopts it with one adapter: accepted job order → signed capability token. Settlement stays opt-in.</p>
+    <table>
+      <tr><td>/conf/core</td><td><span class="tag req">REQUIRED</span> landing · conformance · operator identity (pubkey)</td></tr>
+      <tr><td>/conf/nodes</td><td><span class="tag req">REQUIRED</span> compute-node catalog (maps to STAPI <code>products</code>)</td></tr>
+      <tr><td>/conf/tokens</td><td><span class="tag req">REQUIRED</span> <code>POST /tokens</code> — issues SAT-CAP (replaces marketplace <code>order</code>)</td></tr>
+      <tr><td>/conf/receipts</td><td><span class="tag opt">OPTIONAL</span> fetch / re-verify execution receipts</td></tr>
+      <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (Dyson-operated coordination)</td></tr>
+    </table>
+    <pre id="adapterView" style="margin-top:14px"></pre>
+  </div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+/* ===== inlined crypto.js (pure-JS secp256k1 + SHA-256 + CBOR) ===== */
+</script>
+<script id="cryptojs">
+(function(){
+// Pure-JS secp256k1 ECDSA + SHA-256 + minimal CBOR. No deps. For SCRAP demo.
+// Reusable in a browser (no Node APIs). Tested under node via module.exports shim.
+
+// ---------------------------------------------------------------- SHA-256 (pure)
+function sha256(bytes) {
+  const K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const ml = bytes.length * 8;
+  const withOne = [...bytes, 0x80];
+  while (withOne.length % 64 !== 56) withOne.push(0);
+  for (let i = 7; i >= 0; i--) withOne.push((ml / 2 ** (i * 8)) & 0xff);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < withOne.length; off += 64) {
+    const w = new Array(64);
+    for (let i = 0; i < 16; i++)
+      w[i] = (withOne[off+4*i]<<24)|(withOne[off+4*i+1]<<16)|(withOne[off+4*i+2]<<8)|withOne[off+4*i+3];
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i-15],7)^rotr(w[i-15],18)^(w[i-15]>>>3);
+      const s1 = rotr(w[i-2],17)^rotr(w[i-2],19)^(w[i-2]>>>10);
+      w[i] = (w[i-16]+s0+w[i-7]+s1)|0;
+    }
+    let [a,b,c,d,e,f,g,hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e,6)^rotr(e,11)^rotr(e,25);
+      const ch = (e&f)^(~e&g);
+      const t1 = (hh+S1+ch+K[i]+w[i])|0;
+      const S0 = rotr(a,2)^rotr(a,13)^rotr(a,22);
+      const maj = (a&b)^(a&c)^(b&c);
+      const t2 = (S0+maj)|0;
+      hh=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    h = [(h[0]+a)|0,(h[1]+b)|0,(h[2]+c)|0,(h[3]+d)|0,(h[4]+e)|0,(h[5]+f)|0,(h[6]+g)|0,(h[7]+hh)|0];
+  }
+  const out = [];
+  for (const x of h) out.push((x>>>24)&0xff,(x>>>16)&0xff,(x>>>8)&0xff,x&0xff);
+  return Uint8Array.from(out);
+}
+
+// --------------------------------------------------------------- secp256k1 (pure)
+const P  = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const N  = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const Gx = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+const Gy = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+
+const mod = (a, m = P) => ((a % m) + m) % m;
+function inv(a, m = P) {
+  let [lm, hm, low, high] = [1n, 0n, mod(a, m), m];
+  while (low > 1n) { const r = high / low; [lm, hm, low, high] = [hm - lm*r, lm, high - low*r, low]; }
+  return mod(lm, m);
+}
+function ptAdd(p1, p2) {
+  if (!p1) return p2; if (!p2) return p1;
+  const [x1,y1] = p1, [x2,y2] = p2;
+  if (x1 === x2 && mod(y1+y2) === 0n) return null;
+  let m;
+  if (x1 === x2 && y1 === y2) m = mod((3n*x1*x1) * inv(2n*y1));
+  else m = mod((y2-y1) * inv(x2-x1));
+  const x3 = mod(m*m - x1 - x2);
+  return [x3, mod(m*(x1-x3) - y1)];
+}
+function ptMul(k, pt = [Gx, Gy]) {
+  let r = null, a = pt;
+  while (k > 0n) { if (k & 1n) r = ptAdd(r, a); a = ptAdd(a, a); k >>= 1n; }
+  return r;
+}
+const bytesToBig = (b) => { let n = 0n; for (const x of b) n = (n<<8n) | BigInt(x); return n; };
+function bigToBytes(n, len = 32) {
+  const out = new Uint8Array(len);
+  for (let i = len-1; i >= 0; i--) { out[i] = Number(n & 0xffn); n >>= 8n; }
+  return out;
+}
+const hexToBytes = (h) => Uint8Array.from(h.match(/.{2}/g).map(x => parseInt(x,16)));
+const bytesToHex = (b) => [...b].map(x => x.toString(16).padStart(2,'0')).join('');
+
+function pubFromPriv(privHex) {
+  const d = BigInt('0x'+privHex);
+  const [x,y] = ptMul(d);
+  return (y % 2n === 0n ? '02' : '03') + x.toString(16).padStart(64,'0');
+}
+function concat(...arrs) {
+  const t = arrs.reduce((s,a)=>s+a.length,0); const o = new Uint8Array(t);
+  let i=0; for (const a of arrs){ o.set(a,i); i+=a.length; } return o;
+}
+// Deterministic nonce (demo-grade: k = SHA256(d||z) mod N, nonzero). Reproducible.
+function sign(privHex, msgBytes) {
+  const d = BigInt('0x'+privHex);
+  const z = bytesToBig(sha256(msgBytes));
+  let k = mod(bytesToBig(sha256(concat(hexToBytes(privHex.padStart(64,'0')), bigToBytes(z)))), N);
+  if (k === 0n) k = 1n;
+  const [rx] = ptMul(k);
+  const r = mod(rx, N);
+  let s = mod(inv(k, N) * mod(z + r*d, N), N);
+  if (s > N/2n) s = N - s;            // low-s
+  return bytesToHex(bigToBytes(r)) + bytesToHex(bigToBytes(s));
+}
+function decompress(pubHex) {
+  const x = BigInt('0x'+pubHex.slice(2));
+  const ySq = mod(x*x*x + 7n);
+  let y = modpow(ySq, (P+1n)/4n, P);
+  const odd = (pubHex.slice(0,2) === '03');
+  if ((y % 2n === 1n) !== odd) y = P - y;
+  return [x, y];
+}
+function modpow(b, e, m) { let r=1n; b=mod(b,m); while(e>0n){ if(e&1n) r=mod(r*b,m); b=mod(b*b,m); e>>=1n; } return r; }
+function verify(pubHex, msgBytes, sigHex) {
+  try {
+    const r = BigInt('0x'+sigHex.slice(0,64));
+    const s = BigInt('0x'+sigHex.slice(64,128));
+    if (r <= 0n || r >= N || s <= 0n || s >= N) return false;
+    const z = bytesToBig(sha256(msgBytes));
+    const w = inv(s, N);
+    const u1 = mod(z*w, N), u2 = mod(r*w, N);
+    const pt = ptAdd(ptMul(u1), ptMul(u2, decompress(pubHex)));
+    if (!pt) return false;
+    return mod(pt[0], N) === r;
+  } catch (e) { return false; }
+}
+
+// ------------------------------------------------------------- minimal CBOR encode
+function cborUint(major, n) {
+  const mt = major << 5;
+  if (n < 24) return Uint8Array.from([mt|n]);
+  if (n < 256) return Uint8Array.from([mt|24, n]);
+  if (n < 65536) return Uint8Array.from([mt|25, n>>8, n&0xff]);
+  if (n < 2**32) return Uint8Array.from([mt|26, (n>>>24)&0xff,(n>>>16)&0xff,(n>>>8)&0xff,n&0xff]);
+  const b=[mt|27]; for(let i=7;i>=0;i--) b.push(Number((BigInt(n)>>BigInt(i*8))&0xffn)); return Uint8Array.from(b);
+}
+function cbor(x) {
+  if (typeof x === 'boolean') return Uint8Array.from([x?0xf5:0xf4]);
+  if (typeof x === 'number' && Number.isInteger(x))
+    return x >= 0 ? cborUint(0, x) : cborUint(1, -1 - x);
+  if (typeof x === 'number') { // float64
+    const dv = new DataView(new ArrayBuffer(9)); dv.setUint8(0,0xfb); dv.setFloat64(1,x);
+    return new Uint8Array(dv.buffer);
+  }
+  if (typeof x === 'string') { const b = new TextEncoder().encode(x); return concat(cborUint(3,b.length), b); }
+  if (x instanceof Uint8Array) return concat(cborUint(2,x.length), x);
+  if (Array.isArray(x)) return concat(cborUint(4,x.length), ...x.map(cbor));
+  if (x && typeof x === 'object') {
+    const keys = Object.keys(x);
+    return concat(cborUint(5,keys.length), ...keys.map(k => concat(cbor(k), cbor(x[k]))));
+  }
+  throw new Error('cbor: unsupported ' + typeof x);
+}
+
+const utf8 = (s) => new TextEncoder().encode(s);
+
+window.SCRAPCrypto =
+  { sha256, sign, verify, pubFromPriv, cbor, concat, utf8, bytesToHex, hexToBytes, bigToBytes };
+})();
+
+</script>
+<script>
+/* ===== SCRAP demo application ===== */
+const { sha256, sign, verify, pubFromPriv, cbor, concat, utf8, bytesToHex } = window.SCRAPCrypto;
+
+// Fixed keys — reproducible across runs; match ../test-vectors where shared.
+const OP_PRIV = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const EX_PRIV = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const OP_PUB = pubFromPriv(OP_PRIV);
+const EX_PUB = pubFromPriv(EX_PRIV);
+document.getElementById('k-op').textContent = OP_PUB;
+document.getElementById('k-ex').textContent = EX_PUB;
+
+const IAT = 1773792000, EXP = 1773878400, NOW = IAT + 3600;   // fixed window
+const JTI = "job-inf-2026-0042";
+const HEADER = { alg:"ES256K", typ:"SAT-CAP", enc:"CBOR" };
+const h = (s) => bytesToHex(sha256(utf8(s)));
+
+// Honest ground truth -----------------------------------------------------------
+const AUTH_MODEL = "eo-segnet-v3";
+const AUTH_MODEL_HASH = h("eo-segnet-v3-weights-3.0.1");
+const AUTH_REGION = "KE";
+const MAX_RUNTIME = 120;
+const INPUT_HASH  = h("sentinel2-tile-T36MZE-2026-06-10");           // customer's data
+const PREIMAGE_R  = h("payment-preimage-" + JTI);                    // executor secret
+const PAYMENT_HASH = bytesToHex(sha256(utf8(PREIMAGE_R)));           // public, locks HTLC
+
+// Mutable demo state (tamper toggles flip these) --------------------------------
+let state;
+function reset() {
+  state = {
+    tokenCap: ["cmd:compute:inference"],
+    tokenSigValid: true,        // false when token is forged after signing
+    ranModelHash: AUTH_MODEL_HASH,
+    ranModel: AUTH_MODEL,
+    ranRegion: AUTH_REGION,
+    runtime: 84,
+    scenario: ""
+  };
+}
+reset();
+
+// Build + sign artifacts from current state -------------------------------------
+function buildToken() {
+  const payload = {
+    iss:"OPERATOR-A", sub:"CUST-EO-ANALYTICS", aud:"SATLYT-NODE-DISKSAT-07",
+    iat:IAT, exp:EXP, jti:JTI,
+    cap: state.tokenCap,
+    cns:{ model_id:AUTH_MODEL, model_hash:AUTH_MODEL_HASH, max_runtime_s:MAX_RUNTIME,
+          data_region:AUTH_REGION, max_cost_msat:50000000 }
+  };
+  const signingInput = concat(cbor(HEADER), cbor(payload));
+  // Honest signature is over the ORIGINAL authorized payload. A forged token keeps
+  // that signature but changes the payload -> verification must fail.
+  const honestInput = concat(cbor(HEADER), cbor({...payload, cap:["cmd:compute:inference"]}));
+  const sig = sign(OP_PRIV, honestInput);
+  return { payload, signingInput, sig };
+}
+function buildReceipt() {
+  const output_hash = h("inference-output-" + state.ranModel + "-" + state.runtime);
+  const preimage = concat(
+    utf8(JTI), utf8(PAYMENT_HASH), utf8(INPUT_HASH),
+    utf8(state.ranModelHash), utf8(output_hash), utf8(state.ranRegion),
+    utf8(String(state.runtime))
+  );
+  const receipt = {
+    task_jti:JTI, payment_hash:PAYMENT_HASH, input_hash:INPUT_HASH,
+    model_id:state.ranModel, model_hash:state.ranModelHash, output_hash,
+    runtime_s:state.runtime, energy_j:312, data_region:state.ranRegion,
+    executor_sig: sign(EX_PRIV, preimage)     // executor always signs what it ACTUALLY did
+  };
+  return { receipt, preimage };
+}
+
+// Audit (third party, public keys only) -----------------------------------------
+function audit(tok, rec) {
+  const okSig  = state.tokenSigValid && verify(OP_PUB, tok.signingInput, tok.sig);
+  const cns = tok.payload.cns;
+  return [
+    ["Operator signature over token valid (Operator A pubkey)", okSig],
+    ["Token within validity window (iat ≤ now < exp)", IAT <= NOW && NOW < EXP],
+    ["Audience matches the executing node", tok.payload.aud === "SATLYT-NODE-DISKSAT-07"],
+    ["Executor signature over receipt valid (node pubkey)",
+        verify(EX_PUB, rec.preimage, rec.receipt.executor_sig)],
+    ["Receipt task id matches authorization", rec.receipt.task_jti === tok.payload.jti],
+    ["Authorized model actually ran (model_hash matches)",
+        rec.receipt.model_hash === cns.model_hash],
+    ["Data-sovereignty region honored (" + cns.data_region + ")",
+        rec.receipt.data_region === cns.data_region],
+    ["Runtime within authorized ceiling (≤ " + cns.max_runtime_s + "s)",
+        rec.receipt.runtime_s <= cns.max_runtime_s],
+    ["Preimage settles payment (SHA256(R) = payment_hash)",
+        bytesToHex(sha256(utf8(PREIMAGE_R))) === rec.receipt.payment_hash],
+  ];
+}
+
+// Rendering ---------------------------------------------------------------------
+function jsonHL(obj, highlightKeys=[]) {
+  const j = JSON.stringify(obj, null, 2);
+  return j.replace(/("(\\.|[^"\\])*")(\s*:)?|(\b\d+\b)/g, (m, str, _c, colon, num) => {
+    if (num) return '<span class="num">'+num+'</span>';
+    if (colon) {
+      const key = str.slice(1,-1);
+      const cls = highlightKeys.includes(key) ? 'k hl' : 'k';
+      return '<span class="'+cls+'">'+str+'</span>'+colon;
+    }
+    return '<span class="s">'+str+'</span>';
+  });
+}
+function shortHex(hx){ return hx.length>24 ? hx.slice(0,20)+'…' : hx; }
+
+function render() {
+  const tok = buildToken(), rec = buildReceipt();
+  window._tok = tok; window._rec = rec;
+
+  const tdisp = JSON.parse(JSON.stringify(tok.payload));
+  tdisp.cns.model_hash = shortHex(tdisp.cns.model_hash);
+  const hlTok = state.scenario==='forge' ? ['cap'] : [];
+  document.getElementById('tokenView').innerHTML =
+    jsonHL({header:HEADER, payload:tdisp, signature:shortHex(tok.sig)}, hlTok);
+  document.getElementById('tokenMeta').textContent =
+    'CBOR signing input: '+tok.signingInput.length+' bytes · ES256K signature: 64 bytes · fits a single ISL frame';
+
+  const rdisp = JSON.parse(JSON.stringify(rec.receipt));
+  rdisp.model_hash = shortHex(rdisp.model_hash);
+  rdisp.input_hash = shortHex(rdisp.input_hash);
+  rdisp.output_hash = shortHex(rdisp.output_hash);
+  rdisp.payment_hash = shortHex(rdisp.payment_hash);
+  rdisp.executor_sig = shortHex(rdisp.executor_sig);
+  const hlRec = state.scenario==='model' ? ['model_id','model_hash']
+              : state.scenario==='region' ? ['data_region'] : [];
+  document.getElementById('receiptView').innerHTML = jsonHL(rdisp, hlRec);
+  document.getElementById('receiptMeta').textContent =
+    'Settlement preimage R = '+shortHex(PREIMAGE_R)+'  →  revealing R both releases payment and is the customer’s receipt';
+
+  document.getElementById('scenario').textContent = state.scenario ? scenarioText() : '';
+  // clear audit results until re-run
+  document.getElementById('checks').innerHTML = '';
+  document.getElementById('verdict').className = 'verdict';
+  renderAdapter();
+}
+function scenarioText(){
+  return {
+    forge:  'Scenario: attacker edits the signed token to add cmd:propulsion — the operator signature no longer covers it.',
+    model:  'Scenario: the node honestly signs its receipt, but it ran a DIFFERENT (cheaper/unapproved) model than authorized.',
+    region: 'Scenario: the node ran correctly but exported the result outside the authorized data-sovereignty region (KE → US).'
+  }[state.scenario] || '';
+}
+
+function renderAdapter() {
+  const order = { order_id:"mkt-7731", node:"DISKSAT-07", job:"inference",
+                  model:"eo-segnet-v3", region:"KE", budget_msat:50000000 };
+  const adapted = { capability_token:"a3...<177 bytes CBOR>", signature:shortHex(buildToken().sig) };
+  document.getElementById('adapterView').innerHTML =
+    '<span class="s">// existing marketplace order (unchanged)</span>\n' +
+    jsonHL(order) + '\n\n' +
+    '<span class="s">// one adapter call: order_to_capability(order) → signed SAT-CAP</span>\n' +
+    jsonHL(adapted);
+}
+
+// Audit animation ---------------------------------------------------------------
+let auditing = false;
+function runAudit() {
+  if (auditing) return; auditing = true;
+  const results = audit(window._tok, window._rec);
+  const ul = document.getElementById('checks'); ul.innerHTML = '';
+  const verdict = document.getElementById('verdict'); verdict.className = 'verdict';
+  results.forEach(([name, ok]) => {
+    const li = document.createElement('li');
+    li.className = ok ? 'pass' : 'fail';
+    li.innerHTML = '<span class="badge">'+(ok?'PASS':'FAIL')+'</span>'+name;
+    ul.appendChild(li);
+  });
+  const items = [...ul.children];
+  items.forEach((li,i) => setTimeout(()=>li.classList.add('show'), 130*i));
+  setTimeout(() => {
+    const allOk = results.every(r => r[1]);
+    verdict.className = 'verdict ' + (allOk ? 'ok' : 'bad');
+    verdict.textContent = allOk
+      ? '✓  RECEIPT VERIFIED — every claim re-derived from public keys. No trust in either operator required.'
+      : '✗  AUDIT FAILED — the receipt does not match what was authorized. Payment can be withheld / disputed.';
+    auditing = false;
+  }, 130*items.length + 200);
+}
+
+// Wiring ------------------------------------------------------------------------
+function setScenario(s, mutate){ reset(); state.scenario = s; mutate && mutate(); render(); }
+document.getElementById('btnAudit').onclick = runAudit;
+document.getElementById('btnReset').onclick = () => { setScenario('', null); };
+document.getElementById('btnForge').onclick = () =>
+  setScenario('forge', () => { state.tokenCap = ["cmd:compute:inference","cmd:propulsion:burn"]; state.tokenSigValid = false; });
+document.getElementById('btnModel').onclick = () =>
+  setScenario('model', () => { state.ranModel = "tiny-cheap-v1"; state.ranModelHash = h("tiny-cheap-v1-weights"); });
+document.getElementById('btnRegion').onclick = () =>
+  setScenario('region', () => { state.ranRegion = "US"; });
+
+document.getElementById('foot').textContent =
+  'Real secp256k1 ECDSA + SHA-256, computed in your browser — no network, no mockups.  ' +
+  'Normative spec: ../spec/SCRAP.md · wire format: ../schemas/scap.cddl · interop vectors: ../test-vectors/computed.json';
+
+render();
+</script>
+</body>
+</html>
