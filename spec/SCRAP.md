@@ -212,6 +212,38 @@ the chain back to its operator.
 in the capability token. The token authorizes WHAT may be done; the task request
 specifies HOW MUCH to pay.
 
+> The box above is illustrative. The normative wire format is CBOR + ES256K
+> (secp256k1 ECDSA), defined by `schemas/scap.cddl` and implemented in
+> `scap-core`. The signing scheme is specified in §2.2.1.
+
+### 2.2.1 Signed Encoding (normative)
+
+The capability token is transmitted as:
+
+```
+capability-token = {
+    protected: bstr,            ; CBOR-encoded { header, payload }
+    signature: ecdsa-signature  ; ECDSA(SHA256(protected)), issuer's key
+}
+```
+
+The issuer constructs `protected` by CBOR-encoding the `{ header, payload }`
+structure **once**, then signs `SHA256(protected)`. The `protected` byte string is
+placed on the wire **verbatim**, and the signature is over those exact bytes.
+
+**A verifier MUST verify the signature against the received `protected` bytes
+directly. It MUST NOT decode and re-encode `header`/`payload` to reconstruct the
+signed input.** Re-serialization would make verification depend on canonical CBOR
+(map-key ordering, integer width, float width per RFC 8949 §4.2) and on every
+implementation's encoder producing byte-identical output — a fragile,
+interoperability-breaking assumption. By signing and carrying the bytes verbatim
+(the approach used by JWT and COSE/CWT), correctness is independent of encoder
+choices. A verifier MAY decode `protected` into `header`/`payload` afterward for
+inspection, but that decoded view is never an input to signature verification.
+
+This scheme applies only to the capability token. The execution proof and payment
+binding sign explicit byte concatenations (§4.4, §3) and are unaffected.
+
 ### 2.3 Capability Types
 
 | Category | Capability | Description |

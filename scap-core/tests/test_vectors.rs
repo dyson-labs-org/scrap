@@ -50,6 +50,10 @@ struct CapTokenComputed {
     payload_cbor_hex: String,
     signing_input_hash_hex: String,
     signature_der_hex: String,
+    // Normative protected-content scheme (signature over verbatim bytes).
+    protected_hex: String,
+    protected_hash_hex: String,
+    protected_signature_der_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -189,6 +193,56 @@ fn test_capability_token_signature_verification() {
 
     let valid = verify_signature(&pubkey, &signing_input, &signature).unwrap();
     assert!(valid, "Capability token signature verification failed");
+}
+
+#[test]
+fn test_capability_token_protected_encoding() {
+    // Cross-implementation agreement: ciborium's encoding of {header, payload}
+    // must equal the `protected` bytes the Python generator (cbor2) produced.
+    // This is what makes the verbatim-bytes signing scheme interoperable.
+    use scap_core::{CapabilityTokenBuilder};
+    let vectors = load_test_vectors();
+    let computed = &vectors.capability_token.computed;
+    let keys = vectors.capability_token.keys.operator.unwrap();
+    let privkey = hex::decode(strip_0x(&keys.private_key_hex)).unwrap();
+
+    // Rebuild the same token from the documented input and sign it.
+    let token = CapabilityTokenBuilder::new(
+        "OPERATOR-TEST".into(), "SATELLITE-1-12345".into(), "SATELLITE-2-12346".into(),
+        "test-imaging-001".into(), vec!["cmd:imaging:msi".into()],
+    )
+    .issued_at(1705320000).expires_at(1705406400)
+    .with_constraints({
+        let mut c = scap_core::Constraints::default();
+        c.max_area_km2 = Some(1000);
+        c
+    })
+    .sign(&privkey).unwrap();
+
+    assert_eq!(
+        hex::encode(&token.protected), computed.protected_hex,
+        "ciborium protected encoding must match the Python (cbor2) vector"
+    );
+    assert_eq!(
+        hex::encode(sha256(&token.protected)), computed.protected_hash_hex,
+        "protected hash mismatch"
+    );
+}
+
+#[test]
+fn test_capability_token_protected_signature() {
+    // The vector's signature over the protected bytes must verify with the
+    // operator pubkey — and the protected bytes are exactly what's on the wire.
+    let vectors = load_test_vectors();
+    let keys = vectors.capability_token.keys.operator.unwrap();
+    let computed = &vectors.capability_token.computed;
+
+    let pubkey = hex::decode(strip_0x(&keys.public_key_hex)).unwrap();
+    let protected = hex::decode(&computed.protected_hex).unwrap();
+    let signature = hex::decode(&computed.protected_signature_der_hex).unwrap();
+
+    let valid = verify_signature(&pubkey, &protected, &signature).unwrap();
+    assert!(valid, "protected-content signature verification failed");
 }
 
 #[test]

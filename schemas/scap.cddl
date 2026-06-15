@@ -36,10 +36,18 @@ capability = tstr .regexp "^[a-z]+:[a-z_]+(?::[a-z_*]+)*$"
 ; CAPABILITY TOKEN (SAT-CAP)
 ; =============================================================================
 
+; The signature is computed over `protected` — the verbatim byte string carried
+; on the wire — NOT over a re-serialization of the decoded structure. A verifier
+; signs/checks the exact bytes received, so verification does not depend on
+; canonical CBOR or on any encoder reproducing identical output.
 capability-token = {
+    protected: bstr,            ; = CBOR-encoded protected-content (signed verbatim)
+    signature: ecdsa-signature  ; ECDSA(SHA256(protected)) by the issuer
+}
+
+protected-content = {
     header: cap-header,
-    payload: cap-payload,
-    signature: ecdsa-signature
+    payload: cap-payload
 }
 
 cap-header = {

@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::cbor::{encode_header, encode_payload, decode_capability_token};
+use crate::cbor::{encode_protected_content, decode_capability_token};
 use crate::crypto::{sign_message, verify_signature};
 use crate::error::ScapError;
 use crate::types::*;
@@ -83,29 +83,31 @@ impl CapabilityTokenBuilder {
         self
     }
 
-    /// Build and sign the token
+    /// Build and sign the token.
+    ///
+    /// The protected content (header + payload) is encoded once; the signature is
+    /// over those exact bytes, which are retained as `protected` and carried on
+    /// the wire verbatim.
     pub fn sign(self, private_key: &[u8]) -> Result<CapabilityToken, ScapError> {
-        let header_cbor = encode_header(&self.header)?;
-        let payload_cbor = encode_payload(&self.payload)?;
-
-        let mut signing_input = Vec::with_capacity(header_cbor.len() + payload_cbor.len());
-        signing_input.extend_from_slice(&header_cbor);
-        signing_input.extend_from_slice(&payload_cbor);
-
-        let signature = sign_message(private_key, &signing_input)?;
-
+        let content = ProtectedContent { header: self.header, payload: self.payload };
+        let protected = encode_protected_content(&content)?;
+        let signature = sign_message(private_key, &protected)?;
         Ok(CapabilityToken {
-            header: self.header,
-            payload: self.payload,
+            header: content.header,
+            payload: content.payload,
+            protected,
             signature,
         })
     }
 
     /// Build without signing (for testing)
     pub fn build_unsigned(self) -> CapabilityToken {
+        let content = ProtectedContent { header: self.header, payload: self.payload };
+        let protected = encode_protected_content(&content).unwrap_or_default();
         CapabilityToken {
-            header: self.header,
-            payload: self.payload,
+            header: content.header,
+            payload: content.payload,
+            protected,
             signature: Vec::new(),
         }
     }
@@ -218,16 +220,12 @@ impl<'a> TokenValidator<'a> {
             }
         }
 
-        // Verify signature if public key provided
+        // Verify signature if public key provided.
+        // The signature is verified over the verbatim `protected` bytes that were
+        // received and signed — NOT over a re-serialization of header/payload — so
+        // verification is independent of CBOR canonicalization (fixes C1).
         if let Some(pubkey) = self.issuer_pubkey {
-            let header_cbor = encode_header(&self.token.header)?;
-            let payload_cbor = encode_payload(&self.token.payload)?;
-
-            let mut signing_input = Vec::with_capacity(header_cbor.len() + payload_cbor.len());
-            signing_input.extend_from_slice(&header_cbor);
-            signing_input.extend_from_slice(&payload_cbor);
-
-            let valid = verify_signature(pubkey, &signing_input, &self.token.signature)?;
+            let valid = verify_signature(pubkey, &self.token.protected, &self.token.signature)?;
             if !valid {
                 return Err(ScapError::VerificationFailed);
             }

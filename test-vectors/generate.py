@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-Generate cryptographic test vectors for SCRAP protocol.
+Generate cryptographic test vectors for the SCRAP protocol.
 
-Requires:
-    pip install secp256k1 cbor2
+Uses the pure-Python `ecdsa` library (RFC 6979 deterministic nonces) with low-s
+canonicalization, which matches libsecp256k1's signatures byte-for-byte, plus
+`cbor2` for CBOR encoding. No C build required.
 
-Usage:
-    python generate_test_vectors.py > test_vectors_computed.json
+    python -m venv venv && venv/bin/pip install ecdsa cbor2
+    venv/bin/python generate.py > computed.json
+
+Capability-token signing scheme (normative, see spec/SCRAP.md §2.2.1 and
+schemas/scap.cddl): the signature is over `protected = CBOR({header, payload})`,
+the exact byte string carried on the wire. The legacy `header_cbor || payload_cbor`
+concatenation fields are retained only to exercise the low-level sign/verify
+primitive.
 """
 
 import hashlib
 import json
 import time
 from dataclasses import dataclass, asdict
-from typing import Optional
 
-try:
-    import secp256k1
-    import cbor2
-    HAS_DEPS = True
-except ImportError:
-    HAS_DEPS = False
-    print("Warning: secp256k1 and/or cbor2 not installed. Install with:")
-    print("  pip install secp256k1 cbor2")
+import cbor2
+from ecdsa import SigningKey, SECP256k1
+from ecdsa.util import sigencode_der_canonize
 
 
 @dataclass
@@ -31,14 +32,11 @@ class TestKeys:
     public_key_hex: str
 
     @classmethod
-    def generate(cls, seed_hex: str) -> 'TestKeys':
-        privkey_bytes = bytes.fromhex(seed_hex.replace('0x', ''))
-        privkey = secp256k1.PrivateKey(privkey_bytes)
-        pubkey = privkey.pubkey.serialize().hex()
-        return cls(
-            private_key_hex=seed_hex,
-            public_key_hex='0x' + pubkey
-        )
+    def generate(cls, seed_hex: str) -> "TestKeys":
+        sk = SigningKey.from_secret_exponent(int(seed_hex.replace("0x", ""), 16), curve=SECP256k1)
+        p = sk.get_verifying_key().pubkey.point
+        comp = ("02" if p.y() % 2 == 0 else "03") + "%064x" % p.x()
+        return cls(private_key_hex=seed_hex, public_key_hex="0x" + comp)
 
 
 def sha256(data: bytes) -> bytes:
@@ -46,25 +44,16 @@ def sha256(data: bytes) -> bytes:
 
 
 def sign_message(privkey_hex: str, message: bytes) -> bytes:
-    privkey_bytes = bytes.fromhex(privkey_hex.replace('0x', ''))
-    privkey = secp256k1.PrivateKey(privkey_bytes)
-    msg_hash = sha256(message)
-    sig = privkey.ecdsa_sign(msg_hash, raw=True)  # raw=True: use hash directly, don't double-hash
-    return privkey.ecdsa_serialize(sig)
-
-
-def verify_signature(pubkey_hex: str, message: bytes, sig_der: bytes) -> bool:
-    pubkey_bytes = bytes.fromhex(pubkey_hex.replace('0x', ''))
-    pubkey = secp256k1.PublicKey(pubkey_bytes, raw=True)
-    msg_hash = sha256(message)
-    sig = pubkey.ecdsa_deserialize(sig_der)
-    return pubkey.ecdsa_verify(message, sig, raw=True)
+    """SHA-256-then-ECDSA, RFC 6979 deterministic, low-s (matches libsecp256k1)."""
+    sk = SigningKey.from_secret_exponent(int(privkey_hex.replace("0x", ""), 16), curve=SECP256k1)
+    return sk.sign_deterministic(message, hashfunc=hashlib.sha256, sigencode=sigencode_der_canonize)
 
 
 def generate_capability_token_vector():
     operator_privkey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     operator_keys = TestKeys.generate(operator_privkey)
 
+    header = {"alg": "ES256K", "typ": "SAT-CAP", "enc": "CBOR"}
     payload = {
         "iss": "OPERATOR-TEST",
         "sub": "SATELLITE-1-12345",
@@ -73,45 +62,39 @@ def generate_capability_token_vector():
         "exp": 1705406400,
         "jti": "test-imaging-001",
         "cap": ["cmd:imaging:msi"],
-        "cns": {
-            "max_area_km2": 1000
-        }
+        "cns": {"max_area_km2": 1000},
     }
 
-    header = {
-        "alg": "ES256K",
-        "typ": "SAT-CAP",
-        "enc": "CBOR"
-    }
-
-    payload_cbor = cbor2.dumps(payload)
     header_cbor = cbor2.dumps(header)
+    payload_cbor = cbor2.dumps(payload)
 
+    # Legacy primitive: signature over header_cbor || payload_cbor.
     signing_input = header_cbor + payload_cbor
-    signing_input_hash = sha256(signing_input)
+    legacy_sig = sign_message(operator_privkey, signing_input)
 
-    signature = sign_message(operator_privkey, signing_input)
+    # Normative token scheme: signature over protected = CBOR({header, payload}).
+    protected = cbor2.dumps({"header": header, "payload": payload})
+    protected_sig = sign_message(operator_privkey, protected)
 
     return {
         "description": "Simple imaging task capability token",
-        "keys": {
-            "operator": asdict(operator_keys)
-        },
-        "input": {
-            "header": header,
-            "payload": payload
-        },
+        "keys": {"operator": asdict(operator_keys)},
+        "input": {"header": header, "payload": payload},
         "computed": {
             "header_cbor_hex": header_cbor.hex(),
             "payload_cbor_hex": payload_cbor.hex(),
-            "signing_input_hash_hex": signing_input_hash.hex(),
-            "signature_der_hex": signature.hex(),
+            "signing_input_hash_hex": sha256(signing_input).hex(),
+            "signature_der_hex": legacy_sig.hex(),
+            # Normative protected-content scheme (carried verbatim, signed as bytes):
+            "protected_hex": protected.hex(),
+            "protected_hash_hex": sha256(protected).hex(),
+            "protected_signature_der_hex": protected_sig.hex(),
             "token_complete": {
                 "header_cbor": header_cbor.hex(),
                 "payload_cbor": payload_cbor.hex(),
-                "signature": signature.hex()
-            }
-        }
+                "signature": legacy_sig.hex(),
+            },
+        },
     }
 
 
@@ -125,31 +108,24 @@ def generate_execution_proof_vector():
     execution_timestamp = 1705321000
 
     proof_preimage = (
-        task_jti.encode('utf-8') +
-        payment_hash +
-        output_hash +
-        execution_timestamp.to_bytes(8, 'big')
+        task_jti.encode("utf-8") + payment_hash + output_hash + execution_timestamp.to_bytes(8, "big")
     )
-    proof_hash = sha256(proof_preimage)
-
     signature = sign_message(executor_privkey, proof_preimage)
 
     return {
         "description": "Valid execution proof for imaging task",
-        "keys": {
-            "executor": asdict(executor_keys)
-        },
+        "keys": {"executor": asdict(executor_keys)},
         "input": {
             "task_jti": task_jti,
             "payment_hash_hex": "0x" + payment_hash.hex(),
             "output_hash_hex": "0x" + output_hash.hex(),
-            "execution_timestamp": execution_timestamp
+            "execution_timestamp": execution_timestamp,
         },
         "computed": {
             "proof_preimage_hex": proof_preimage.hex(),
-            "proof_hash_hex": proof_hash.hex(),
-            "signature_der_hex": signature.hex()
-        }
+            "proof_hash_hex": sha256(proof_preimage).hex(),
+            "signature_der_hex": signature.hex(),
+        },
     }
 
 
@@ -159,76 +135,61 @@ def generate_binding_vector():
 
     task_jti = "test-imaging-001"
     payment_hash = bytes.fromhex("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
-    payment_amount_msat = 10000000
-    htlc_timeout_blocks = 336
 
-    binding_preimage = task_jti.encode('utf-8') + payment_hash
-    binding_hash = sha256(binding_preimage)
+    binding_preimage = task_jti.encode("utf-8") + payment_hash
     binding_sig = sign_message(requester_privkey, binding_preimage)
 
     return {
         "description": "Valid payment-capability binding",
-        "keys": {
-            "requester": asdict(requester_keys)
-        },
+        "keys": {"requester": asdict(requester_keys)},
         "input": {
             "task_jti": task_jti,
             "payment_hash_hex": "0x" + payment_hash.hex(),
-            "payment_amount_msat": payment_amount_msat,
-            "htlc_timeout_blocks": htlc_timeout_blocks
+            "payment_amount_msat": 10000000,
+            "htlc_timeout_blocks": 336,
         },
         "computed": {
             "binding_preimage_hex": binding_preimage.hex(),
-            "binding_hash_hex": binding_hash.hex(),
-            "binding_signature_der_hex": binding_sig.hex()
-        }
+            "binding_hash_hex": sha256(binding_preimage).hex(),
+            "binding_signature_der_hex": binding_sig.hex(),
+        },
     }
 
 
 def generate_htlc_timeout_vectors():
-    def calculate_timeouts(hops: int, dispute_window: int, contact_gap: int, margin: int):
-        final_timeout = dispute_window + contact_gap + margin
+    def calc(hops: int, dispute: int, contact_gap: int, margin: int):
+        final_timeout = dispute + contact_gap + margin
         timeouts = [final_timeout]
         for _ in range(hops - 1):
             timeouts.insert(0, timeouts[0] + margin)
         return {
             "hops": hops,
             "input": {
-                "dispute_window_blocks": dispute_window,
+                "dispute_window_blocks": dispute,
                 "max_contact_gap_blocks": contact_gap,
-                "margin_per_hop_blocks": margin
+                "margin_per_hop_blocks": margin,
             },
             "computed": {
                 "timeout_chain_blocks": timeouts,
                 "customer_timeout_blocks": timeouts[0],
                 "customer_timeout_hours": round(timeouts[0] * 10 / 60, 1),
-                "final_timeout_blocks": timeouts[-1]
-            }
+                "final_timeout_blocks": timeouts[-1],
+            },
         }
 
-    return [
-        calculate_timeouts(1, 36, 12, 144),
-        calculate_timeouts(2, 36, 12, 144),
-        calculate_timeouts(3, 36, 12, 144),
-    ]
+    return [calc(1, 36, 12, 144), calc(2, 36, 12, 144), calc(3, 36, 12, 144)]
 
 
 def main():
-    if not HAS_DEPS:
-        print(json.dumps({"error": "Missing dependencies: secp256k1, cbor2"}, indent=2))
-        return
-
     vectors = {
         "version": "1.0.0",
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "description": "Computed test vectors for SCRAP protocol",
-
+        "description": "Computed test vectors for SCAP protocol",
         "capability_token": generate_capability_token_vector(),
         "execution_proof": generate_execution_proof_vector(),
         "payment_binding": generate_binding_vector(),
         "htlc_timeouts": generate_htlc_timeout_vectors(),
     }
-
     print(json.dumps(vectors, indent=2))
 
 

@@ -63,6 +63,7 @@ pub use crypto::{
 pub use cbor::{
     encode,
     decode,
+    encode_protected_content,
     encode_capability_token,
     decode_capability_token,
     encode_task_request,

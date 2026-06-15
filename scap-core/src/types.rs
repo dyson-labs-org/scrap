@@ -118,12 +118,29 @@ pub struct CapPayload {
     pub cmd_pub: Option<Vec<u8>>,
 }
 
-/// Complete capability token
+/// The signed portion of a capability token.
+///
+/// This is encoded to CBOR exactly once and carried verbatim on the wire as the
+/// `protected` byte string. The ECDSA signature is computed over these exact
+/// bytes — never over a re-serialization — so verification does not depend on
+/// canonical CBOR or on any encoder reproducing identical output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtectedContent {
+    pub header: CapHeader,
+    pub payload: CapPayload,
+}
+
+/// Complete capability token.
+///
+/// Wire form (see `schemas/scap.cddl`): `{ protected: bstr, signature: bstr }`.
+/// `protected` is the authoritative, signed byte string; `header`/`payload` are
+/// parsed from it for inspection only. Editing `header`/`payload` without
+/// re-signing has no effect on verification, which uses `protected`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityToken {
     pub header: CapHeader,
     pub payload: CapPayload,
-    #[serde(with = "serde_bytes")]
+    pub protected: Vec<u8>,
     pub signature: Vec<u8>,
 }
 

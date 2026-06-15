@@ -40,14 +40,54 @@ pub fn decode_payload(bytes: &[u8]) -> Result<CapPayload, ScapError> {
     decode(bytes)
 }
 
-/// Encode a complete capability token
-pub fn encode_capability_token(token: &CapabilityToken) -> Result<Vec<u8>, ScapError> {
-    encode(token)
+/// Wire representation of a capability token: `{ protected: bstr, signature: bstr }`.
+/// The `protected` byte string is the verbatim signed content, carried unchanged
+/// so verification never re-serializes a parsed structure.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CapabilityTokenWire {
+    #[serde(with = "wire_bytes")]
+    protected: Vec<u8>,
+    #[serde(with = "wire_bytes")]
+    signature: Vec<u8>,
 }
 
-/// Decode a complete capability token
+mod wire_bytes {
+    use alloc::vec::Vec;
+    use serde::{Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(bytes: &Vec<u8>, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(bytes)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        serde::Deserialize::deserialize(d)
+    }
+}
+
+/// Encode the protected content (the signed bytes) of a capability token.
+pub fn encode_protected_content(content: &ProtectedContent) -> Result<Vec<u8>, ScapError> {
+    encode(content)
+}
+
+/// Encode a complete capability token to its wire form `{ protected, signature }`.
+pub fn encode_capability_token(token: &CapabilityToken) -> Result<Vec<u8>, ScapError> {
+    let wire = CapabilityTokenWire {
+        protected: token.protected.clone(),
+        signature: token.signature.clone(),
+    };
+    encode(&wire)
+}
+
+/// Decode a complete capability token from its wire form. The `protected` bytes
+/// are retained verbatim (for signature verification) and also parsed into
+/// `header`/`payload` for inspection.
 pub fn decode_capability_token(bytes: &[u8]) -> Result<CapabilityToken, ScapError> {
-    decode(bytes)
+    let wire: CapabilityTokenWire = decode(bytes)?;
+    let content: ProtectedContent = decode(&wire.protected)?;
+    Ok(CapabilityToken {
+        header: content.header,
+        payload: content.payload,
+        protected: wire.protected,
+        signature: wire.signature,
+    })
 }
 
 /// Encode a bound task request
@@ -125,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_capability_token_roundtrip() {
-        let token = CapabilityToken {
+        let content = ProtectedContent {
             header: CapHeader::default(),
             payload: CapPayload {
                 iss: String::from("OPERATOR-TEST"),
@@ -139,6 +179,12 @@ mod tests {
                 prf: None,
                 cmd_pub: None,
             },
+        };
+        let protected = encode_protected_content(&content).unwrap();
+        let token = CapabilityToken {
+            header: content.header.clone(),
+            payload: content.payload.clone(),
+            protected,
             signature: vec![0u8; 71],
         };
         let encoded = encode_capability_token(&token).unwrap();
@@ -147,13 +193,11 @@ mod tests {
     }
 
     #[test]
-    fn test_signing_input_reencode_is_deterministic() {
-        // SECURITY-CRITICAL: signature verification re-encodes header+payload and
-        // checks the signature against the RE-ENCODED bytes (token.rs validate()).
-        // That is only sound if encoding is deterministic: decode→re-encode MUST
-        // reproduce the original signed bytes exactly. This guards the property for
-        // this implementation. Cross-implementation interop additionally requires
-        // the wire format to pin canonical CBOR (tracked: C1 — sign over opaque bstr).
+    fn test_protected_content_reencode_is_stable() {
+        // Verification uses the verbatim `protected` bytes, so it no longer depends
+        // on canonical CBOR (C1 fixed). This test still guards that THIS encoder is
+        // self-consistent (decode→re-encode is byte-identical), which keeps token
+        // re-emission stable across a round-trip.
         let payload = CapPayload {
             iss: String::from("OPERATOR-A"),
             sub: String::from("SAT-RELAY"),

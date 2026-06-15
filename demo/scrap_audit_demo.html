@@ -417,10 +417,12 @@ function buildToken() {
     cns:{ model_id:AUTH_MODEL, model_hash:AUTH_MODEL_HASH, max_runtime_s:MAX_RUNTIME,
           data_region:AUTH_REGION, max_cost_msat:50000000 }
   };
-  const signingInput = concat(cbor(HEADER), cbor(payload));
-  // Honest signature is over the ORIGINAL authorized payload. A forged token keeps
-  // that signature but changes the payload -> verification must fail.
-  const honestInput = concat(cbor(HEADER), cbor({...payload, cap:["cmd:compute:inference"]}));
+  // Normative scheme (CDDL): sign over `protected` = CBOR({header, payload}),
+  // the exact bytes carried on the wire — never a re-serialization.
+  const signingInput = cbor({ header: HEADER, payload });
+  // Honest signature is over the ORIGINAL authorized content. A forged token keeps
+  // that signature but changes the content -> verification must fail.
+  const honestInput = cbor({ header: HEADER, payload: {...payload, cap:["cmd:compute:inference"]} });
   const sig = sign(OP_PRIV, honestInput);
   return { payload, signingInput, sig };
 }
