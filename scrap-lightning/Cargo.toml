@@ -1,8 +1,8 @@
 [package]
-name = "scap-lightning"
+name = "scrap-lightning"
 version = "0.1.0"
 edition = "2021"
-description = "LDK integration for SCAP satellite payments"
+description = "LDK integration for SCRAP satellite payments"
 license = "MIT"
 
 [features]
@@ -10,8 +10,8 @@ default = ["std"]
 std = ["lightning/std", "lightning-invoice/std"]
 
 [dependencies]
-# SCAP core types
-scap-core = { path = "../scap-core" }
+# SCRAP core types
+scrap-core = { path = "../scrap-core" }
 
 # LDK components
 lightning = { version = "0.0.125", default-features = false, features = ["std"] }

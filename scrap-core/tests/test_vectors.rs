@@ -3,8 +3,8 @@
 //! These tests verify that the Rust implementation produces identical
 //! results to the Python reference implementation.
 
-use scap_core::{sha256, sign_message, verify_signature, derive_public_key};
-use scap_core::{compute_binding_hash, compute_proof_hash};
+use scrap_core::{sha256, sign_message, verify_signature, derive_public_key};
+use scrap_core::{compute_binding_hash, compute_proof_hash};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -200,7 +200,7 @@ fn test_capability_token_protected_encoding() {
     // Cross-implementation agreement: ciborium's encoding of {header, payload}
     // must equal the `protected` bytes the Python generator (cbor2) produced.
     // This is what makes the verbatim-bytes signing scheme interoperable.
-    use scap_core::{CapabilityTokenBuilder};
+    use scrap_core::{CapabilityTokenBuilder};
     let vectors = load_test_vectors();
     let computed = &vectors.capability_token.computed;
     let keys = vectors.capability_token.keys.operator.unwrap();
@@ -213,7 +213,7 @@ fn test_capability_token_protected_encoding() {
     )
     .issued_at(1705320000).expires_at(1705406400)
     .with_constraints({
-        let mut c = scap_core::Constraints::default();
+        let mut c = scrap_core::Constraints::default();
         c.max_area_km2 = Some(1000);
         c
     })

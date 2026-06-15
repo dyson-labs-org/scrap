@@ -10,7 +10,7 @@
   non-repudiable RECEIPT. It does NOT verify off-chain facts (which model ran, where
   data went) — those are the executor's signed-but-unverified attestation, evidence
   for a governance body (e.g. Kenya's NEODC), not something SCRAP polices.
-  Normative spec: ../spec/SCRAP.md (§6.8 "Proof Model: Delivery Only") · ../schemas/scap.cddl
+  Normative spec: ../spec/SCRAP.md (§6.8 "Proof Model: Delivery Only") · ../schemas/scrap.cddl
 -->
 <html lang="en">
 <head>
@@ -191,9 +191,9 @@
   <!-- 6 -->
   <div class="step">
     <h2><span class="n">6</span>Deployment footprint <span class="tag">measured, not estimated</span></h2>
-    <p class="sub">The verifier (<code>scap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build (<code>size libscap_ffi.so</code>).</p>
+    <p class="sub">The verifier (<code>scrap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build (<code>size libscrap_ffi.so</code>).</p>
     <table>
-      <tr><td>Library text size</td><td><b>~490 KB</b> (libscap_ffi.so, release) — pure-Rust crypto (<code>k256</code>), no bundled C library</td></tr>
+      <tr><td>Library text size</td><td><b>~490 KB</b> (libscrap_ffi.so, release) — pure-Rust crypto (<code>k256</code>), no bundled C library</td></tr>
       <tr><td>Toolchain</td><td><b>No C cross-compiler needed</b> — 100% Rust; one <code>cargo build --target …</code> for the OBC</td></tr>
       <tr><td>no_std</td><td>core is <code>#![no_std]</code> + <code>alloc</code> — runs without an OS on the flight computer</td></tr>
       <tr><td>Targets</td><td><code>aarch64-unknown-linux-gnu</code> (Jetson Orin payload) · cross-compiles to the OBC</td></tr>
@@ -603,7 +603,7 @@ for (const name of Object.keys(TAMPERS))
 
 document.getElementById('foot').textContent =
   'Real secp256k1 ECDSA + SHA-256, computed in your browser — no network, no mockups.  ' +
-  'Normative spec: ../spec/SCRAP.md · wire format: ../schemas/scap.cddl · interop vectors: ../test-vectors/computed.json';
+  'Normative spec: ../spec/SCRAP.md · wire format: ../schemas/scrap.cddl · interop vectors: ../test-vectors/computed.json';
 
 render();
 </script>

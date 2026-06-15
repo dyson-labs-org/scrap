@@ -1,4 +1,4 @@
-//! Cryptographic operations for SCAP
+//! Cryptographic operations for SCRAP
 //!
 //! Provides signing and verification using secp256k1 ECDSA.
 
@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use sha2::{Sha256, Digest};
 use k256::ecdsa::{SigningKey, VerifyingKey, Signature};
 use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
-use crate::error::ScapError;
+use crate::error::ScrapError;
 
 // Pure-Rust secp256k1 (k256). No global context to allocate per call, and
 // SigningKey is ZeroizeOnDrop so secret material is wiped automatically.
@@ -18,10 +18,10 @@ use crate::error::ScapError;
 /// Implement this to keep private keys outside the protocol library — e.g. in a
 /// secure element, TPM, sealed store, or separate signing process. The token
 /// builder calls [`Signer::sign_digest`] with `SHA256(protected)`; the key need
-/// never enter scap-core's address space. [`KeySigner`] is the in-process impl.
+/// never enter scrap-core's address space. [`KeySigner`] is the in-process impl.
 pub trait Signer {
     /// Sign a 32-byte digest, returning a DER-encoded ECDSA signature.
-    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError>;
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScrapError>;
 }
 
 /// In-process signer holding a raw secp256k1 private key.
@@ -35,19 +35,19 @@ pub struct KeySigner {
 
 impl KeySigner {
     /// Construct from a 32-byte private key, validating it up front.
-    pub fn from_slice(private_key: &[u8]) -> Result<Self, ScapError> {
+    pub fn from_slice(private_key: &[u8]) -> Result<Self, ScrapError> {
         // Validate by attempting to load it; the SigningKey is dropped (zeroized).
-        SigningKey::from_slice(private_key).map_err(|_| ScapError::InvalidPrivateKey)?;
+        SigningKey::from_slice(private_key).map_err(|_| ScrapError::InvalidPrivateKey)?;
         Ok(Self { key: zeroize::Zeroizing::new(private_key.to_vec()) })
     }
 }
 
 impl Signer for KeySigner {
-    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScrapError> {
         let signing_key = SigningKey::from_slice(&self.key)
-            .map_err(|_| ScapError::InvalidPrivateKey)?;
+            .map_err(|_| ScrapError::InvalidPrivateKey)?;
         let sig: Signature = signing_key.sign_prehash(digest)
-            .map_err(|_| ScapError::InvalidSignature)?;
+            .map_err(|_| ScrapError::InvalidSignature)?;
         Ok(sig.to_der().as_bytes().to_vec())
     }
 }
@@ -63,13 +63,13 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 ///
 /// The message is hashed with SHA-256 before signing. Returns the DER-encoded
 /// ECDSA signature (RFC 6979 deterministic, low-s).
-pub fn sign_message(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ScapError> {
+pub fn sign_message(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ScrapError> {
     let signing_key = SigningKey::from_slice(private_key)
-        .map_err(|_| ScapError::InvalidPrivateKey)?;
+        .map_err(|_| ScrapError::InvalidPrivateKey)?;
 
     let msg_hash = sha256(message);
     let sig: Signature = signing_key.sign_prehash(&msg_hash)
-        .map_err(|_| ScapError::InvalidSignature)?;
+        .map_err(|_| ScrapError::InvalidSignature)?;
 
     Ok(sig.to_der().as_bytes().to_vec())
 }
@@ -81,21 +81,21 @@ pub fn verify_signature(
     public_key: &[u8],
     message: &[u8],
     signature: &[u8],
-) -> Result<bool, ScapError> {
+) -> Result<bool, ScrapError> {
     let verifying_key = VerifyingKey::from_sec1_bytes(public_key)
-        .map_err(|_| ScapError::InvalidPublicKey)?;
+        .map_err(|_| ScrapError::InvalidPublicKey)?;
 
     let sig = Signature::from_der(signature)
-        .map_err(|_| ScapError::InvalidSignature)?;
+        .map_err(|_| ScrapError::InvalidSignature)?;
 
     let msg_hash = sha256(message);
     Ok(verifying_key.verify_prehash(&msg_hash, &sig).is_ok())
 }
 
 /// Derive the compressed (33-byte) public key from a private key.
-pub fn derive_public_key(private_key: &[u8]) -> Result<Vec<u8>, ScapError> {
+pub fn derive_public_key(private_key: &[u8]) -> Result<Vec<u8>, ScrapError> {
     let signing_key = SigningKey::from_slice(private_key)
-        .map_err(|_| ScapError::InvalidPrivateKey)?;
+        .map_err(|_| ScrapError::InvalidPrivateKey)?;
 
     let verifying_key = signing_key.verifying_key();
     Ok(verifying_key.to_encoded_point(true).as_bytes().to_vec())

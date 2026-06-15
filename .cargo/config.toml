@@ -1,0 +1,92 @@
+# SCRAP Cross-Compilation Configuration
+#
+# Supported satellite processor targets:
+#
+# ARM64 Linux (modern satellite processors, radiation-hardened ARM Cortex-A):
+#   aarch64-unknown-linux-gnu     - glibc-based
+#   aarch64-unknown-linux-musl    - musl libc (static linking)
+#
+# ARM32 Linux (legacy processors, Raspberry Pi, etc.):
+#   arm-unknown-linux-gnueabihf   - ARMv6 with hardware float
+#   armv7-unknown-linux-gnueabihf - ARMv7 with hardware float
+#
+# Bare metal (Cortex-M microcontrollers, no OS):
+#   thumbv7em-none-eabihf         - Cortex-M4F/M7 with FPU
+#   thumbv7m-none-eabi            - Cortex-M3 (no FPU)
+#   thumbv6m-none-eabi            - Cortex-M0/M0+
+#
+# Usage:
+#   cargo build --target aarch64-unknown-linux-gnu --release
+#   cargo build --target thumbv7em-none-eabihf --release -p scrap-core --no-default-features
+
+# =============================================================================
+# ARM64 Linux (aarch64-unknown-linux-gnu)
+# =============================================================================
+# Install: sudo pacman -S aarch64-linux-gnu-gcc
+# Or use cross: cargo install cross && cross build --target aarch64-unknown-linux-gnu
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# =============================================================================
+# ARM32 Linux (armv7-unknown-linux-gnueabihf)
+# =============================================================================
+# Install: sudo pacman -S arm-none-linux-gnueabihf-gcc
+
+[target.arm-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# =============================================================================
+# Bare Metal Cortex-M (thumbv7em-none-eabihf)
+# =============================================================================
+# Install: sudo pacman -S arm-none-eabi-gcc arm-none-eabi-newlib
+# Note: Only scrap-core with --no-default-features works on bare metal
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m4",
+]
+
+[target.thumbv7m-none-eabi]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m3",
+]
+
+[target.thumbv6m-none-eabi]
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m0",
+]
+
+# =============================================================================
+# Build settings
+# =============================================================================
+
+[build]
+# Uncomment to set a default target:
+# target = "aarch64-unknown-linux-gnu"
+
+# Number of parallel jobs (adjust for satellite build system)
+# jobs = 4
+
+[env]
+# Environment variables for cross-compilation
+# CROSS_CONTAINER_ENGINE = "podman"  # Use podman instead of docker for cross
+
+[alias]
+# Convenient aliases for common builds
+arm64 = "build --target aarch64-unknown-linux-gnu --release"
+arm32 = "build --target armv7-unknown-linux-gnueabihf --release"
+cortex-m4 = "build --target thumbv7em-none-eabihf --release -p scrap-core --no-default-features"

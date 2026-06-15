@@ -4,7 +4,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::cbor::{encode_protected_content, decode_capability_token};
 use crate::crypto::{sha256, verify_signature, Signer, KeySigner};
-use crate::error::ScapError;
+use crate::error::ScrapError;
 use crate::types::*;
 
 /// Builder for creating capability tokens
@@ -89,7 +89,7 @@ impl CapabilityTokenBuilder {
     /// The protected content (header + payload) is encoded once; the signature is
     /// over `SHA256(protected)`, and `protected` is retained and carried on the
     /// wire verbatim.
-    pub fn sign_with<S: Signer + ?Sized>(self, signer: &S) -> Result<CapabilityToken, ScapError> {
+    pub fn sign_with<S: Signer + ?Sized>(self, signer: &S) -> Result<CapabilityToken, ScrapError> {
         let content = ProtectedContent { header: self.header, payload: self.payload };
         let protected = encode_protected_content(&content)?;
         let digest = sha256(&protected);
@@ -106,7 +106,7 @@ impl CapabilityTokenBuilder {
     ///
     /// Equivalent to `sign_with(&KeySigner::from_slice(private_key)?)`. On
     /// multi-tenant hardware, prefer [`Self::sign_with`] with an external signer.
-    pub fn sign(self, private_key: &[u8]) -> Result<CapabilityToken, ScapError> {
+    pub fn sign(self, private_key: &[u8]) -> Result<CapabilityToken, ScrapError> {
         let signer = KeySigner::from_slice(private_key)?;
         self.sign_with(&signer)
     }
@@ -164,24 +164,24 @@ impl<'a> TokenValidator<'a> {
     }
 
     /// Validate the token
-    pub fn validate(self) -> Result<(), ScapError> {
+    pub fn validate(self) -> Result<(), ScrapError> {
         // Check algorithm
         if self.token.header.alg != "ES256K" {
-            return Err(ScapError::InvalidCapability(
+            return Err(ScrapError::InvalidCapability(
                 alloc::format!("unsupported algorithm: {}", self.token.header.alg)
             ));
         }
 
         // Check token type
         if self.token.header.typ != "SAT-CAP" && self.token.header.typ != "SAT-CAP-DEL" {
-            return Err(ScapError::InvalidCapability(
+            return Err(ScrapError::InvalidCapability(
                 alloc::format!("invalid token type: {}", self.token.header.typ)
             ));
         }
 
         // Check delegation consistency
         if self.token.header.typ == "SAT-CAP-DEL" && self.token.payload.prf.is_none() {
-            return Err(ScapError::MissingField(String::from("prf (parent reference required for delegation)")));
+            return Err(ScrapError::MissingField(String::from("prf (parent reference required for delegation)")));
         }
 
         // Enforce delegation attenuation against the parent (child ⊆ parent).
@@ -189,7 +189,7 @@ impl<'a> TokenValidator<'a> {
             if let Some(parent) = self.parent {
                 // prf must name the parent
                 if self.token.payload.prf.as_deref() != Some(parent.payload.jti.as_str()) {
-                    return Err(ScapError::ConstraintViolation(
+                    return Err(ScrapError::ConstraintViolation(
                         alloc::format!("prf does not reference parent jti: {}", parent.payload.jti)
                     ));
                 }
@@ -197,7 +197,7 @@ impl<'a> TokenValidator<'a> {
                 let parent_depth = parent.header.chn.unwrap_or(0);
                 if let Some(child_depth) = self.token.header.chn {
                     if child_depth != parent_depth + 1 {
-                        return Err(ScapError::ConstraintViolation(
+                        return Err(ScrapError::ConstraintViolation(
                             alloc::format!("chain depth {} is not parent depth {} + 1", child_depth, parent_depth)
                         ));
                     }
@@ -207,14 +207,14 @@ impl<'a> TokenValidator<'a> {
                     let authorized = parent.payload.cap.iter()
                         .any(|granted| capability_matches(granted, cap));
                     if !authorized {
-                        return Err(ScapError::InvalidCapability(
+                        return Err(ScrapError::InvalidCapability(
                             alloc::format!("delegated capability exceeds parent grant: {}", cap)
                         ));
                     }
                 }
                 // a delegation must not outlive its parent
                 if self.token.payload.exp > parent.payload.exp {
-                    return Err(ScapError::ConstraintViolation(String::from(
+                    return Err(ScrapError::ConstraintViolation(String::from(
                         "delegation expiry exceeds parent expiry"
                     )));
                 }
@@ -224,10 +224,10 @@ impl<'a> TokenValidator<'a> {
         // Check time validity
         if let Some(now) = self.current_time {
             if now < self.token.payload.iat {
-                return Err(ScapError::TokenNotYetValid);
+                return Err(ScrapError::TokenNotYetValid);
             }
             if now > self.token.payload.exp {
-                return Err(ScapError::TokenExpired);
+                return Err(ScrapError::TokenExpired);
             }
         }
 
@@ -238,7 +238,7 @@ impl<'a> TokenValidator<'a> {
         if let Some(pubkey) = self.issuer_pubkey {
             let valid = verify_signature(pubkey, &self.token.protected, &self.token.signature)?;
             if !valid {
-                return Err(ScapError::VerificationFailed);
+                return Err(ScrapError::VerificationFailed);
             }
         }
 
@@ -253,10 +253,10 @@ impl<'a> TokenValidator<'a> {
 
 /// Validate a capability string format
 /// Format: "category:action:target" (e.g., "cmd:imaging:msi")
-pub fn validate_capability(cap: &str) -> Result<(), ScapError> {
+pub fn validate_capability(cap: &str) -> Result<(), ScrapError> {
     let parts: Vec<&str> = cap.split(':').collect();
     if parts.len() < 2 {
-        return Err(ScapError::InvalidCapability(
+        return Err(ScrapError::InvalidCapability(
             alloc::format!("capability must have at least 2 parts: {}", cap)
         ));
     }
@@ -264,7 +264,7 @@ pub fn validate_capability(cap: &str) -> Result<(), ScapError> {
     // Check for empty parts
     for part in &parts {
         if part.is_empty() {
-            return Err(ScapError::InvalidCapability(
+            return Err(ScrapError::InvalidCapability(
                 alloc::format!("capability contains empty part: {}", cap)
             ));
         }
@@ -273,7 +273,7 @@ pub fn validate_capability(cap: &str) -> Result<(), ScapError> {
     // First part must be a known category
     let valid_categories = ["cmd", "relay", "data", "query", "admin"];
     if !valid_categories.contains(&parts[0]) && parts[0] != "*" {
-        return Err(ScapError::InvalidCapability(
+        return Err(ScrapError::InvalidCapability(
             alloc::format!("unknown capability category: {}", parts[0])
         ));
     }
@@ -310,7 +310,7 @@ pub fn parse_and_validate(
     bytes: &[u8],
     issuer_pubkey: &[u8],
     current_time: Timestamp,
-) -> Result<CapabilityToken, ScapError> {
+) -> Result<CapabilityToken, ScrapError> {
     let token = decode_capability_token(bytes)?;
 
     TokenValidator::new(&token)
@@ -339,7 +339,7 @@ mod tests {
     // closure (standing in for an HSM / secure element / signing daemon).
     struct ExternalSigner { privkey: Vec<u8> }
     impl Signer for ExternalSigner {
-        fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+        fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScrapError> {
             // In reality this call crosses to secure hardware; here we reuse the
             // in-process primitive to prove the wiring + that the result verifies.
             KeySigner::from_slice(&self.privkey)?.sign_digest(digest)
@@ -415,7 +415,7 @@ mod tests {
             .at_time(now + 7200)
             .validate();
 
-        assert!(matches!(result, Err(ScapError::TokenExpired)));
+        assert!(matches!(result, Err(ScrapError::TokenExpired)));
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
             .at_time(now - 100)
             .validate();
 
-        assert!(matches!(result, Err(ScapError::TokenNotYetValid)));
+        assert!(matches!(result, Err(ScrapError::TokenNotYetValid)));
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
             .with_issuer_key(&wrong_pubkey)
             .validate();
 
-        assert!(matches!(result, Err(ScapError::VerificationFailed)));
+        assert!(matches!(result, Err(ScrapError::VerificationFailed)));
     }
 
     #[test]
@@ -536,7 +536,7 @@ mod tests {
         // child claims a capability the parent never granted
         let (parent, child) = parent_and_child(vec![String::from("cmd:propulsion:burn")], 3600);
         let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&parent).validate();
-        assert!(matches!(result, Err(ScapError::InvalidCapability(_))));
+        assert!(matches!(result, Err(ScrapError::InvalidCapability(_))));
     }
 
     #[test]
@@ -544,7 +544,7 @@ mod tests {
         // child expires after the parent
         let (parent, child) = parent_and_child(vec![String::from("cmd:compute:inference")], 999999);
         let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&parent).validate();
-        assert!(matches!(result, Err(ScapError::ConstraintViolation(_))));
+        assert!(matches!(result, Err(ScrapError::ConstraintViolation(_))));
     }
 
     #[test]
@@ -557,7 +557,7 @@ mod tests {
             String::from("some-other-jti"), vec![String::from("cmd:compute:inference")],
         ).valid_for(1705320000, 7200).sign(&privkey).unwrap();
         let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&other_parent).validate();
-        assert!(matches!(result, Err(ScapError::ConstraintViolation(_))));
+        assert!(matches!(result, Err(ScrapError::ConstraintViolation(_))));
     }
 
     #[test]

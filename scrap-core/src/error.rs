@@ -1,11 +1,11 @@
-//! Error types for SCAP operations
+//! Error types for SCRAP operations
 
 use alloc::string::String;
 use core::fmt;
 
-/// Errors that can occur during SCAP operations
+/// Errors that can occur during SCRAP operations
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScapError {
+pub enum ScrapError {
     /// Invalid signature
     InvalidSignature,
     /// Signature verification failed
@@ -32,7 +32,7 @@ pub enum ScapError {
     InvalidHashLength { expected: usize, got: usize },
 }
 
-impl fmt::Display for ScapError {
+impl fmt::Display for ScrapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSignature => write!(f, "invalid signature format"),
@@ -54,4 +54,4 @@ impl fmt::Display for ScapError {
 }
 
 #[cfg(feature = "std")]
-impl std::error::Error for ScapError {}
+impl std::error::Error for ScrapError {}

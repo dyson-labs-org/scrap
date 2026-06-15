@@ -1,9 +1,9 @@
-//! SCAP task-payment binding
+//! SCRAP task-payment binding
 //!
 //! This module binds capability tokens to Lightning payments, ensuring that
 //! task authorization and payment are atomically linked.
 
-use scap_core::{
+use scrap_core::{
     CapabilityToken, ExecutionProof, BoundTaskRequest,
     sha256, sign_message, verify_signature, compute_binding_hash, compute_proof_hash,
     encode_capability_token,
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use serde::{Serialize, Deserialize};
 
-/// Binding between a SCAP task and Lightning payment
+/// Binding between a SCRAP task and Lightning payment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskPaymentBinding {
     /// Capability token JTI
@@ -287,7 +287,7 @@ impl std::error::Error for BindingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scap_core::{CapabilityTokenBuilder, derive_public_key};
+    use scrap_core::{CapabilityTokenBuilder, derive_public_key};
 
     fn test_keypair() -> (Vec<u8>, Vec<u8>) {
         let privkey = hex::decode(

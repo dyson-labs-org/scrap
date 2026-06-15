@@ -1,10 +1,10 @@
-; SCAP Protocol CDDL Schema
-; Satellite Capability and Payment Protocol
+; SCRAP Protocol CDDL Schema
+; Secure Capabilities and Routed Authorization Protocol Protocol
 ; Version: 1.0.0
 ; RFC 8610 Concise Data Definition Language
 ;
-; Validate with: cddl scap.cddl validate message.cbor
-; Generate Rust: cddl-codegen --input scap.cddl --output src/types.rs
+; Validate with: cddl scrap.cddl validate message.cbor
+; Generate Rust: cddl-codegen --input scrap.cddl --output src/types.rs
 
 ; =============================================================================
 ; COMMON TYPES
@@ -231,15 +231,15 @@ data-location = {
 ; ISL MESSAGE ENCAPSULATION
 ; =============================================================================
 
-; Wrapper for all SCAP messages over ISL
-isl-scap-message = {
+; Wrapper for all SCRAP messages over ISL
+isl-scrap-message = {
     version: uint,               ; Protocol version (1)
     msg_type: message-type,
     sender: tstr,                ; Sender satellite ID
     recipient: tstr,             ; Recipient satellite ID
     sequence: uint,              ; Message sequence number
     timestamp: timestamp,
-    payload: scap-payload,
+    payload: scrap-payload,
     ? hmac: bytes .size 32       ; Optional HMAC for integrity
 }
 
@@ -251,7 +251,7 @@ message-type =
     "LIGHTNING" /                ; Encapsulated Lightning message
     "HEARTBEAT"
 
-scap-payload =
+scrap-payload =
     bound-task-request /
     task-response /
     execution-proof /

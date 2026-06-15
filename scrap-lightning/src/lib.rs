@@ -1,4 +1,4 @@
-//! SCAP Lightning Integration
+//! SCRAP Lightning Integration
 //!
 //! LDK integration for satellite-to-satellite payments using the Lightning Network.
 //!
@@ -13,10 +13,10 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                    SCAP Lightning Node                       │
+//! │                    SCRAP Lightning Node                       │
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-//! │  │ Channel     │  │ Payment     │  │ SCAP Task           │  │
+//! │  │ Channel     │  │ Payment     │  │ SCRAP Task           │  │
 //! │  │ Manager     │  │ Router      │  │ Binding             │  │
 //! │  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
 //! │         │                │                    │             │

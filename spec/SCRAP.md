@@ -213,8 +213,8 @@ in the capability token. The token authorizes WHAT may be done; the task request
 specifies HOW MUCH to pay.
 
 > The box above is illustrative. The normative wire format is CBOR + ES256K
-> (secp256k1 ECDSA), defined by `schemas/scap.cddl` and implemented in
-> `scap-core`. The signing scheme is specified in §2.2.1.
+> (secp256k1 ECDSA), defined by `schemas/scrap.cddl` and implemented in
+> `scrap-core`. The signing scheme is specified in §2.2.1.
 
 ### 2.2.1 Signed Encoding (normative)
 
@@ -2547,7 +2547,7 @@ use lightning::events::{Event, PaymentPurpose};
 fn process_ldk_events(
     channel_manager: &ChannelManager,
     isl: &ISLInterface,
-    scap_handler: &ScapHandler,
+    scrap_handler: &ScrapHandler,
 ) {
     // Called during each ISL contact window
     for event in channel_manager.get_and_clear_pending_events() {
@@ -2594,7 +2594,7 @@ fn process_ldk_events(
                 // Handle force-close, may need ground intervention
                 log::warn!("Channel {} closed: {:?}",
                     hex::encode(channel_id.0), reason);
-                scap_handler.notify_ground_station_channel_closed(channel_id);
+                scrap_handler.notify_ground_station_channel_closed(channel_id);
             }
 
             _ => {}
@@ -2951,9 +2951,9 @@ A satellite MUST verify that:
 2. The capability token's `cmd_pub` matches the SISL-authenticated peer identity
 
 ```python
-def verify_scap_request_over_sisl(
+def verify_scrap_request_over_sisl(
     sisl_session: SISLSession,
-    scap_request: TaskRequest,
+    scrap_request: TaskRequest,
 ) -> bool:
     """Verify SCRAP request came from authenticated SISL peer."""
 
@@ -2961,11 +2961,11 @@ def verify_scap_request_over_sisl(
     peer_pubkey = sisl_session.peer_identity_pubkey
 
     # Verify capability token
-    if not verify_capability_token(scap_request.capability_token, self):
+    if not verify_capability_token(scrap_request.capability_token, self):
         return False
 
     # Verify token's commander matches SISL peer
-    if scap_request.capability_token.commander_pubkey != peer_pubkey:
+    if scrap_request.capability_token.commander_pubkey != peer_pubkey:
         return False
 
     return True

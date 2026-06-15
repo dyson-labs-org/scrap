@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "generated": "2026-06-15T13:20:54Z",
-  "description": "Computed test vectors for SCAP protocol",
+  "description": "Computed test vectors for SCRAP protocol",
   "capability_token": {
     "description": "Simple imaging task capability token",
     "keys": {

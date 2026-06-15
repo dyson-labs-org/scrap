@@ -1,12 +1,12 @@
 /*
- * SCAP (Satellite Capability and Payment) Protocol - C API
+ * SCRAP (Secure Capabilities and Routed Authorization Protocol) Protocol - C API
  *
- * This header provides C bindings for the SCAP protocol library.
- * Link with: -lscap_ffi -lpthread -ldl -lm
+ * This header provides C bindings for the SCRAP protocol library.
+ * Link with: -lscrap_ffi -lpthread -ldl -lm
  */
 
-#ifndef SCAP_H
-#define SCAP_H
+#ifndef SCRAP_H
+#define SCRAP_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -21,51 +21,51 @@ extern "C" {
  * ============================================================================ */
 
 typedef enum {
-    SCAP_OK = 0,
-    SCAP_ERR_NULL_POINTER = -1,
-    SCAP_ERR_INVALID_KEY = -2,
-    SCAP_ERR_INVALID_SIGNATURE = -3,
-    SCAP_ERR_VERIFICATION_FAILED = -4,
-    SCAP_ERR_CBOR_ENCODE = -5,
-    SCAP_ERR_CBOR_DECODE = -6,
-    SCAP_ERR_TOKEN_EXPIRED = -7,
-    SCAP_ERR_TOKEN_NOT_VALID_YET = -8,
-    SCAP_ERR_INVALID_CAPABILITY = -9,
-    SCAP_ERR_BUFFER_TOO_SMALL = -10,
-    SCAP_ERR_INTERNAL = -99,
-} scap_error_t;
+    SCRAP_OK = 0,
+    SCRAP_ERR_NULL_POINTER = -1,
+    SCRAP_ERR_INVALID_KEY = -2,
+    SCRAP_ERR_INVALID_SIGNATURE = -3,
+    SCRAP_ERR_VERIFICATION_FAILED = -4,
+    SCRAP_ERR_CBOR_ENCODE = -5,
+    SCRAP_ERR_CBOR_DECODE = -6,
+    SCRAP_ERR_TOKEN_EXPIRED = -7,
+    SCRAP_ERR_TOKEN_NOT_VALID_YET = -8,
+    SCRAP_ERR_INVALID_CAPABILITY = -9,
+    SCRAP_ERR_BUFFER_TOO_SMALL = -10,
+    SCRAP_ERR_INTERNAL = -99,
+} scrap_error_t;
 
 /* ============================================================================
  * Opaque Types
  * ============================================================================ */
 
 /* Opaque handle to a capability token */
-typedef struct scap_token scap_token_t;
+typedef struct scrap_token scrap_token_t;
 
 /* Opaque handle to a token builder */
-typedef struct scap_token_builder scap_token_builder_t;
+typedef struct scrap_token_builder scrap_token_builder_t;
 
 /* Opaque handle to a task request */
-typedef struct scap_task_request scap_task_request_t;
+typedef struct scrap_task_request scrap_task_request_t;
 
 /* Opaque handle to an execution proof */
-typedef struct scap_execution_proof scap_execution_proof_t;
+typedef struct scrap_execution_proof scrap_execution_proof_t;
 
 /* Opaque handle to a signer (in-process key or host callback) */
-typedef struct ScapSigner scap_signer_t;
+typedef struct ScrapSigner scrap_signer_t;
 
 /* ============================================================================
  * Buffer Types
  * ============================================================================ */
 
-/* Byte buffer returned by SCAP functions. Caller must free with scap_buffer_free() */
+/* Byte buffer returned by SCRAP functions. Caller must free with scrap_buffer_free() */
 typedef struct {
     uint8_t *data;
     size_t len;
-} scap_buffer_t;
+} scrap_buffer_t;
 
-/* Free a buffer allocated by SCAP functions */
-void scap_buffer_free(scap_buffer_t *buf);
+/* Free a buffer allocated by SCRAP functions */
+void scrap_buffer_free(scrap_buffer_t *buf);
 
 /* ============================================================================
  * Cryptographic Functions
@@ -75,9 +75,9 @@ void scap_buffer_free(scap_buffer_t *buf);
  * @param data Input data
  * @param data_len Length of input data
  * @param hash_out Output buffer (must be at least 32 bytes)
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_sha256(
+scrap_error_t scrap_sha256(
     const uint8_t *data,
     size_t data_len,
     uint8_t hash_out[32]
@@ -86,9 +86,9 @@ scap_error_t scap_sha256(
 /* Derive public key from private key
  * @param private_key 32-byte private key
  * @param public_key_out Output buffer (must be at least 33 bytes)
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_derive_public_key(
+scrap_error_t scrap_derive_public_key(
     const uint8_t private_key[32],
     uint8_t public_key_out[33]
 );
@@ -98,13 +98,13 @@ scap_error_t scap_derive_public_key(
  * @param message Message to sign
  * @param message_len Length of message
  * @param signature_out Output buffer for DER signature
- * @return SCAP_OK on success, caller must free signature_out with scap_buffer_free()
+ * @return SCRAP_OK on success, caller must free signature_out with scrap_buffer_free()
  */
-scap_error_t scap_sign(
+scrap_error_t scrap_sign(
     const uint8_t private_key[32],
     const uint8_t *message,
     size_t message_len,
-    scap_buffer_t *signature_out
+    scrap_buffer_t *signature_out
 );
 
 /* Verify a signature
@@ -114,9 +114,9 @@ scap_error_t scap_sign(
  * @param signature DER-encoded signature
  * @param signature_len Length of signature
  * @param valid_out Set to true if signature is valid
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_verify(
+scrap_error_t scrap_verify(
     const uint8_t public_key[33],
     const uint8_t *message,
     size_t message_len,
@@ -132,10 +132,10 @@ scap_error_t scap_verify(
 /* Host signing callback. Receives a 32-byte digest, writes a DER-encoded ECDSA
  * signature into sig_out (capacity sig_cap), sets *sig_len_out to bytes written,
  * and returns 0 on success (nonzero = failure). ctx is the opaque pointer passed
- * to scap_signer_from_callback. Route this to an HSM / secure element / daemon
+ * to scrap_signer_from_callback. Route this to an HSM / secure element / daemon
  * so the private key never enters this library's address space.
  */
-typedef int32_t (*scap_sign_callback_t)(
+typedef int32_t (*scrap_sign_callback_t)(
     void *ctx,
     const uint8_t digest[32],
     uint8_t *sig_out,
@@ -144,17 +144,17 @@ typedef int32_t (*scap_sign_callback_t)(
 );
 
 /* Create a signer holding a raw 32-byte private key in-process (zeroized on free).
- * @return Signer handle, or NULL on error. Free with scap_signer_free().
+ * @return Signer handle, or NULL on error. Free with scrap_signer_free().
  */
-scap_signer_t *scap_signer_from_key(const uint8_t private_key[32]);
+scrap_signer_t *scrap_signer_from_key(const uint8_t private_key[32]);
 
 /* Create a signer that delegates to a host callback (key stays external).
- * @return Signer handle (never NULL). Free with scap_signer_free().
+ * @return Signer handle (never NULL). Free with scrap_signer_free().
  */
-scap_signer_t *scap_signer_from_callback(scap_sign_callback_t cb, void *ctx);
+scrap_signer_t *scrap_signer_from_callback(scrap_sign_callback_t cb, void *ctx);
 
 /* Free a signer */
-void scap_signer_free(scap_signer_t *signer);
+void scrap_signer_free(scrap_signer_t *signer);
 
 /* ============================================================================
  * Token Builder
@@ -167,7 +167,7 @@ void scap_signer_free(scap_signer_t *signer);
  * @param jti Unique token ID (null-terminated string)
  * @return New builder handle, or NULL on error
  */
-scap_token_builder_t *scap_token_builder_new(
+scrap_token_builder_t *scrap_token_builder_new(
     const char *issuer,
     const char *subject,
     const char *audience,
@@ -175,15 +175,15 @@ scap_token_builder_t *scap_token_builder_new(
 );
 
 /* Free a token builder */
-void scap_token_builder_free(scap_token_builder_t *builder);
+void scrap_token_builder_free(scrap_token_builder_t *builder);
 
 /* Add a capability to the token
  * @param builder Builder handle
  * @param capability Capability string (e.g., "cmd:imaging:msi")
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_add_capability(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_add_capability(
+    scrap_token_builder_t *builder,
     const char *capability
 );
 
@@ -191,10 +191,10 @@ scap_error_t scap_token_builder_add_capability(
  * @param builder Builder handle
  * @param issued_at Unix timestamp when token was issued
  * @param expires_at Unix timestamp when token expires
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_set_validity(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_set_validity(
+    scrap_token_builder_t *builder,
     uint64_t issued_at,
     uint64_t expires_at
 );
@@ -202,20 +202,20 @@ scap_error_t scap_token_builder_set_validity(
 /* Set maximum area constraint
  * @param builder Builder handle
  * @param max_area_km2 Maximum area in square kilometers
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_set_max_area(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_set_max_area(
+    scrap_token_builder_t *builder,
     uint64_t max_area_km2
 );
 
 /* Set maximum hops constraint
  * @param builder Builder handle
  * @param max_hops Maximum number of relay hops
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_set_max_hops(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_set_max_hops(
+    scrap_token_builder_t *builder,
     uint32_t max_hops
 );
 
@@ -223,10 +223,10 @@ scap_error_t scap_token_builder_set_max_hops(
  * @param builder Builder handle
  * @param parent_jti JTI of parent token being delegated
  * @param chain_depth Depth in delegation chain (0 = root)
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_set_delegation(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_set_delegation(
+    scrap_token_builder_t *builder,
     const char *parent_jti,
     uint32_t chain_depth
 );
@@ -235,27 +235,27 @@ scap_error_t scap_token_builder_set_delegation(
  * @param builder Builder handle (consumed, do not use after this call)
  * @param private_key 32-byte signing key
  * @param token_out Output token handle
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  *
- * On multi-tenant hardware, prefer scap_token_builder_sign_with() with a
+ * On multi-tenant hardware, prefer scrap_token_builder_sign_with() with a
  * callback signer so the key never enters this library's address space.
  */
-scap_error_t scap_token_builder_sign(
-    scap_token_builder_t *builder,
+scrap_error_t scrap_token_builder_sign(
+    scrap_token_builder_t *builder,
     const uint8_t private_key[32],
-    scap_token_t **token_out
+    scrap_token_t **token_out
 );
 
-/* Build and sign the token using an opaque signer (see scap_signer_*).
+/* Build and sign the token using an opaque signer (see scrap_signer_*).
  * @param builder Builder handle (consumed, do not use after this call)
  * @param signer Signer handle (in-process key or host callback)
  * @param token_out Output token handle
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_builder_sign_with(
-    scap_token_builder_t *builder,
-    const scap_signer_t *signer,
-    scap_token_t **token_out
+scrap_error_t scrap_token_builder_sign_with(
+    scrap_token_builder_t *builder,
+    const scrap_signer_t *signer,
+    scrap_token_t **token_out
 );
 
 /* ============================================================================
@@ -263,38 +263,38 @@ scap_error_t scap_token_builder_sign_with(
  * ============================================================================ */
 
 /* Free a token */
-void scap_token_free(scap_token_t *token);
+void scrap_token_free(scrap_token_t *token);
 
 /* Decode a token from CBOR bytes
  * @param cbor_data CBOR-encoded token
  * @param cbor_len Length of CBOR data
  * @param token_out Output token handle
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_decode(
+scrap_error_t scrap_token_decode(
     const uint8_t *cbor_data,
     size_t cbor_len,
-    scap_token_t **token_out
+    scrap_token_t **token_out
 );
 
 /* Encode a token to CBOR bytes
  * @param token Token handle
  * @param cbor_out Output buffer
- * @return SCAP_OK on success, caller must free cbor_out with scap_buffer_free()
+ * @return SCRAP_OK on success, caller must free cbor_out with scrap_buffer_free()
  */
-scap_error_t scap_token_encode(
-    const scap_token_t *token,
-    scap_buffer_t *cbor_out
+scrap_error_t scrap_token_encode(
+    const scrap_token_t *token,
+    scrap_buffer_t *cbor_out
 );
 
 /* Validate a token
  * @param token Token handle
  * @param current_time Current Unix timestamp (0 to skip time check)
  * @param issuer_pubkey 33-byte issuer public key (NULL to skip signature check)
- * @return SCAP_OK if valid, error code otherwise
+ * @return SCRAP_OK if valid, error code otherwise
  */
-scap_error_t scap_token_validate(
-    const scap_token_t *token,
+scrap_error_t scrap_token_validate(
+    const scrap_token_t *token,
     uint64_t current_time,
     const uint8_t *issuer_pubkey
 );
@@ -303,10 +303,10 @@ scap_error_t scap_token_validate(
  * @param token Token handle
  * @param jti_out Output buffer for JTI string
  * @param jti_len Size of output buffer
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_get_jti(
-    const scap_token_t *token,
+scrap_error_t scrap_token_get_jti(
+    const scrap_token_t *token,
     char *jti_out,
     size_t jti_len
 );
@@ -315,10 +315,10 @@ scap_error_t scap_token_get_jti(
  * @param token Token handle
  * @param issuer_out Output buffer for issuer string
  * @param issuer_len Size of output buffer
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_get_issuer(
-    const scap_token_t *token,
+scrap_error_t scrap_token_get_issuer(
+    const scrap_token_t *token,
     char *issuer_out,
     size_t issuer_len
 );
@@ -326,10 +326,10 @@ scap_error_t scap_token_get_issuer(
 /* Get token expiration time
  * @param token Token handle
  * @param exp_out Output for expiration timestamp
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_token_get_expiration(
-    const scap_token_t *token,
+scrap_error_t scrap_token_get_expiration(
+    const scrap_token_t *token,
     uint64_t *exp_out
 );
 
@@ -342,7 +342,7 @@ scap_error_t scap_token_get_expiration(
  * @param requested The capability being requested (e.g., "cmd:imaging:msi")
  * @return true if granted authorizes requested
  */
-bool scap_capability_matches(
+bool scrap_capability_matches(
     const char *granted,
     const char *requested
 );
@@ -355,9 +355,9 @@ bool scap_capability_matches(
  * @param jti Token JTI
  * @param payment_hash 32-byte payment hash
  * @param hash_out Output buffer (must be at least 32 bytes)
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_compute_binding_hash(
+scrap_error_t scrap_compute_binding_hash(
     const char *jti,
     const uint8_t payment_hash[32],
     uint8_t hash_out[32]
@@ -369,9 +369,9 @@ scap_error_t scap_compute_binding_hash(
  * @param output_hash 32-byte output hash
  * @param timestamp Execution timestamp
  * @param hash_out Output buffer (must be at least 32 bytes)
- * @return SCAP_OK on success
+ * @return SCRAP_OK on success
  */
-scap_error_t scap_compute_proof_hash(
+scrap_error_t scrap_compute_proof_hash(
     const char *task_jti,
     const uint8_t payment_hash[32],
     const uint8_t output_hash[32],
@@ -384,10 +384,10 @@ scap_error_t scap_compute_proof_hash(
  * ============================================================================ */
 
 /* Get library version string */
-const char *scap_version(void);
+const char *scrap_version(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* SCAP_H */
+#endif /* SCRAP_H */

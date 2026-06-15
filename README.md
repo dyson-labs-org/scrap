@@ -25,7 +25,7 @@ SCRAP enables satellites to:
 ## Repository Structure
 
 ```
-scap/
+scrap/
 ├── spec/                      # Normative protocol specifications
 │   ├── SCRAP.md                #   Primary protocol specification
 │   ├── SISL.md                #   Secure Inter-Satellite Link protocol
@@ -57,12 +57,12 @@ scap/
 │   ├── _theme.css             #   Custom styling
 │   └── Makefile               #   Build with reveal-md
 │
-├── scap-core/                 # Rust: Core token/crypto library
-├── scap-lightning/            # Rust: LDK integration for payments
-├── scap-ffi/                  # Rust: C FFI bindings
+├── scrap-core/                 # Rust: Core token/crypto library
+├── scrap-lightning/            # Rust: LDK integration for payments
+├── scrap-ffi/                  # Rust: C FFI bindings
 │
 ├── schemas/                   # CDDL schemas and examples
-│   ├── scap.cddl              #   Message format definitions
+│   ├── scrap.cddl              #   Message format definitions
 │   └── examples/              #   Example messages
 │
 ├── test-vectors/              # Cryptographic test vectors
@@ -139,7 +139,7 @@ make all                    # Build all HTML outputs
 
 Three crates provide a reference implementation:
 
-### scap-core
+### scrap-core
 
 Core capability token library (no-std compatible):
 
@@ -157,13 +157,13 @@ pub fn create_token(payload: TokenPayload, signing_key: &SecretKey) -> Vec<u8>;
 - `types.rs` - Shared type definitions
 - `error.rs` - Error types
 
-### scap-lightning
+### scrap-lightning
 
 LDK (Lightning Dev Kit) integration:
 
 ```rust
 // Payment-task binding
-pub struct ScapChannelManager { ... }
+pub struct ScrapChannelManager { ... }
 pub fn create_task_payment(token: &CapabilityToken, amount_msat: u64) -> PaymentHash;
 pub fn verify_execution_proof(proof: &ExecutionProof) -> bool;
 ```
@@ -177,21 +177,21 @@ pub fn verify_execution_proof(proof: &ExecutionProof) -> bool;
 - `broadcaster.rs` - Transaction broadcasting via ground station
 - `config.rs` - Space-optimized LDK configuration
 
-### scap-ffi
+### scrap-ffi
 
 C FFI bindings for non-Rust environments:
 
 ```c
 // C API
-scap_token_t* scap_token_parse(const uint8_t* data, size_t len);
-int scap_token_verify(const scap_token_t* token, const uint8_t* pubkey);
-void scap_token_free(scap_token_t* token);
+scrap_token_t* scrap_token_parse(const uint8_t* data, size_t len);
+int scrap_token_verify(const scrap_token_t* token, const uint8_t* pubkey);
+void scrap_token_free(scrap_token_t* token);
 ```
 
 **Build**:
 ```bash
-cargo build --release -p scap-ffi
-# Output: target/release/libscap_ffi.a, libscap_ffi.so
+cargo build --release -p scrap-ffi
+# Output: target/release/libscrap_ffi.a, libscrap_ffi.so
 ```
 
 ### Building
@@ -204,7 +204,7 @@ cargo build --release
 cargo test
 
 # Build for embedded (no-std)
-cargo build --release -p scap-core --no-default-features
+cargo build --release -p scrap-core --no-default-features
 
 # Cross-compile for ARM (satellite OBC)
 ./scripts/cross-build.sh aarch64-unknown-linux-gnu
@@ -218,7 +218,7 @@ CDDL (Concise Data Definition Language) schemas define message formats:
 
 | File | Description |
 |------|-------------|
-| [schemas/scap.cddl](schemas/scap.cddl) | Capability tokens, task messages, proofs |
+| [schemas/scrap.cddl](schemas/scrap.cddl) | Capability tokens, task messages, proofs |
 | [schemas/examples/](schemas/examples/) | Example messages in CBOR diagnostic notation |
 | [schemas/validate_examples.py](schemas/validate_examples.py) | Validation script |
 
@@ -396,11 +396,11 @@ PAYMENT FLOW (Ground, via Lightning):
 | Timeout-default arbiter | Draft | spec/SCRAP.md §6.3-6.6 |
 | CubeSat testbed design | Draft | spec/SCRAP.md §14 |
 | Space security model | Draft | spec/SCRAP.md §11.2 |
-| CDDL message schemas | Complete | schemas/scap.cddl |
+| CDDL message schemas | Complete | schemas/scrap.cddl |
 | Test vectors | Complete | test-vectors/computed.json |
-| Rust core library | In Progress | scap-core/ |
-| Rust LDK integration | In Progress | scap-lightning/ |
-| Rust FFI bindings | In Progress | scap-ffi/ |
+| Rust core library | In Progress | scrap-core/ |
+| Rust LDK integration | In Progress | scrap-lightning/ |
+| Rust FFI bindings | In Progress | scrap-ffi/ |
 
 ---
 
@@ -414,7 +414,7 @@ This repository includes Git submodules for Lightning implementations:
 | `lnd/` | [lightningnetwork/lnd](https://github.com/lightningnetwork/lnd) | LND reference |
 | `cln/` | [ElementsProject/lightning](https://github.com/ElementsProject/lightning) | CLN reference |
 
-These are reference implementations for API compatibility; SCRAP uses LDK via `scap-lightning`.
+These are reference implementations for API compatibility; SCRAP uses LDK via `scrap-lightning`.
 
 ---
 

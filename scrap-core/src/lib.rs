@@ -1,6 +1,6 @@
-//! SCAP (Satellite Capability and Payment) Protocol
+//! SCRAP (Secure Capabilities and Routed Authorization Protocol) Protocol
 //!
-//! Core library for SCAP message types, signing, and verification.
+//! Core library for SCRAP message types, signing, and verification.
 //!
 //! # Features
 //!
@@ -10,8 +10,8 @@
 //! # Example
 //!
 //! ```rust
-//! use scap_core::{CapabilityTokenBuilder, TokenValidator};
-//! use scap_core::crypto::derive_public_key;
+//! use scrap_core::{CapabilityTokenBuilder, TokenValidator};
+//! use scrap_core::crypto::derive_public_key;
 //!
 //! // Create and sign a capability token
 //! let privkey = [0x01u8; 32]; // Use real key in practice
@@ -84,7 +84,7 @@ pub use token::{
 };
 
 // Re-export error type
-pub use error::ScapError;
+pub use error::ScrapError;
 
 /// Protocol version
 pub const VERSION: &str = "1.0.0";

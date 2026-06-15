@@ -1,6 +1,6 @@
-//! SCAP message types
+//! SCRAP message types
 //!
-//! These types correspond to the CDDL schema in `schemas/scap.cddl`
+//! These types correspond to the CDDL schema in `schemas/scrap.cddl`
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -132,7 +132,7 @@ pub struct ProtectedContent {
 
 /// Complete capability token.
 ///
-/// Wire form (see `schemas/scap.cddl`): `{ protected: bstr, signature: bstr }`.
+/// Wire form (see `schemas/scrap.cddl`): `{ protected: bstr, signature: bstr }`.
 /// `protected` is the authoritative, signed byte string; `header`/`payload` are
 /// parsed from it for inspection only. Editing `header`/`payload` without
 /// re-signing has no effect on verification, which uses `protected`.
@@ -262,25 +262,25 @@ pub enum MessageType {
     Heartbeat,
 }
 
-/// ISL-encapsulated SCAP message
+/// ISL-encapsulated SCRAP message
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct IslScapMessage {
+pub struct IslScrapMessage {
     pub version: u32,
     pub msg_type: MessageType,
     pub sender: String,
     pub recipient: String,
     pub sequence: u64,
     pub timestamp: Timestamp,
-    pub payload: ScapPayload,
+    pub payload: ScrapPayload,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "optional_bytes")]
     pub hmac: Option<Vec<u8>>,
 }
 
-/// SCAP message payload variants
+/// SCRAP message payload variants
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum ScapPayload {
+pub enum ScrapPayload {
     TaskRequest(BoundTaskRequest),
     TaskResponse(TaskResponse),
     Proof(ExecutionProof),

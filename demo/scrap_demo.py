@@ -13,7 +13,7 @@ four artifacts a customer integrates against:
 No RF / link-layer detail — those live in SISL. This is the application layer only.
 
 Zero install: uses the pure-Python `ecdsa` package (already present) for secp256k1,
-and a minimal RFC-8949 CBOR encoder. The NORMATIVE wire format is schemas/scap.cddl;
+and a minimal RFC-8949 CBOR encoder. The NORMATIVE wire format is schemas/scrap.cddl;
 byte-for-byte interop vectors live in test-vectors/computed.json. Preimage
 constructions here match test-vectors/generate.py exactly.
 """
@@ -251,7 +251,7 @@ accepted order into a signed capability token. Everything above is unchanged.
          order_to_capability(legacy_order))
 
     banner("DEMO COMPLETE")
-    print("Normative spec: spec/SCRAP.md  |  wire format: schemas/scap.cddl  |  "
+    print("Normative spec: spec/SCRAP.md  |  wire format: schemas/scrap.cddl  |  "
           "interop vectors: test-vectors/computed.json")
 
 

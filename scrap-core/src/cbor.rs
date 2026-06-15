@@ -1,42 +1,42 @@
-//! CBOR encoding and decoding for SCAP messages
+//! CBOR encoding and decoding for SCRAP messages
 
 use alloc::vec::Vec;
 use ciborium::{de, ser};
 use serde::{de::DeserializeOwned, Serialize};
-use crate::error::ScapError;
+use crate::error::ScrapError;
 use crate::types::*;
 
 /// Encode a value to CBOR bytes
-pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ScapError> {
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ScrapError> {
     let mut buf = Vec::new();
     ser::into_writer(value, &mut buf)
-        .map_err(|e| ScapError::CborEncode(alloc::format!("{}", e)))?;
+        .map_err(|e| ScrapError::CborEncode(alloc::format!("{}", e)))?;
     Ok(buf)
 }
 
 /// Decode CBOR bytes to a value
-pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ScapError> {
+pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ScrapError> {
     de::from_reader(bytes)
-        .map_err(|e| ScapError::CborDecode(alloc::format!("{}", e)))
+        .map_err(|e| ScrapError::CborDecode(alloc::format!("{}", e)))
 }
 
 /// Encode a capability token header
-pub fn encode_header(header: &CapHeader) -> Result<Vec<u8>, ScapError> {
+pub fn encode_header(header: &CapHeader) -> Result<Vec<u8>, ScrapError> {
     encode(header)
 }
 
 /// Encode a capability token payload
-pub fn encode_payload(payload: &CapPayload) -> Result<Vec<u8>, ScapError> {
+pub fn encode_payload(payload: &CapPayload) -> Result<Vec<u8>, ScrapError> {
     encode(payload)
 }
 
 /// Decode a capability token header
-pub fn decode_header(bytes: &[u8]) -> Result<CapHeader, ScapError> {
+pub fn decode_header(bytes: &[u8]) -> Result<CapHeader, ScrapError> {
     decode(bytes)
 }
 
 /// Decode a capability token payload
-pub fn decode_payload(bytes: &[u8]) -> Result<CapPayload, ScapError> {
+pub fn decode_payload(bytes: &[u8]) -> Result<CapPayload, ScrapError> {
     decode(bytes)
 }
 
@@ -63,12 +63,12 @@ mod wire_bytes {
 }
 
 /// Encode the protected content (the signed bytes) of a capability token.
-pub fn encode_protected_content(content: &ProtectedContent) -> Result<Vec<u8>, ScapError> {
+pub fn encode_protected_content(content: &ProtectedContent) -> Result<Vec<u8>, ScrapError> {
     encode(content)
 }
 
 /// Encode a complete capability token to its wire form `{ protected, signature }`.
-pub fn encode_capability_token(token: &CapabilityToken) -> Result<Vec<u8>, ScapError> {
+pub fn encode_capability_token(token: &CapabilityToken) -> Result<Vec<u8>, ScrapError> {
     let wire = CapabilityTokenWire {
         protected: token.protected.clone(),
         signature: token.signature.clone(),
@@ -79,7 +79,7 @@ pub fn encode_capability_token(token: &CapabilityToken) -> Result<Vec<u8>, ScapE
 /// Decode a complete capability token from its wire form. The `protected` bytes
 /// are retained verbatim (for signature verification) and also parsed into
 /// `header`/`payload` for inspection.
-pub fn decode_capability_token(bytes: &[u8]) -> Result<CapabilityToken, ScapError> {
+pub fn decode_capability_token(bytes: &[u8]) -> Result<CapabilityToken, ScrapError> {
     let wire: CapabilityTokenWire = decode(bytes)?;
     let content: ProtectedContent = decode(&wire.protected)?;
     Ok(CapabilityToken {
@@ -91,42 +91,42 @@ pub fn decode_capability_token(bytes: &[u8]) -> Result<CapabilityToken, ScapErro
 }
 
 /// Encode a bound task request
-pub fn encode_task_request(request: &BoundTaskRequest) -> Result<Vec<u8>, ScapError> {
+pub fn encode_task_request(request: &BoundTaskRequest) -> Result<Vec<u8>, ScrapError> {
     encode(request)
 }
 
 /// Decode a bound task request
-pub fn decode_task_request(bytes: &[u8]) -> Result<BoundTaskRequest, ScapError> {
+pub fn decode_task_request(bytes: &[u8]) -> Result<BoundTaskRequest, ScrapError> {
     decode(bytes)
 }
 
 /// Encode an execution proof
-pub fn encode_execution_proof(proof: &ExecutionProof) -> Result<Vec<u8>, ScapError> {
+pub fn encode_execution_proof(proof: &ExecutionProof) -> Result<Vec<u8>, ScrapError> {
     encode(proof)
 }
 
 /// Decode an execution proof
-pub fn decode_execution_proof(bytes: &[u8]) -> Result<ExecutionProof, ScapError> {
+pub fn decode_execution_proof(bytes: &[u8]) -> Result<ExecutionProof, ScrapError> {
     decode(bytes)
 }
 
 /// Encode a task response
-pub fn encode_task_response(response: &TaskResponse) -> Result<Vec<u8>, ScapError> {
+pub fn encode_task_response(response: &TaskResponse) -> Result<Vec<u8>, ScrapError> {
     encode(response)
 }
 
 /// Decode a task response
-pub fn decode_task_response(bytes: &[u8]) -> Result<TaskResponse, ScapError> {
+pub fn decode_task_response(bytes: &[u8]) -> Result<TaskResponse, ScrapError> {
     decode(bytes)
 }
 
-/// Encode an ISL SCAP message
-pub fn encode_isl_message(message: &IslScapMessage) -> Result<Vec<u8>, ScapError> {
+/// Encode an ISL SCRAP message
+pub fn encode_isl_message(message: &IslScrapMessage) -> Result<Vec<u8>, ScrapError> {
     encode(message)
 }
 
-/// Decode an ISL SCAP message
-pub fn decode_isl_message(bytes: &[u8]) -> Result<IslScapMessage, ScapError> {
+/// Decode an ISL SCRAP message
+pub fn decode_isl_message(bytes: &[u8]) -> Result<IslScrapMessage, ScrapError> {
     decode(bytes)
 }
 

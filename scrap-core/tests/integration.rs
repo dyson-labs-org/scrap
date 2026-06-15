@@ -1,7 +1,7 @@
-//! Integration tests for complete SCAP message flows
+//! Integration tests for complete SCRAP message flows
 
-use scap_core::*;
-use scap_core::crypto::derive_public_key;
+use scrap_core::*;
+use scrap_core::crypto::derive_public_key;
 
 fn operator_keypair() -> (Vec<u8>, Vec<u8>) {
     let privkey = hex::decode(
@@ -221,13 +221,13 @@ fn test_token_lifecycle() {
     let result = TokenValidator::new(&token)
         .at_time(now - 100)
         .validate();
-    assert!(matches!(result, Err(ScapError::TokenNotYetValid)));
+    assert!(matches!(result, Err(ScrapError::TokenNotYetValid)));
 
     // Invalid after expiration
     let result = TokenValidator::new(&token)
         .at_time(now + 7200)
         .validate();
-    assert!(matches!(result, Err(ScapError::TokenExpired)));
+    assert!(matches!(result, Err(ScrapError::TokenExpired)));
 }
 
 /// Test capability matching patterns

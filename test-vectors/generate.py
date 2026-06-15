@@ -10,7 +10,7 @@ canonicalization, which matches libsecp256k1's signatures byte-for-byte, plus
     venv/bin/python generate.py > computed.json
 
 Capability-token signing scheme (normative, see spec/SCRAP.md §2.2.1 and
-schemas/scap.cddl): the signature is over `protected = CBOR({header, payload})`,
+schemas/scrap.cddl): the signature is over `protected = CBOR({header, payload})`,
 the exact byte string carried on the wire. The legacy `header_cbor || payload_cbor`
 concatenation fields are retained only to exercise the low-level sign/verify
 primitive.
@@ -184,7 +184,7 @@ def main():
     vectors = {
         "version": "1.0.0",
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "description": "Computed test vectors for SCAP protocol",
+        "description": "Computed test vectors for SCRAP protocol",
         "capability_token": generate_capability_token_vector(),
         "execution_proof": generate_execution_proof_vector(),
         "payment_binding": generate_binding_vector(),

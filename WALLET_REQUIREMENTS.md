@@ -3,7 +3,7 @@ SCRAP Wallet Requirements
 
 What a wallet must implement to send and receive payments using SCRAP,
 based on spec/PTLC-FALLBACK.md, spec/HTLC-FALLBACK.md, future/CHANNELS.md,
-and the existing scap-lightning/ and scap-core/ implementations.
+and the existing scrap-lightning/ and scrap-core/ implementations.
 
 Two deployment modes exist with different wallet requirements:
 
@@ -32,11 +32,11 @@ A.1 Standard Lightning Requirements
 
 A.2 SCRAP-Specific Additions (beyond standard LN)
 ---------------------------------------------------
-All of these are already partially implemented in scap-lightning/:
+All of these are already partially implemented in scrap-lightning/:
 
 A.2.1 Payment-Capability Binding
   - Compute: binding_hash = SHA256(token_jti || payment_hash)
-  - Sign binding_hash with commander's key (currently ECDSA in scap-core;
+  - Sign binding_hash with commander's key (currently ECDSA in scrap-core;
     should be BIP-340 Schnorr — see Gap A.1 below)
   - Store binding: TaskPaymentBinding{task_jti, payment_hash, amount_msat,
     htlc_timeout_blocks, binding_sig, capability_token_cbor}
@@ -70,8 +70,8 @@ A.2.5 Pre-Configured Routing (no gossip needed on satellite)
   - Satellite needs only: next_hop pubkey, HTLC amount, payment_hash, timeout
   - No routing tables, no channel graph on satellite
 
-GAPS IN CURRENT SCAP-LIGHTNING IMPLEMENTATION (Mode A):
-  Gap A.1: scap-core/crypto.rs uses ECDSA; spec requires BIP-340 Schnorr
+GAPS IN CURRENT SCRAP-LIGHTNING IMPLEMENTATION (Mode A):
+  Gap A.1: scrap-core/crypto.rs uses ECDSA; spec requires BIP-340 Schnorr
             for token signatures, binding signatures, proof signatures
   Gap A.2: No BOLT-compliant HTLC state machine — LDK wrapping is incomplete;
             SatelliteChannelManager exists but on_payment_received / htlc_handling
@@ -97,7 +97,7 @@ B.1.1 BIP 340 — Schnorr Signatures
   - Required for: token signatures, ACK signatures, claim transactions,
     channel update/settle signatures, adaptor signature construction
   - Library: secp256k1-zkp (C, Rust bindings available)
-  - Current gap: scap-core uses ECDSA — must be replaced
+  - Current gap: scrap-core uses ECDSA — must be replaced
 
 B.1.2 BIP 341 — Taproot / P2TR
   - Construct P2TR outputs with internal key and script tree
@@ -118,7 +118,7 @@ B.1.3 BIP 327 — MuSig2 (2-of-2 Schnorr Aggregation)
   - MUST use nonce pre-commitment to prevent Wagner attack
   - Required for: channel funding output cooperative close, PTLC internal key
   - Library: secp256k1-zkp (includes MuSig2 module)
-  - Current gap: not implemented anywhere in scap-lightning
+  - Current gap: not implemented anywhere in scrap-lightning
 
 B.1.4 BIP 118 — SIGHASH_ANYPREVOUT
   - LN-Symmetry update transactions use SIGHASH_ANYPREVOUTANYSCRIPT
@@ -126,7 +126,7 @@ B.1.4 BIP 118 — SIGHASH_ANYPREVOUT
     prior update output, which is how LN-Symmetry "latest state wins" works
   - Requires: ANYPREVOUT activation on Bitcoin (not yet on mainnet)
   - LDK status: experimental flag, not production-ready
-  - Current gap: not implemented in scap-lightning
+  - Current gap: not implemented in scrap-lightning
 
 B.1.5 Adaptor Signatures
   - Full adaptor signature lifecycle:
@@ -141,7 +141,7 @@ B.1.5 Adaptor Signatures
     - NEVER reuse a nonce — nonce reuse enables full private key recovery
     - Track used nonces in NVM; survive reboots
   - Library: secp256k1-zkp (adaptor signature module)
-  - Current gap: not implemented anywhere in scap-lightning or scap-core
+  - Current gap: not implemented anywhere in scrap-lightning or scrap-core
 
 B.2 Key Hierarchy
 ------------------
@@ -170,7 +170,7 @@ by context string. Root key never leaves HSM.
     └── k_nonce_N   = HKDF(k_root, "nonce" || nonce_id)
           Uses: Deterministic nonce generation for pre-committed nonce pool
 
-  Current gap: scap-core uses raw key bytes; no HKDF hierarchy implemented.
+  Current gap: scrap-core uses raw key bytes; no HKDF hierarchy implemented.
 
 B.3 LN-Symmetry Channel State Machine
 ---------------------------------------
@@ -190,7 +190,7 @@ Replaces LN-penalty. Each state update is 3 messages (~150ms over ISL):
   No toxic waste — counterparty can only broadcast same or later state.
   No watchtower revocation keys needed (watchtower needs only latest state).
 
-  Current gap: not implemented; scap-lightning wraps LDK LN-penalty.
+  Current gap: not implemented; scrap-lightning wraps LDK LN-penalty.
 
 B.4 PTLC Payment Flow (Satellite as Payer)
 -------------------------------------------
@@ -294,9 +294,9 @@ IMPLEMENTATION ROADMAP
 ==========================================================================
 
 Near-term (Mode A, works today):
-  1. Replace ECDSA with BIP-340 Schnorr in scap-core/crypto.rs
+  1. Replace ECDSA with BIP-340 Schnorr in scrap-core/crypto.rs
      Library: secp256k1 crate (already imported), enable schnorr feature
-  2. Complete LDK integration in scap-lightning (HTLC state machine)
+  2. Complete LDK integration in scrap-lightning (HTLC state machine)
   3. Implement ground station uplink queue in SatelliteBroadcaster
   4. Implement HKDF key hierarchy (replace raw key bytes)
   5. Add nonce pool management (needed for Mode B adaptor sigs)
@@ -311,7 +311,7 @@ Medium-term (Mode B prerequisites, no Bitcoin change needed):
 
 Long-term (Mode B full, requires BIP-118 activation):
   10. Implement LN-Symmetry channel state machine (ANYPREVOUT sigs)
-  11. Replace LN-penalty channels with LN-Symmetry in scap-lightning
+  11. Replace LN-penalty channels with LN-Symmetry in scrap-lightning
   12. On-chain PTLC claim transaction broadcasting
 
 
@@ -333,4 +333,4 @@ Standard LN wallets (LND, CLN, Phoenix, etc.) cannot be used as-is because:
 
 The closest existing base is LDK (Lightning Dev Kit) because it is modular,
 no_std compatible, and allows replacing individual components — which is
-exactly what scap-lightning does.
+exactly what scrap-lightning does.

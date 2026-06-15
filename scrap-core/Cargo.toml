@@ -1,10 +1,10 @@
 [package]
-name = "scap-core"
+name = "scrap-core"
 version = "0.1.0"
 edition = "2021"
-description = "SCAP (Satellite Capability and Payment) protocol implementation"
+description = "SCRAP (Secure Capabilities and Routed Authorization Protocol) protocol implementation"
 license = "MIT"
-repository = "https://github.com/dysonlabs/scap"
+repository = "https://github.com/dysonlabs/scrap"
 
 [features]
 default = ["std"]

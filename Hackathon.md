@@ -160,7 +160,7 @@ SCRAP capability token + task request through the SISL link.
     - This channel is invisible to anyone who didn't witness the handshake
 
 3.2 SCRAP task over SISL
-    - Serialize a CapabilityToken (from existing scap-core implementation)
+    - Serialize a CapabilityToken (from existing scrap-core implementation)
     - Serialize a TaskRequest
     - Send over the established P2P channel
     - Receiving side verifies token, sends back ProofOfExecution stub
@@ -225,20 +225,20 @@ to fine-tune total attenuation.
 
 Existing Code Inventory
 -----------------------
-The following is already implemented in Rust in scap-core/:
+The following is already implemented in Rust in scrap-core/:
 
-    scap-core/src/crypto.rs     secp256k1 ECDSA sign/verify, SHA-256, key derivation
+    scrap-core/src/crypto.rs     secp256k1 ECDSA sign/verify, SHA-256, key derivation
                                 compute_binding_hash(), compute_proof_hash()
                                 NOTE: uses ECDSA, not BIP-340 Schnorr as in SISL.md
                                 Fine for demo; production should migrate to Schnorr
 
-    scap-core/src/token.rs      CapabilityTokenBuilder, TokenValidator
+    scrap-core/src/token.rs      CapabilityTokenBuilder, TokenValidator
                                 Full sign + validate pipeline working
 
-    scap-core/src/types.rs      CapabilityToken, TaskRequest, CapPayload, Constraints
+    scrap-core/src/types.rs      CapabilityToken, TaskRequest, CapPayload, Constraints
                                 CBOR-encoded, no_std compatible
 
-    scap-core/src/cbor.rs       encode/decode for all message types
+    scrap-core/src/cbor.rs       encode/decode for all message types
 
     test-vectors/generate.py    Python test vector generator using secp256k1 + cbor2
                                 Signs tokens, execution proofs, payment bindings
@@ -260,7 +260,7 @@ What does NOT exist yet (needs to be written for hackathon):
                                 DSSS TX/RX signal chain
                                 GNU Radio flowgraphs (.grc files)
 
-    SCRAP-over-SISL glue        Serialize existing scap-core tokens into SISL
+    SCRAP-over-SISL glue        Serialize existing scrap-core tokens into SISL
                                 P2P channel transport for CapabilityToken/TaskRequest
 
 
@@ -272,7 +272,7 @@ hackathon/
     sisl_framer.py          NEW: GNU Radio Python block for SISL TX/RX framing
     sisl_dsss_demo.grc      NEW: Phase 1 GNU Radio flowgraph
     sisl_hail_flow.grc      NEW: Phase 2 GNU Radio flowgraph
-    sisl_scrap_demo.py      NEW: Phase 3 — calls scap-core via FFI or reimplements
+    sisl_scrap_demo.py      NEW: Phase 3 — calls scrap-core via FFI or reimplements
                                  token serialization in Python using existing
                                  test-vectors/generate.py as reference
     test_sisl_crypto.py     NEW: verify sisl_crypto.py against SISL.md §21 test vectors

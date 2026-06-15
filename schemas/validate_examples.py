@@ -261,8 +261,8 @@ def generate_isl_message():
         "hmac": bytes(32)
     }
 
-    write_cbor("isl_scap_message.cbor", msg)
-    write_json("isl_scap_message.json", msg)
+    write_cbor("isl_scrap_message.cbor", msg)
+    write_json("isl_scrap_message.json", msg)
     return msg
 
 
@@ -344,7 +344,7 @@ def main():
 
     if args.validate:
         print("\nValidating against schema...")
-        cddl_path = Path(__file__).parent / "scap.cddl"
+        cddl_path = Path(__file__).parent / "scrap.cddl"
 
         if not cddl_path.exists():
             print(f"Error: Schema not found at {cddl_path}")

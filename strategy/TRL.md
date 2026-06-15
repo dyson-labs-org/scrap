@@ -8,11 +8,11 @@
 |-----------|--------|----------|
 | SCRAP Specification | Complete draft (132KB) | TRL 3 |
 | SISL Specification | Complete draft (59KB) | TRL 3 |
-| Rust `scap-core` | Partial implementation (see §Gap Analysis) | TRL 2 |
+| Rust `scrap-core` | Partial implementation (see §Gap Analysis) | TRL 2 |
 | Test vectors | Generated, verified | TRL 3 |
 | CDDL schemas | Complete | TRL 3 |
 
-### scap-core Gap Analysis
+### scrap-core Gap Analysis
 
 **Implemented** (verified from source):
 - `CapabilityToken`, `CapHeader`, `CapPayload`, `Constraints` structs
@@ -21,7 +21,7 @@
 - `BoundTaskRequest` struct (payment-capability binding)
 - `ExecutionProof` struct
 - `DisputeMessage`, `DisputeEvidence` structs
-- `TaskResponse`, `IslScapMessage`, `Heartbeat` structs
+- `TaskResponse`, `IslScrapMessage`, `Heartbeat` structs
 - CBOR encoding/decoding (`encode_header`, `encode_payload`, `decode_capability_token`)
 - Crypto: `sign_message`, `verify_signature`, `sha256`, `derive_public_key`
 - `compute_binding_hash(jti, payment_hash)`
@@ -48,8 +48,8 @@ Given current resources (Raspberry Pis, BitAxe units, RX-only SDR) and no GNU Ra
 ```
 PHASE A: SCRAP Demo (6-10 weeks)          PHASE B: SISL Demo (deferred)
 ─────────────────────────────────        ─────────────────────────────
-Sprint 2: Complete scap-core (2-4w)      Sprint 4-5: GNU Radio DSSS
-Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
+Sprint 2: Complete scrap-core (2-4w)      Sprint 4-5: GNU Radio DSSS
+Sprint 3: Build scrap-node (3-4w)         Sprint 6: RF integration
     │                                         │
     ▼                                         ▼
 ┌─────────────────────────┐              ┌─────────────────────────┐
@@ -120,7 +120,7 @@ Sprint 3: Build scap-node (3-4w)         Sprint 6: RF integration
 7. On-chain PTLC settlement on Bitcoin testnet
 
 **Deliverables**:
-- `scap-node` binary running on ARM
+- `scrap-node` binary running on ARM
 - Token creation CLI tool
 - Message sequence captured and verified
 - Latency measurements (<100ms token verification)
@@ -485,7 +485,7 @@ This demonstrates pay-per-compute but requires external SCRAP node (Pi) - BitAxe
 
 ### PHASE A: SCRAP Demo (Immediate - 6-10 weeks)
 
-#### A1: Complete scap-core (2-4 weeks)
+#### A1: Complete scrap-core (2-4 weeks)
 
 Most structs already implemented. Remaining work:
 
@@ -507,7 +507,7 @@ Most structs already implemented. Remaining work:
 
 **Exit criteria**: `cargo test` passes on x86 and ARM, benchmarks documented
 
-#### A2: Build scap-node binary (3-4 weeks)
+#### A2: Build scrap-node binary (3-4 weeks)
 
 ```
 [ ] Project structure (separate crate or workspace member)
@@ -538,7 +538,7 @@ Most structs already implemented. Remaining work:
 [ ] Work submission interface
 [ ] Result retrieval and verification
 [ ] Proof-of-work as proof-of-execution
-[ ] Integration with scap-node task handler
+[ ] Integration with scrap-node task handler
 ```
 
 **Exit criteria**: BitAxe responds to SCRAP compute task, proof-of-execution generated
@@ -631,7 +631,7 @@ Most structs already implemented. Remaining work:
 #### B5: SCRAP+SISL integration (3-4 weeks)
 
 ```
-[ ] SISL ↔ scap-node integration layer
+[ ] SISL ↔ scrap-node integration layer
 [ ] Real RF mode with GNU Radio
 [ ] 3-node relay test over RF
 [ ] Bitcoin testnet PTLC settlement over RF link
@@ -683,7 +683,7 @@ Most structs already implemented. Remaining work:
 ### Security Audit
 
 - **Scope**: Cryptographic design, token verification, key management, X3DH implementation
-- **Timing**: After Sprint 2 (scap-core complete)
+- **Timing**: After Sprint 2 (scrap-core complete)
 - **Providers**: NCC Group, Trail of Bits, Cure53, or academic partnership
 - **Estimated cost**: $30-80K depending on scope
 

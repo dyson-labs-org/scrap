@@ -28,7 +28,7 @@ pub struct PaymentInfo {
     pub amount_msat: u64,
     /// Payment status
     pub status: PaymentStatus,
-    /// Associated task JTI (for SCAP binding)
+    /// Associated task JTI (for SCRAP binding)
     pub task_jti: Option<String>,
     /// Creation timestamp
     pub created_at: u64,

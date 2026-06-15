@@ -6,7 +6,7 @@ CDDL (Concise Data Definition Language, RFC 8610) schemas for SCRAP protocol mes
 
 | File | Description |
 |------|-------------|
-| `scap.cddl` | Complete CDDL schema for all message types |
+| `scrap.cddl` | Complete CDDL schema for all message types |
 | `validate_examples.py` | Generate and validate CBOR examples |
 | `examples/` | Generated CBOR test messages |
 
@@ -26,7 +26,7 @@ CDDL (Concise Data Definition Language, RFC 8610) schemas for SCRAP protocol mes
 
 | Type | Description |
 |------|-------------|
-| `isl-scap-message` | ISL encapsulation wrapper |
+| `isl-scrap-message` | ISL encapsulation wrapper |
 | `lightning-wrapper` | BOLT message encapsulation |
 | `heartbeat` | Keepalive with channel state |
 
@@ -61,7 +61,7 @@ cargo install cddl
 python validate_examples.py --validate
 
 # Validate single file
-cddl scap.cddl validate examples/capability_token.cbor
+cddl scrap.cddl validate examples/capability_token.cbor
 ```
 
 ### Code Generation
@@ -73,7 +73,7 @@ Generate Rust types from CDDL:
 cargo install cddl-codegen
 
 # Generate Rust
-cddl-codegen --input scap.cddl --output ../src/types.rs
+cddl-codegen --input scrap.cddl --output ../src/types.rs
 ```
 
 ## Schema Design Notes

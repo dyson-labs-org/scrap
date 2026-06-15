@@ -13,7 +13,7 @@ personas:
   - "spec/PTLC*.md"
   - "spec/SCRAP.md"
   - "spec/BIP-SCRAP.md"
-  - "scap-lightning/**"
+  - "scrap-lightning/**"
   - "future/CHANNELS.md"
   experts:
   - name: "Joseph Poon"
@@ -33,7 +33,7 @@ personas:
   - "spec/BIP-SCRAP.md"
   - "spec/SISL.md"
   - "spec/OPERATOR_API.md"
-  - "scap-core/**"
+  - "scrap-core/**"
   - "schemas/*.cddl"
   - "test-vectors/**"
   experts:
@@ -91,8 +91,8 @@ personas:
   - "spec/SCRAP.md"
   - "spec/SISL.md"
   - "spec/BIP-SCRAP.md"
-  - "scap-core/**"
-  - "scap-lightning/**"
+  - "scrap-core/**"
+  - "scrap-lightning/**"
   experts:
   - name: "Bruce Schneier"
     association: "Applied Cryptography, Cryptography Engineering, attack trees (coined), security theater (coined), Schneier on Security blog, Blowfish, Twofish, Threefish, Skein hash, Fortuna PRNG, Solitaire cipher, Data and Goliath, Liars and Outliers, Click Here to Kill Everybody, practical cryptanalysis, threat modeling STRIDE influence, full disclosure, EFF board member, Harvard Berkman Klein Center, failure modes of cryptographic systems, why cryptography is harder than it looks, CRYPTO-GRAM newsletter"

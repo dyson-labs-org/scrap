@@ -40,7 +40,7 @@ This specification is designed for potential alignment with [STAPI (Sensor Taski
 - Signed capability tokens (not just order IDs)
 - Payment channel binding (Lightning Network integration)
 
-If STAPI reaches 1.0 and gains adoption, SCRAP Operator API could become a STAPI conformance class (`/conf/scap-tokens`).
+If STAPI reaches 1.0 and gains adoption, SCRAP Operator API could become a STAPI conformance class (`/conf/scrap-tokens`).
 
 ---
 
@@ -81,11 +81,11 @@ An operator's `/conformance` endpoint declares which classes are implemented:
 ```json
 {
   "conformsTo": [
-    "https://scap.dev/spec/1.0/conf/core",
-    "https://scap.dev/spec/1.0/conf/satellites",
-    "https://scap.dev/spec/1.0/conf/tokens",
-    "https://scap.dev/spec/1.0/conf/token-revocation",
-    "https://scap.dev/spec/1.0/conf/lightning"
+    "https://scrap.dev/spec/1.0/conf/core",
+    "https://scrap.dev/spec/1.0/conf/satellites",
+    "https://scrap.dev/spec/1.0/conf/tokens",
+    "https://scrap.dev/spec/1.0/conf/token-revocation",
+    "https://scrap.dev/spec/1.0/conf/lightning"
   ]
 }
 ```
@@ -158,31 +158,31 @@ Returns API metadata and links to other endpoints.
   "title": "ESA Copernicus SCRAP Operator API",
   "description": "Capability token issuance for Sentinel constellation",
   "version": "1.0.0",
-  "scap_version": "1.0",
+  "scrap_version": "1.0",
   "links": [
     {
       "rel": "self",
-      "href": "https://scap.copernicus.eu/",
+      "href": "https://scrap.copernicus.eu/",
       "type": "application/json"
     },
     {
       "rel": "conformance",
-      "href": "https://scap.copernicus.eu/conformance",
+      "href": "https://scrap.copernicus.eu/conformance",
       "type": "application/json"
     },
     {
       "rel": "operator",
-      "href": "https://scap.copernicus.eu/operator",
+      "href": "https://scrap.copernicus.eu/operator",
       "type": "application/json"
     },
     {
       "rel": "satellites",
-      "href": "https://scap.copernicus.eu/satellites",
+      "href": "https://scrap.copernicus.eu/satellites",
       "type": "application/json"
     },
     {
       "rel": "tokens",
-      "href": "https://scap.copernicus.eu/tokens",
+      "href": "https://scrap.copernicus.eu/tokens",
       "type": "application/json"
     }
   ]
@@ -203,10 +203,10 @@ Returns list of conformance classes implemented by this API.
 ```json
 {
   "conformsTo": [
-    "https://scap.dev/spec/1.0/conf/core",
-    "https://scap.dev/spec/1.0/conf/satellites",
-    "https://scap.dev/spec/1.0/conf/tokens",
-    "https://scap.dev/spec/1.0/conf/lightning"
+    "https://scrap.dev/spec/1.0/conf/core",
+    "https://scrap.dev/spec/1.0/conf/satellites",
+    "https://scrap.dev/spec/1.0/conf/tokens",
+    "https://scrap.dev/spec/1.0/conf/lightning"
   ]
 }
 ```
@@ -229,7 +229,7 @@ Returns operator identity and cryptographic keys.
   "operator_id": "ESA-COPERNICUS",
   "name": "European Space Agency - Copernicus Programme",
   "contact": {
-    "email": "scap-support@copernicus.eu",
+    "email": "scrap-support@copernicus.eu",
     "url": "https://copernicus.eu"
   },
   "signing_pubkey": "02a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
@@ -315,7 +315,7 @@ Returns list of satellites operated by this operator.
       "links": [
         {
           "rel": "self",
-          "href": "https://scap.copernicus.eu/satellites/62261"
+          "href": "https://scrap.copernicus.eu/satellites/62261"
         }
       ]
     },
@@ -344,7 +344,7 @@ Returns list of satellites operated by this operator.
       "links": [
         {
           "rel": "self",
-          "href": "https://scap.copernicus.eu/satellites/62262"
+          "href": "https://scrap.copernicus.eu/satellites/62262"
         }
       ]
     }
@@ -435,11 +435,11 @@ Returns detailed information about a specific satellite.
   "links": [
     {
       "rel": "self",
-      "href": "https://scap.copernicus.eu/satellites/62261"
+      "href": "https://scrap.copernicus.eu/satellites/62261"
     },
     {
       "rel": "operator",
-      "href": "https://scap.copernicus.eu/operator"
+      "href": "https://scrap.copernicus.eu/operator"
     }
   ]
 }
@@ -551,7 +551,7 @@ Request a signed capability token.
   "links": [
     {
       "rel": "self",
-      "href": "https://scap.copernicus.eu/tokens/ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+      "href": "https://scrap.copernicus.eu/tokens/ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
     }
   ]
 }
@@ -606,7 +606,7 @@ Returns status of a previously issued token.
   "links": [
     {
       "rel": "self",
-      "href": "https://scap.copernicus.eu/tokens/ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
+      "href": "https://scrap.copernicus.eu/tokens/ESA-1705320000-a1b2c3d4e5f6789012345678abcdef01"
     }
   ]
 }
@@ -771,7 +771,7 @@ Returns Lightning Network channel information for payment settlement.
     }
   ],
   "connection": {
-    "host": "scap-ln.copernicus.eu",
+    "host": "scrap-ln.copernicus.eu",
     "port": 9735,
     "tor": "scaplnxyz123.onion:9735"
   }
@@ -924,8 +924,8 @@ If implementing alongside STAPI:
 ### 8.2 Reference Implementation
 
 A reference implementation using FastAPI (Python) is planned:
-- `scap-operator-api` - Reference server
-- `scap-client` - Python client library
+- `scrap-operator-api` - Reference server
+- `scrap-client` - Python client library
 
 ### 8.3 OpenAPI Specification
 

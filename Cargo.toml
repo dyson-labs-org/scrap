@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
 members = [
-    "scap-core",
-    "scap-ffi",
-    "scap-lightning",
+    "scrap-core",
+    "scrap-ffi",
+    "scrap-lightning",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/dysonlabs/scap"
+repository = "https://github.com/dysonlabs/scrap"
 
 [workspace.dependencies]
 # Shared dependencies across crates

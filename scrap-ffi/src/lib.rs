@@ -1,21 +1,21 @@
-//! C FFI bindings for SCAP protocol
+//! C FFI bindings for SCRAP protocol
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
 
-use scap_core::{
+use scrap_core::{
     CapabilityToken, CapabilityTokenBuilder, TokenValidator, Constraints,
     sha256, sign_message, verify_signature, derive_public_key,
     compute_binding_hash, compute_proof_hash,
     encode_capability_token, decode_capability_token,
-    capability_matches, ScapError,
+    capability_matches, ScrapError,
 };
 
-/// Error codes matching scap.h
+/// Error codes matching scrap.h
 #[repr(i32)]
-pub enum ScapErrorCode {
+pub enum ScrapErrorCode {
     Ok = 0,
     NullPointer = -1,
     InvalidKey = -2,
@@ -30,46 +30,46 @@ pub enum ScapErrorCode {
     Internal = -99,
 }
 
-impl From<ScapError> for ScapErrorCode {
-    fn from(e: ScapError) -> Self {
+impl From<ScrapError> for ScrapErrorCode {
+    fn from(e: ScrapError) -> Self {
         match e {
-            ScapError::InvalidPrivateKey | ScapError::InvalidPublicKey => ScapErrorCode::InvalidKey,
-            ScapError::InvalidSignature => ScapErrorCode::InvalidSignature,
-            ScapError::VerificationFailed => ScapErrorCode::VerificationFailed,
-            ScapError::CborEncode(_) => ScapErrorCode::CborEncode,
-            ScapError::CborDecode(_) => ScapErrorCode::CborDecode,
-            ScapError::TokenExpired => ScapErrorCode::TokenExpired,
-            ScapError::TokenNotYetValid => ScapErrorCode::TokenNotValidYet,
-            ScapError::InvalidCapability(_) => ScapErrorCode::InvalidCapability,
-            _ => ScapErrorCode::Internal,
+            ScrapError::InvalidPrivateKey | ScrapError::InvalidPublicKey => ScrapErrorCode::InvalidKey,
+            ScrapError::InvalidSignature => ScrapErrorCode::InvalidSignature,
+            ScrapError::VerificationFailed => ScrapErrorCode::VerificationFailed,
+            ScrapError::CborEncode(_) => ScrapErrorCode::CborEncode,
+            ScrapError::CborDecode(_) => ScrapErrorCode::CborDecode,
+            ScrapError::TokenExpired => ScrapErrorCode::TokenExpired,
+            ScrapError::TokenNotYetValid => ScrapErrorCode::TokenNotValidYet,
+            ScrapError::InvalidCapability(_) => ScrapErrorCode::InvalidCapability,
+            _ => ScrapErrorCode::Internal,
         }
     }
 }
 
 /// Byte buffer for FFI
 #[repr(C)]
-pub struct ScapBuffer {
+pub struct ScrapBuffer {
     pub data: *mut u8,
     pub len: usize,
 }
 
-impl ScapBuffer {
+impl ScrapBuffer {
     fn from_vec(v: Vec<u8>) -> Self {
         let mut v = v.into_boxed_slice();
         let data = v.as_mut_ptr();
         let len = v.len();
         std::mem::forget(v);
-        ScapBuffer { data, len }
+        ScrapBuffer { data, len }
     }
 
     fn null() -> Self {
-        ScapBuffer { data: ptr::null_mut(), len: 0 }
+        ScrapBuffer { data: ptr::null_mut(), len: 0 }
     }
 }
 
-/// Free a buffer allocated by SCAP functions
+/// Free a buffer allocated by SCRAP functions
 #[no_mangle]
-pub extern "C" fn scap_buffer_free(buf: *mut ScapBuffer) {
+pub extern "C" fn scrap_buffer_free(buf: *mut ScrapBuffer) {
     if buf.is_null() {
         return;
     }
@@ -89,13 +89,13 @@ pub extern "C" fn scap_buffer_free(buf: *mut ScapBuffer) {
 
 /// Compute SHA-256 hash
 #[no_mangle]
-pub extern "C" fn scap_sha256(
+pub extern "C" fn scrap_sha256(
     data: *const u8,
     data_len: usize,
     hash_out: *mut u8,
 ) -> i32 {
     if data.is_null() || hash_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let data = unsafe { slice::from_raw_parts(data, data_len) };
@@ -105,17 +105,17 @@ pub extern "C" fn scap_sha256(
         ptr::copy_nonoverlapping(hash.as_ptr(), hash_out, 32);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Derive public key from private key
 #[no_mangle]
-pub extern "C" fn scap_derive_public_key(
+pub extern "C" fn scrap_derive_public_key(
     private_key: *const u8,
     public_key_out: *mut u8,
 ) -> i32 {
     if private_key.is_null() || public_key_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let privkey = unsafe { slice::from_raw_parts(private_key, 32) };
@@ -125,22 +125,22 @@ pub extern "C" fn scap_derive_public_key(
             unsafe {
                 ptr::copy_nonoverlapping(pubkey.as_ptr(), public_key_out, 33);
             }
-            ScapErrorCode::Ok as i32
+            ScrapErrorCode::Ok as i32
         }
-        Err(e) => ScapErrorCode::from(e) as i32,
+        Err(e) => ScrapErrorCode::from(e) as i32,
     }
 }
 
 /// Sign a message
 #[no_mangle]
-pub extern "C" fn scap_sign(
+pub extern "C" fn scrap_sign(
     private_key: *const u8,
     message: *const u8,
     message_len: usize,
-    signature_out: *mut ScapBuffer,
+    signature_out: *mut ScrapBuffer,
 ) -> i32 {
     if private_key.is_null() || message.is_null() || signature_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let privkey = unsafe { slice::from_raw_parts(private_key, 32) };
@@ -149,22 +149,22 @@ pub extern "C" fn scap_sign(
     match sign_message(privkey, msg) {
         Ok(sig) => {
             unsafe {
-                *signature_out = ScapBuffer::from_vec(sig);
+                *signature_out = ScrapBuffer::from_vec(sig);
             }
-            ScapErrorCode::Ok as i32
+            ScrapErrorCode::Ok as i32
         }
         Err(e) => {
             unsafe {
-                *signature_out = ScapBuffer::null();
+                *signature_out = ScrapBuffer::null();
             }
-            ScapErrorCode::from(e) as i32
+            ScrapErrorCode::from(e) as i32
         }
     }
 }
 
 /// Verify a signature
 #[no_mangle]
-pub extern "C" fn scap_verify(
+pub extern "C" fn scrap_verify(
     public_key: *const u8,
     message: *const u8,
     message_len: usize,
@@ -173,7 +173,7 @@ pub extern "C" fn scap_verify(
     valid_out: *mut bool,
 ) -> i32 {
     if public_key.is_null() || message.is_null() || signature.is_null() || valid_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let pubkey = unsafe { slice::from_raw_parts(public_key, 33) };
@@ -183,11 +183,11 @@ pub extern "C" fn scap_verify(
     match verify_signature(pubkey, msg, sig) {
         Ok(valid) => {
             unsafe { *valid_out = valid; }
-            ScapErrorCode::Ok as i32
+            ScrapErrorCode::Ok as i32
         }
         Err(e) => {
             unsafe { *valid_out = false; }
-            ScapErrorCode::from(e) as i32
+            ScrapErrorCode::from(e) as i32
         }
     }
 }
@@ -199,8 +199,8 @@ pub extern "C" fn scap_verify(
 /// Host-provided signing callback. Receives a 32-byte `digest`, writes a
 /// DER-encoded ECDSA signature into `sig_out` (capacity `sig_cap`), sets
 /// `*sig_len_out` to the bytes written, and returns 0 on success (nonzero = fail).
-/// `ctx` is the opaque pointer passed to `scap_signer_from_callback`.
-pub type ScapSignCallback = extern "C" fn(
+/// `ctx` is the opaque pointer passed to `scrap_signer_from_callback`.
+pub type ScrapSignCallback = extern "C" fn(
     ctx: *mut std::ffi::c_void,
     digest: *const u8,
     sig_out: *mut u8,
@@ -209,36 +209,36 @@ pub type ScapSignCallback = extern "C" fn(
 ) -> i32;
 
 struct CallbackSigner {
-    cb: ScapSignCallback,
+    cb: ScrapSignCallback,
     ctx: *mut std::ffi::c_void,
 }
 
-impl scap_core::Signer for CallbackSigner {
-    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+impl scrap_core::Signer for CallbackSigner {
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScrapError> {
         let mut buf = [0u8; 80]; // DER secp256k1 sig is <= 72 bytes
         let mut len: usize = 0;
         let rc = (self.cb)(self.ctx, digest.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut len);
         if rc != 0 || len == 0 || len > buf.len() {
-            return Err(ScapError::InvalidSignature);
+            return Err(ScrapError::InvalidSignature);
         }
         Ok(buf[..len].to_vec())
     }
 }
 
-/// Opaque signer handle. Free with `scap_signer_free`.
-pub struct ScapSigner {
-    inner: Box<dyn scap_core::Signer>,
+/// Opaque signer handle. Free with `scrap_signer_free`.
+pub struct ScrapSigner {
+    inner: Box<dyn scrap_core::Signer>,
 }
 
 /// Create a signer that holds a raw 32-byte private key in-process (zeroized on free).
 #[no_mangle]
-pub extern "C" fn scap_signer_from_key(private_key: *const u8) -> *mut ScapSigner {
+pub extern "C" fn scrap_signer_from_key(private_key: *const u8) -> *mut ScrapSigner {
     if private_key.is_null() {
         return ptr::null_mut();
     }
     let pk = unsafe { slice::from_raw_parts(private_key, 32) };
-    match scap_core::KeySigner::from_slice(pk) {
-        Ok(s) => Box::into_raw(Box::new(ScapSigner { inner: Box::new(s) })),
+    match scrap_core::KeySigner::from_slice(pk) {
+        Ok(s) => Box::into_raw(Box::new(ScrapSigner { inner: Box::new(s) })),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -246,16 +246,16 @@ pub extern "C" fn scap_signer_from_key(private_key: *const u8) -> *mut ScapSigne
 /// Create a signer that delegates to a host callback (HSM / secure element /
 /// signing daemon). The private key never enters this library's memory.
 #[no_mangle]
-pub extern "C" fn scap_signer_from_callback(
-    cb: ScapSignCallback,
+pub extern "C" fn scrap_signer_from_callback(
+    cb: ScrapSignCallback,
     ctx: *mut std::ffi::c_void,
-) -> *mut ScapSigner {
-    Box::into_raw(Box::new(ScapSigner { inner: Box::new(CallbackSigner { cb, ctx }) }))
+) -> *mut ScrapSigner {
+    Box::into_raw(Box::new(ScrapSigner { inner: Box::new(CallbackSigner { cb, ctx }) }))
 }
 
 /// Free a signer.
 #[no_mangle]
-pub extern "C" fn scap_signer_free(signer: *mut ScapSigner) {
+pub extern "C" fn scrap_signer_free(signer: *mut ScrapSigner) {
     if !signer.is_null() {
         unsafe { drop(Box::from_raw(signer)); }
     }
@@ -266,7 +266,7 @@ pub extern "C" fn scap_signer_free(signer: *mut ScapSigner) {
 // ============================================================================
 
 /// Opaque token builder handle
-pub struct ScapTokenBuilder {
+pub struct ScrapTokenBuilder {
     issuer: String,
     subject: String,
     audience: String,
@@ -281,12 +281,12 @@ pub struct ScapTokenBuilder {
 
 /// Create a new token builder
 #[no_mangle]
-pub extern "C" fn scap_token_builder_new(
+pub extern "C" fn scrap_token_builder_new(
     issuer: *const c_char,
     subject: *const c_char,
     audience: *const c_char,
     jti: *const c_char,
-) -> *mut ScapTokenBuilder {
+) -> *mut ScrapTokenBuilder {
     if issuer.is_null() || subject.is_null() || audience.is_null() || jti.is_null() {
         return ptr::null_mut();
     }
@@ -308,7 +308,7 @@ pub extern "C" fn scap_token_builder_new(
         Err(_) => return ptr::null_mut(),
     };
 
-    Box::into_raw(Box::new(ScapTokenBuilder {
+    Box::into_raw(Box::new(ScrapTokenBuilder {
         issuer,
         subject,
         audience,
@@ -324,7 +324,7 @@ pub extern "C" fn scap_token_builder_new(
 
 /// Free a token builder
 #[no_mangle]
-pub extern "C" fn scap_token_builder_free(builder: *mut ScapTokenBuilder) {
+pub extern "C" fn scrap_token_builder_free(builder: *mut ScrapTokenBuilder) {
     if !builder.is_null() {
         unsafe { drop(Box::from_raw(builder)); }
     }
@@ -332,35 +332,35 @@ pub extern "C" fn scap_token_builder_free(builder: *mut ScapTokenBuilder) {
 
 /// Add a capability to the token
 #[no_mangle]
-pub extern "C" fn scap_token_builder_add_capability(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_add_capability(
+    builder: *mut ScrapTokenBuilder,
     capability: *const c_char,
 ) -> i32 {
     if builder.is_null() || capability.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let cap = match unsafe { CStr::from_ptr(capability) }.to_str() {
         Ok(s) => s.to_string(),
-        Err(_) => return ScapErrorCode::InvalidCapability as i32,
+        Err(_) => return ScrapErrorCode::InvalidCapability as i32,
     };
 
     unsafe {
         (*builder).capabilities.push(cap);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Set token validity window
 #[no_mangle]
-pub extern "C" fn scap_token_builder_set_validity(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_set_validity(
+    builder: *mut ScrapTokenBuilder,
     issued_at: u64,
     expires_at: u64,
 ) -> i32 {
     if builder.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     unsafe {
@@ -368,17 +368,17 @@ pub extern "C" fn scap_token_builder_set_validity(
         (*builder).expires_at = expires_at;
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Set maximum area constraint
 #[no_mangle]
-pub extern "C" fn scap_token_builder_set_max_area(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_set_max_area(
+    builder: *mut ScrapTokenBuilder,
     max_area_km2: u64,
 ) -> i32 {
     if builder.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     unsafe {
@@ -387,17 +387,17 @@ pub extern "C" fn scap_token_builder_set_max_area(
         constraints.max_area_km2 = Some(max_area_km2);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Set maximum hops constraint
 #[no_mangle]
-pub extern "C" fn scap_token_builder_set_max_hops(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_set_max_hops(
+    builder: *mut ScrapTokenBuilder,
     max_hops: u32,
 ) -> i32 {
     if builder.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     unsafe {
@@ -406,23 +406,23 @@ pub extern "C" fn scap_token_builder_set_max_hops(
         constraints.max_hops = Some(max_hops);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Set as delegation token
 #[no_mangle]
-pub extern "C" fn scap_token_builder_set_delegation(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_set_delegation(
+    builder: *mut ScrapTokenBuilder,
     parent_jti: *const c_char,
     chain_depth: u32,
 ) -> i32 {
     if builder.is_null() || parent_jti.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let parent = match unsafe { CStr::from_ptr(parent_jti) }.to_str() {
         Ok(s) => s.to_string(),
-        Err(_) => return ScapErrorCode::InvalidCapability as i32,
+        Err(_) => return ScrapErrorCode::InvalidCapability as i32,
     };
 
     unsafe {
@@ -430,11 +430,11 @@ pub extern "C" fn scap_token_builder_set_delegation(
         (*builder).chain_depth = Some(chain_depth);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Reconstruct the core builder from the FFI builder box (consumes it).
-fn core_builder_from(b: Box<ScapTokenBuilder>) -> CapabilityTokenBuilder {
+fn core_builder_from(b: Box<ScrapTokenBuilder>) -> CapabilityTokenBuilder {
     let mut tb = CapabilityTokenBuilder::new(b.issuer, b.subject, b.audience, b.jti, b.capabilities)
         .issued_at(b.issued_at)
         .expires_at(b.expires_at);
@@ -450,47 +450,47 @@ fn core_builder_from(b: Box<ScapTokenBuilder>) -> CapabilityTokenBuilder {
     tb
 }
 
-fn finish_sign(result: Result<CapabilityToken, ScapError>, token_out: *mut *mut ScapToken) -> i32 {
+fn finish_sign(result: Result<CapabilityToken, ScrapError>, token_out: *mut *mut ScrapToken) -> i32 {
     match result {
         Ok(token) => {
-            unsafe { *token_out = Box::into_raw(Box::new(ScapToken { inner: token })); }
-            ScapErrorCode::Ok as i32
+            unsafe { *token_out = Box::into_raw(Box::new(ScrapToken { inner: token })); }
+            ScrapErrorCode::Ok as i32
         }
         Err(e) => {
             unsafe { *token_out = ptr::null_mut(); }
-            ScapErrorCode::from(e) as i32
+            ScrapErrorCode::from(e) as i32
         }
     }
 }
 
 /// Build and sign the token with a raw private key (in-process convenience).
 ///
-/// On multi-tenant hardware, prefer `scap_token_builder_sign_with` + a callback
+/// On multi-tenant hardware, prefer `scrap_token_builder_sign_with` + a callback
 /// signer so the key never enters this library's address space.
 #[no_mangle]
-pub extern "C" fn scap_token_builder_sign(
-    builder: *mut ScapTokenBuilder,
+pub extern "C" fn scrap_token_builder_sign(
+    builder: *mut ScrapTokenBuilder,
     private_key: *const u8,
-    token_out: *mut *mut ScapToken,
+    token_out: *mut *mut ScrapToken,
 ) -> i32 {
     if builder.is_null() || private_key.is_null() || token_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
     let b = unsafe { Box::from_raw(builder) };
     let privkey = unsafe { slice::from_raw_parts(private_key, 32) };
     finish_sign(core_builder_from(b).sign(privkey), token_out)
 }
 
-/// Build and sign the token using an opaque signer (see `scap_signer_*`).
+/// Build and sign the token using an opaque signer (see `scrap_signer_*`).
 /// The private key never enters this library when a callback signer is used.
 #[no_mangle]
-pub extern "C" fn scap_token_builder_sign_with(
-    builder: *mut ScapTokenBuilder,
-    signer: *const ScapSigner,
-    token_out: *mut *mut ScapToken,
+pub extern "C" fn scrap_token_builder_sign_with(
+    builder: *mut ScrapTokenBuilder,
+    signer: *const ScrapSigner,
+    token_out: *mut *mut ScrapToken,
 ) -> i32 {
     if builder.is_null() || signer.is_null() || token_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
     let b = unsafe { Box::from_raw(builder) };
     let signer = unsafe { &*signer };
@@ -502,13 +502,13 @@ pub extern "C" fn scap_token_builder_sign_with(
 // ============================================================================
 
 /// Opaque token handle
-pub struct ScapToken {
+pub struct ScrapToken {
     inner: CapabilityToken,
 }
 
 /// Free a token
 #[no_mangle]
-pub extern "C" fn scap_token_free(token: *mut ScapToken) {
+pub extern "C" fn scrap_token_free(token: *mut ScrapToken) {
     if !token.is_null() {
         unsafe { drop(Box::from_raw(token)); }
     }
@@ -516,63 +516,63 @@ pub extern "C" fn scap_token_free(token: *mut ScapToken) {
 
 /// Decode a token from CBOR bytes
 #[no_mangle]
-pub extern "C" fn scap_token_decode(
+pub extern "C" fn scrap_token_decode(
     cbor_data: *const u8,
     cbor_len: usize,
-    token_out: *mut *mut ScapToken,
+    token_out: *mut *mut ScrapToken,
 ) -> i32 {
     if cbor_data.is_null() || token_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let data = unsafe { slice::from_raw_parts(cbor_data, cbor_len) };
 
     match decode_capability_token(data) {
         Ok(token) => {
-            let token_ptr = Box::into_raw(Box::new(ScapToken { inner: token }));
+            let token_ptr = Box::into_raw(Box::new(ScrapToken { inner: token }));
             unsafe { *token_out = token_ptr; }
-            ScapErrorCode::Ok as i32
+            ScrapErrorCode::Ok as i32
         }
         Err(e) => {
             unsafe { *token_out = ptr::null_mut(); }
-            ScapErrorCode::from(e) as i32
+            ScrapErrorCode::from(e) as i32
         }
     }
 }
 
 /// Encode a token to CBOR bytes
 #[no_mangle]
-pub extern "C" fn scap_token_encode(
-    token: *const ScapToken,
-    cbor_out: *mut ScapBuffer,
+pub extern "C" fn scrap_token_encode(
+    token: *const ScrapToken,
+    cbor_out: *mut ScrapBuffer,
 ) -> i32 {
     if token.is_null() || cbor_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let token = unsafe { &*token };
 
     match encode_capability_token(&token.inner) {
         Ok(data) => {
-            unsafe { *cbor_out = ScapBuffer::from_vec(data); }
-            ScapErrorCode::Ok as i32
+            unsafe { *cbor_out = ScrapBuffer::from_vec(data); }
+            ScrapErrorCode::Ok as i32
         }
         Err(e) => {
-            unsafe { *cbor_out = ScapBuffer::null(); }
-            ScapErrorCode::from(e) as i32
+            unsafe { *cbor_out = ScrapBuffer::null(); }
+            ScrapErrorCode::from(e) as i32
         }
     }
 }
 
 /// Validate a token
 #[no_mangle]
-pub extern "C" fn scap_token_validate(
-    token: *const ScapToken,
+pub extern "C" fn scrap_token_validate(
+    token: *const ScrapToken,
     current_time: u64,
     issuer_pubkey: *const u8,
 ) -> i32 {
     if token.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let token = unsafe { &*token };
@@ -589,85 +589,85 @@ pub extern "C" fn scap_token_validate(
     }
 
     match validator.validate() {
-        Ok(()) => ScapErrorCode::Ok as i32,
-        Err(e) => ScapErrorCode::from(e) as i32,
+        Ok(()) => ScrapErrorCode::Ok as i32,
+        Err(e) => ScrapErrorCode::from(e) as i32,
     }
 }
 
 /// Get token JTI
 #[no_mangle]
-pub extern "C" fn scap_token_get_jti(
-    token: *const ScapToken,
+pub extern "C" fn scrap_token_get_jti(
+    token: *const ScrapToken,
     jti_out: *mut c_char,
     jti_len: usize,
 ) -> i32 {
     if token.is_null() || jti_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let token = unsafe { &*token };
     let jti = &token.inner.payload.jti;
 
     if jti.len() + 1 > jti_len {
-        return ScapErrorCode::BufferTooSmall as i32;
+        return ScrapErrorCode::BufferTooSmall as i32;
     }
 
     let c_str = match CString::new(jti.as_str()) {
         Ok(s) => s,
-        Err(_) => return ScapErrorCode::Internal as i32,
+        Err(_) => return ScrapErrorCode::Internal as i32,
     };
 
     unsafe {
         ptr::copy_nonoverlapping(c_str.as_ptr(), jti_out, jti.len() + 1);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Get token issuer
 #[no_mangle]
-pub extern "C" fn scap_token_get_issuer(
-    token: *const ScapToken,
+pub extern "C" fn scrap_token_get_issuer(
+    token: *const ScrapToken,
     issuer_out: *mut c_char,
     issuer_len: usize,
 ) -> i32 {
     if token.is_null() || issuer_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let token = unsafe { &*token };
     let issuer = &token.inner.payload.iss;
 
     if issuer.len() + 1 > issuer_len {
-        return ScapErrorCode::BufferTooSmall as i32;
+        return ScrapErrorCode::BufferTooSmall as i32;
     }
 
     let c_str = match CString::new(issuer.as_str()) {
         Ok(s) => s,
-        Err(_) => return ScapErrorCode::Internal as i32,
+        Err(_) => return ScrapErrorCode::Internal as i32,
     };
 
     unsafe {
         ptr::copy_nonoverlapping(c_str.as_ptr(), issuer_out, issuer.len() + 1);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Get token expiration time
 #[no_mangle]
-pub extern "C" fn scap_token_get_expiration(
-    token: *const ScapToken,
+pub extern "C" fn scrap_token_get_expiration(
+    token: *const ScrapToken,
     exp_out: *mut u64,
 ) -> i32 {
     if token.is_null() || exp_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let token = unsafe { &*token };
     unsafe { *exp_out = token.inner.payload.exp; }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 // ============================================================================
@@ -676,7 +676,7 @@ pub extern "C" fn scap_token_get_expiration(
 
 /// Check if a granted capability authorizes a requested capability
 #[no_mangle]
-pub extern "C" fn scap_capability_matches(
+pub extern "C" fn scrap_capability_matches(
     granted: *const c_char,
     requested: *const c_char,
 ) -> bool {
@@ -703,18 +703,18 @@ pub extern "C" fn scap_capability_matches(
 
 /// Compute binding hash
 #[no_mangle]
-pub extern "C" fn scap_compute_binding_hash(
+pub extern "C" fn scrap_compute_binding_hash(
     jti: *const c_char,
     payment_hash: *const u8,
     hash_out: *mut u8,
 ) -> i32 {
     if jti.is_null() || payment_hash.is_null() || hash_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let jti_str = match unsafe { CStr::from_ptr(jti) }.to_str() {
         Ok(s) => s,
-        Err(_) => return ScapErrorCode::Internal as i32,
+        Err(_) => return ScrapErrorCode::Internal as i32,
     };
 
     let payment_hash = unsafe { slice::from_raw_parts(payment_hash, 32) };
@@ -724,12 +724,12 @@ pub extern "C" fn scap_compute_binding_hash(
         ptr::copy_nonoverlapping(hash.as_ptr(), hash_out, 32);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 /// Compute proof hash
 #[no_mangle]
-pub extern "C" fn scap_compute_proof_hash(
+pub extern "C" fn scrap_compute_proof_hash(
     task_jti: *const c_char,
     payment_hash: *const u8,
     output_hash: *const u8,
@@ -737,12 +737,12 @@ pub extern "C" fn scap_compute_proof_hash(
     hash_out: *mut u8,
 ) -> i32 {
     if task_jti.is_null() || payment_hash.is_null() || output_hash.is_null() || hash_out.is_null() {
-        return ScapErrorCode::NullPointer as i32;
+        return ScrapErrorCode::NullPointer as i32;
     }
 
     let jti_str = match unsafe { CStr::from_ptr(task_jti) }.to_str() {
         Ok(s) => s,
-        Err(_) => return ScapErrorCode::Internal as i32,
+        Err(_) => return ScrapErrorCode::Internal as i32,
     };
 
     let payment_hash = unsafe { slice::from_raw_parts(payment_hash, 32) };
@@ -753,7 +753,7 @@ pub extern "C" fn scap_compute_proof_hash(
         ptr::copy_nonoverlapping(hash.as_ptr(), hash_out, 32);
     }
 
-    ScapErrorCode::Ok as i32
+    ScrapErrorCode::Ok as i32
 }
 
 // ============================================================================
@@ -762,7 +762,7 @@ pub extern "C" fn scap_compute_proof_hash(
 
 /// Get library version string
 #[no_mangle]
-pub extern "C" fn scap_version() -> *const c_char {
+pub extern "C" fn scrap_version() -> *const c_char {
     static VERSION: &[u8] = b"1.0.0\0";
     VERSION.as_ptr() as *const c_char
 }
@@ -780,7 +780,7 @@ mod tests {
         let data = b"test";
         let mut hash = [0u8; 32];
 
-        let result = scap_sha256(data.as_ptr(), data.len(), hash.as_mut_ptr());
+        let result = scrap_sha256(data.as_ptr(), data.len(), hash.as_mut_ptr());
         assert_eq!(result, 0);
 
         // Compare with known hash of "test"
@@ -793,7 +793,7 @@ mod tests {
         let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         let mut pubkey = [0u8; 33];
 
-        let result = scap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
+        let result = scrap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
         assert_eq!(result, 0);
         assert_eq!(pubkey[0], 0x03); // Compressed key starts with 02 or 03
     }
@@ -802,17 +802,17 @@ mod tests {
     fn test_sign_verify_ffi() {
         let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         let mut pubkey = [0u8; 33];
-        scap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
+        scrap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
 
         let message = b"test message";
-        let mut signature = ScapBuffer::null();
+        let mut signature = ScrapBuffer::null();
 
-        let result = scap_sign(privkey.as_ptr(), message.as_ptr(), message.len(), &mut signature);
+        let result = scrap_sign(privkey.as_ptr(), message.as_ptr(), message.len(), &mut signature);
         assert_eq!(result, 0);
         assert!(!signature.data.is_null());
 
         let mut valid = false;
-        let result = scap_verify(
+        let result = scrap_verify(
             pubkey.as_ptr(),
             message.as_ptr(),
             message.len(),
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(result, 0);
         assert!(valid);
 
-        scap_buffer_free(&mut signature);
+        scrap_buffer_free(&mut signature);
     }
 
     // Host callback: signs the digest with a fixed key (stands in for an HSM).
@@ -834,12 +834,12 @@ mod tests {
         sig_cap: usize,
         sig_len_out: *mut usize,
     ) -> i32 {
-        use scap_core::Signer;
+        use scrap_core::Signer;
         let d = unsafe { slice::from_raw_parts(digest, 32) };
         let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(d);
-        let sig = scap_core::KeySigner::from_slice(&privkey).unwrap().sign_digest(&arr).unwrap();
+        let sig = scrap_core::KeySigner::from_slice(&privkey).unwrap().sign_digest(&arr).unwrap();
         if sig.len() > sig_cap { return -1; }
         unsafe {
             ptr::copy_nonoverlapping(sig.as_ptr(), sig_out, sig.len());
@@ -856,27 +856,27 @@ mod tests {
         let jti = std::ffi::CString::new("cb-001").unwrap();
         let cap = std::ffi::CString::new("cmd:compute:inference").unwrap();
 
-        let builder = scap_token_builder_new(issuer.as_ptr(), subject.as_ptr(), audience.as_ptr(), jti.as_ptr());
-        scap_token_builder_add_capability(builder, cap.as_ptr());
-        scap_token_builder_set_validity(builder, 1705320000, 1705406400);
+        let builder = scrap_token_builder_new(issuer.as_ptr(), subject.as_ptr(), audience.as_ptr(), jti.as_ptr());
+        scrap_token_builder_add_capability(builder, cap.as_ptr());
+        scrap_token_builder_set_validity(builder, 1705320000, 1705406400);
 
-        let signer = scap_signer_from_callback(test_sign_cb, ptr::null_mut());
+        let signer = scrap_signer_from_callback(test_sign_cb, ptr::null_mut());
         assert!(!signer.is_null());
 
-        let mut token: *mut ScapToken = ptr::null_mut();
-        let rc = scap_token_builder_sign_with(builder, signer, &mut token);
+        let mut token: *mut ScrapToken = ptr::null_mut();
+        let rc = scrap_token_builder_sign_with(builder, signer, &mut token);
         assert_eq!(rc, 0);
         assert!(!token.is_null());
 
         // Verify it validates against the operator pubkey derived from the same key.
         let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         let mut pubkey = [0u8; 33];
-        scap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
-        let rc = scap_token_validate(token, 1705320500, pubkey.as_ptr());
+        scrap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
+        let rc = scrap_token_validate(token, 1705320500, pubkey.as_ptr());
         assert_eq!(rc, 0, "callback-signed token should validate");
 
-        scap_signer_free(signer);
-        scap_token_free(token);
+        scrap_signer_free(signer);
+        scrap_token_free(token);
         let _ = test_sign_cb; // silence unused in some cfgs
     }
 
@@ -888,7 +888,7 @@ mod tests {
         let jti = std::ffi::CString::new("test-001").unwrap();
         let cap = std::ffi::CString::new("cmd:imaging:msi").unwrap();
 
-        let builder = scap_token_builder_new(
+        let builder = scrap_token_builder_new(
             issuer.as_ptr(),
             subject.as_ptr(),
             audience.as_ptr(),
@@ -896,28 +896,28 @@ mod tests {
         );
         assert!(!builder.is_null());
 
-        scap_token_builder_add_capability(builder, cap.as_ptr());
-        scap_token_builder_set_validity(builder, 1705320000, 1705406400);
-        scap_token_builder_set_max_area(builder, 1000);
+        scrap_token_builder_add_capability(builder, cap.as_ptr());
+        scrap_token_builder_set_validity(builder, 1705320000, 1705406400);
+        scrap_token_builder_set_max_area(builder, 1000);
 
         let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
         let mut pubkey = [0u8; 33];
-        scap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
+        scrap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
 
-        let mut token: *mut ScapToken = ptr::null_mut();
-        let result = scap_token_builder_sign(builder, privkey.as_ptr(), &mut token);
+        let mut token: *mut ScrapToken = ptr::null_mut();
+        let result = scrap_token_builder_sign(builder, privkey.as_ptr(), &mut token);
         assert_eq!(result, 0);
         assert!(!token.is_null());
 
         // Validate the token
-        let result = scap_token_validate(token, 1705320500, pubkey.as_ptr());
+        let result = scrap_token_validate(token, 1705320500, pubkey.as_ptr());
         assert_eq!(result, 0);
 
         // Get JTI
         let mut jti_buf = [0i8; 64];
-        let result = scap_token_get_jti(token, jti_buf.as_mut_ptr(), 64);
+        let result = scrap_token_get_jti(token, jti_buf.as_mut_ptr(), 64);
         assert_eq!(result, 0);
 
-        scap_token_free(token);
+        scrap_token_free(token);
     }
 }
