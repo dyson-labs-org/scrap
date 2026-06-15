@@ -5,12 +5,14 @@
   pure JS, no network, no build. Open the file in any browser.
 
   Story: a customer buys compute on someone else's satellite (Satlyt marketplace).
-  SCRAP introduces NO trust roots. It proves, from public keys alone: a valid signed
-  AUTHORIZATION (scope, expiry, audience), atomic PAYMENT-FOR-DELIVERY, and a
-  non-repudiable RECEIPT. It does NOT verify off-chain facts (which model ran, where
-  data went) — those are the executor's signed-but-unverified attestation, evidence
-  for a governance body (e.g. Kenya's NEODC), not something SCRAP polices.
-  Normative spec: ../spec/SCRAP.md (§6.8 "Proof Model: Delivery Only") · ../schemas/scrap.cddl
+  SCRAP introduces NO trust roots. From public keys alone it proves: a valid signed
+  AUTHORIZATION (scope, expiry, audience — incl. permitted model/region), and a
+  signed DELIVERY proof bound to payment (scrap-core compute_proof_hash:
+  task_jti ‖ payment_hash ‖ output_hash ‖ timestamp). It does NOT verify off-chain
+  facts; the executor's report of which model/region it ran rides in output_metadata,
+  unsigned by the base proof and unverified — evidence for a governance body
+  (e.g. Kenya's NEODC), not something SCRAP polices.
+  Normative spec: ../spec/SCRAP.md (§4.4, §6.8 "Proof Model: Delivery Only") · ../schemas/scrap.cddl
 -->
 <html lang="en">
 <head>
@@ -126,8 +128,8 @@
 
   <!-- 2 -->
   <div class="step">
-    <h2><span class="n">2</span>Execution receipt <span class="tag">signed delivery proof + attestation</span></h2>
-    <p class="sub">The node returns a receipt binding the input it was given, the output it delivered, and the payment hash, under its signature. It also <i>attests</i> which model ran and in which region — a non-repudiable claim, <b>not verified by SCRAP</b> (highlighted below). SCRAP proves delivery and binds the claim to payment; it does not check whether the claim is true.</p>
+    <h2><span class="n">2</span>Execution receipt <span class="tag">signed delivery proof + reported metadata</span></h2>
+    <p class="sub">The node returns a proof binding the <b>delivered output</b> to the payment and a timestamp under its signature — the exact preimage scrap-core's <code>compute_proof_hash</code> signs. Which model ran and in which region are <b>executor-reported <code>output_metadata</code></b> (amber): carried in the receipt but <b>not covered by the base proof signature, and not verified by SCRAP</b>. What is cryptographically pinned is the <i>authorization</i> (model/region, operator-signed in §1) and the <i>delivery</i> (output_hash). Binding the execution report itself is the compute-profile extension.</p>
     <pre id="receiptView"></pre>
     <div class="meta" id="receiptMeta"></div>
   </div>
@@ -153,7 +155,7 @@
 
     <div class="notbox">
       <div class="notbox-h">What SCRAP deliberately does NOT do</div>
-      <p>SCRAP makes <b>no claim</b> about what physically happened off-chain — whether the node truly ran <code>eo-segnet-v3</code>, or whether the result stayed in Kenya. Verifying that would require a trust root SCRAP refuses to be (a TEE quote, key-custody, a staking/slashing oracle). Instead, the executor's attestation is <b>non-repudiable</b>: if it later proves false, the signature is the evidence for a governance or contractual remedy. Enforcement is a separate, optional layer owned by the data-owner and bodies like the <b>National Earth Observation Data Council</b> — SCRAP just supplies the incorruptible record they adjudicate with.</p>
+      <p>SCRAP makes <b>no claim</b> about what physically happened off-chain — whether the node truly ran <code>eo-segnet-v3</code>, or whether the result stayed in Kenya. Verifying that would require a trust root SCRAP refuses to be (a TEE quote, key-custody, a staking/slashing oracle). The base proof signs <b>delivery</b> (output bound to payment + time); the model/region report rides in <code>output_metadata</code>, unsigned by that proof and unverified. What SCRAP <i>does</i> pin is the operator-signed <b>authorization</b> — so a verifier can always show what was <i>permitted</i>, even when it cannot show what was done. Enforcement (and binding the execution report itself) is a separate, optional layer owned by the data-owner and bodies like the <b>National Earth Observation Data Council</b> — SCRAP supplies the incorruptible authorization + delivery record they adjudicate with.</p>
     </div>
   </div>
 
@@ -190,8 +192,8 @@
 
   <!-- 6 -->
   <div class="step">
-    <h2><span class="n">6</span>Deployment footprint <span class="tag">measured, not estimated</span></h2>
-    <p class="sub">The verifier (<code>scrap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build (<code>size libscrap_ffi.so</code>).</p>
+    <h2><span class="n">6</span>Deployment footprint</h2>
+    <p class="sub">The verifier (<code>scrap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build.</p>
     <table>
       <tr><td>Library text size</td><td><b>~490 KB</b> (libscrap_ffi.so, release) — pure-Rust crypto (<code>k256</code>), no bundled C library</td></tr>
       <tr><td>Toolchain</td><td><b>No C cross-compiler needed</b> — 100% Rust; one <code>cargo build --target …</code> for the OBC</td></tr>
@@ -372,7 +374,9 @@ window.SCRAPCrypto =
 </script>
 <script>
 /* ===== SCRAP demo application ===== */
-const { sha256, sign, verify, pubFromPriv, cbor, concat, utf8, bytesToHex } = window.SCRAPCrypto;
+const { sha256, sign, verify, pubFromPriv, cbor, concat, utf8, bytesToHex, hexToBytes } = window.SCRAPCrypto;
+// Big-endian u64 → 8 bytes (matches scrap-core compute_proof_hash: timestamp.to_be_bytes()).
+function u64be(n) { const b = new Uint8Array(8); let x = BigInt(n); for (let i=7;i>=0;i--){ b[i]=Number(x & 0xffn); x >>= 8n; } return b; }
 
 // Fixed keys — reproducible across runs; match ../test-vectors where shared.
 const OP_PRIV = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -383,6 +387,7 @@ document.getElementById('k-op').textContent = OP_PUB;
 document.getElementById('k-ex').textContent = EX_PUB;
 
 const IAT = 1773792000, EXP = 1773878400, NOW = IAT + 3600;   // fixed window
+const EXEC_TS = IAT + 1800;                                   // execution timestamp (in window)
 const JTI = "job-inf-2026-0042";
 const HEADER = { alg:"ES256K", typ:"SAT-CAP", enc:"CBOR" };
 const h = (s) => bytesToHex(sha256(utf8(s)));
@@ -427,23 +432,29 @@ function buildToken() {
   const sig = sign(OP_PRIV, honestInput);
   return { payload, signingInput, sig };
 }
-// The signature covers all receipt fields; verification reconstructs the preimage
-// from the receipt as presented, so altering any field after signing breaks it.
+// The signed proof preimage is EXACTLY scrap-core's compute_proof_hash input:
+//   task_jti (utf8) ‖ payment_hash (raw 32) ‖ output_hash (raw 32) ‖ timestamp (u64 BE).
+// It covers DELIVERY (spec §4.4 / §6.8 "delivery only") — NOT output_metadata.
 function preimageOf(r) {
   return concat(
-    utf8(r.task_jti), utf8(r.payment_hash), utf8(r.input_hash),
-    utf8(r.model_hash), utf8(r.output_hash), utf8(r.data_region),
-    utf8(String(r.runtime_s))
+    utf8(r.task_jti), hexToBytes(r.payment_hash), hexToBytes(r.output_hash),
+    u64be(r.execution_timestamp)
   );
 }
 function buildReceipt() {
   const honestOutput = h("inference-output-" + AUTH_MODEL + "-84");
   const receipt = {
-    task_jti:JTI, payment_hash:PAYMENT_HASH, input_hash:INPUT_HASH,
-    // model_id / model_hash / data_region are the executor's ATTESTATION:
-    // signed and non-repudiable, but SCRAP does not verify their truth.
-    model_id:AUTH_MODEL, model_hash:AUTH_MODEL_HASH, data_region:AUTH_REGION,
-    output_hash: honestOutput, runtime_s:84, energy_j:312, executor_sig:""
+    task_jti: JTI,
+    payment_hash: PAYMENT_HASH,
+    output_hash: honestOutput,
+    execution_timestamp: EXEC_TS,
+    // Executor-REPORTED metadata. Carried in the receipt but NOT covered by the
+    // base proof signature (compute_proof_hash) and NOT verified by SCRAP.
+    output_metadata: {
+      model_id: AUTH_MODEL, model_hash: AUTH_MODEL_HASH, data_region: AUTH_REGION,
+      input_hash: INPUT_HASH, runtime_s: 84, energy_j: 312, sensor_mode: "inference"
+    },
+    executor_sig: ""
   };
   receipt.executor_sig = sign(EX_PRIV, preimageOf(receipt));   // signs honest delivery
   if (state.tamperOutput) receipt.output_hash = h("inference-output-CORRUPTED");
@@ -461,10 +472,10 @@ function audit(tok, rec) {
     ["Authorization within validity window (iat ≤ now < exp)", IAT <= NOW && NOW < EXP],
     ["Audience binds to the executing node", tok.payload.aud === "SATLYT-NODE-DISKSAT-07"],
     ["Requested capability ⊆ granted capability", tok.payload.cap.includes("cmd:compute:inference")],
-    ["Executor signature over receipt valid — non-repudiable (node pubkey)",
+    ["Executor signature over delivery proof valid — non-repudiable (node pubkey)",
         verify(EX_PUB, preimageOf(r), r.executor_sig)],
-    ["Receipt binds to this authorization (task id · payment hash · input hash)",
-        r.task_jti === tok.payload.jti && r.payment_hash === PAYMENT_HASH && r.input_hash === INPUT_HASH],
+    ["Delivery proof binds to this authorization (task id · payment hash)",
+        r.task_jti === tok.payload.jti && r.payment_hash === PAYMENT_HASH],
     ["Payment is atomic with delivery (SHA256(revealed R) = payment_hash)",
         bytesToHex(sha256(utf8(rec.revealedPreimage))) === r.payment_hash],
   ];
@@ -498,16 +509,16 @@ function render() {
     'CBOR signing input: '+tok.signingInput.length+' bytes · ES256K signature: 64 bytes · fits a single ISL frame';
 
   const rdisp = JSON.parse(JSON.stringify(rec.receipt));
-  rdisp.model_hash = shortHex(rdisp.model_hash);
-  rdisp.input_hash = shortHex(rdisp.input_hash);
   rdisp.output_hash = shortHex(rdisp.output_hash);
   rdisp.payment_hash = shortHex(rdisp.payment_hash);
   rdisp.executor_sig = shortHex(rdisp.executor_sig);
+  rdisp.output_metadata.model_hash = shortHex(rdisp.output_metadata.model_hash);
+  rdisp.output_metadata.input_hash = shortHex(rdisp.output_metadata.input_hash);
   const redRec = state.scenario==='receipt' ? ['output_hash'] : [];
   document.getElementById('receiptView').innerHTML =
-    jsonHL(rdisp, redRec, ['model_id','model_hash','data_region']);
+    jsonHL(rdisp, redRec, ['model_id','model_hash','data_region','input_hash','runtime_s','energy_j','sensor_mode']);
   document.getElementById('receiptMeta').innerHTML =
-    '<span class="attest-note">Amber fields = executor attestation: signed &amp; non-repudiable, but NOT verified by SCRAP.</span>' +
+    '<span class="attest-note">Signed preimage = task_jti ‖ payment_hash ‖ output_hash ‖ timestamp (scrap-core compute_proof_hash). Amber output_metadata is executor-REPORTED: NOT covered by this signature, NOT verified by SCRAP.</span>' +
     'Revealed preimage R = '+shortHex(rec.revealedPreimage)+'  →  must hash to payment_hash to release payment (and is the customer’s receipt)';
 
   document.getElementById('scenario').textContent = state.scenario ? scenarioText() : '';
