@@ -1,3 +1,7 @@
+# Use the kb-native SQLite issue tracker (kbt) instead of the shared dolt server.
+# Issues were migrated via kb.bd_import on 2026-06-15; this decouples the project
+# from the cross-session shared dolt server (~/beads-dolt on tardis:3308).
+backend: kb
 dolt:
   shared-server: true
 no-git-ops: true
