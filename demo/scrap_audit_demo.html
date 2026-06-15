@@ -86,6 +86,9 @@
   .integration td:first-child { font-family:var(--mono); color:var(--dim); white-space:nowrap; }
   code { font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:12.5px; }
   .foot { color:var(--dim); font-size:12px; margin-top:26px; font-family:var(--mono); }
+  .banner { margin:22px 0 4px; padding:11px 16px; border-radius:9px; background:#0d1a14;
+    border:1px solid rgba(55,214,122,.4); color:#bfe9cf; font-size:13px; }
+  .banner b { color:var(--ok); }
   .notbox { margin-top:20px; padding:14px 16px; border-radius:9px; background:#15110a;
     border:1px solid rgba(255,180,84,.35); }
   .notbox-h { color:var(--warn); font-weight:600; font-size:13px; text-transform:uppercase;
@@ -107,11 +110,12 @@
 </head>
 <body>
 <header>
-  <h1><span>SCRAP</span> — Trustless Authorization &amp; Settlement for On-Orbit Compute</h1>
-  <p>A customer buys AI inference on another operator's satellite. SCRAP introduces <b>no trust roots</b>: it provides verifiable authorization, atomic payment-for-delivery, and a non-repudiable evidence trail — all checkable from public keys alone. It does not police what the executor actually did; that stays a governance matter.</p>
+  <h1><span>SCRAP</span> — Verifiable billing &amp; compliance for cross-operator orbital compute</h1>
+  <p>A customer runs an AI job on another operator's satellite and needs to prove what was authorized, what was delivered, and that the payment matched — without trusting that operator. SCRAP makes every step checkable from the parties' public keys and adds <b>no trust root of its own</b>. It does not police what the node physically did; that stays a governance matter.</p>
 </header>
 
 <div class="wrap">
+  <div class="banner"><b>Runs today on the host you deploy.</b> The verifier is a ~490 KB pure-Rust library — ARM64 Jetson Orin payloads or <code>no_std</code> flight computers, no C toolchain, no entropy source. Full numbers in §6.</div>
   <div class="parties">
     <div class="party"><div class="role">Issuer</div><div class="name" id="p-op">Operator&nbsp;A — task authority</div><div class="key" id="k-op"></div></div>
     <div class="party"><div class="role">Executor</div><div class="name" id="p-ex">Satlyt node (DiskSat-07)</div><div class="key" id="k-ex"></div></div>
@@ -121,7 +125,7 @@
   <!-- 1 -->
   <div class="step">
     <h2><span class="n">1</span>Authorization packet <span class="tag">SAT-CAP capability token</span></h2>
-    <p class="sub">Operator A signs exactly what is <i>permitted</i>: one capability, plus policy terms (the model that may run, a runtime ceiling, a data-sovereignty region). This is a signed statement of permission — capabilities can only narrow downstream, never widen. It authorizes; it does not enforce.</p>
+    <p class="sub">Operator A signs exactly what is <i>permitted</i>: one capability plus policy terms — which model may run, a runtime ceiling, a data-sovereignty region. Downstream hops can only narrow this grant. It is a signed statement of permission, not a guarantee of behavior.</p>
     <pre id="tokenView"></pre>
     <div class="meta" id="tokenMeta"></div>
   </div>
@@ -129,7 +133,7 @@
   <!-- 2 -->
   <div class="step">
     <h2><span class="n">2</span>Execution receipt <span class="tag">signed delivery proof + reported metadata</span></h2>
-    <p class="sub">The node returns a proof binding the <b>delivered output</b> to the payment and a timestamp under its signature — the exact preimage scrap-core's <code>compute_proof_hash</code> signs. Which model ran and in which region are <b>executor-reported <code>output_metadata</code></b> (amber): carried in the receipt but <b>not covered by the base proof signature, and not verified by SCRAP</b>. What is cryptographically pinned is the <i>authorization</i> (model/region, operator-signed in §1) and the <i>delivery</i> (output_hash). Binding the execution report itself is the compute-profile extension.</p>
+    <p class="sub">The node returns a proof binding the <b>delivered output</b> to the payment and a timestamp under its signature (the exact preimage scrap-core's <code>compute_proof_hash</code> signs). Which model ran and in which region are <b>executor-reported <code>output_metadata</code></b> (amber): carried in the receipt but not covered by that signature and not verified by SCRAP. What is cryptographically pinned is the operator-signed <i>authorization</i> (§1) and the <i>delivery</i> (<code>output_hash</code>). <b>Need model and region cryptographically bound — to bill or to prove compliance on them?</b> That is the optional compute-profile extension (§5), not a trust root.</p>
     <pre id="receiptView"></pre>
     <div class="meta" id="receiptMeta"></div>
   </div>
@@ -137,7 +141,7 @@
   <!-- 3 -->
   <div class="step">
     <h2><span class="n">3</span>Independent verification <span class="tag">no secret keys required</span></h2>
-    <p class="sub">Anyone — the customer, a counterparty, a governance body like Kenya's NEODC — re-checks the records later from public keys only. Every check below is decidable from signatures alone, with <b>no external trust root and no oracle</b>. They establish authenticity, scope, and atomic payment-for-delivery — never the truth of an off-chain claim.</p>
+    <p class="sub">Anyone holding the two public keys above — the customer, a counterparty, or a governance body like Kenya's NEODC — can re-check these records later. Every check below is decidable from signatures alone, with <b>no external trust root and no oracle</b>. They establish authenticity, capability scope, and atomic payment-for-delivery. None of them asserts the truth of an off-chain claim.</p>
     <ul class="checks" id="checks"></ul>
     <div class="verdict" id="verdict"></div>
     <div class="scenario" id="scenario"></div>
@@ -155,7 +159,7 @@
 
     <div class="notbox">
       <div class="notbox-h">What SCRAP deliberately does NOT do</div>
-      <p>SCRAP makes <b>no claim</b> about what physically happened off-chain — whether the node truly ran <code>eo-segnet-v3</code>, or whether the result stayed in Kenya. Verifying that would require a trust root SCRAP refuses to be (a TEE quote, key-custody, a staking/slashing oracle). The base proof signs <b>delivery</b> (output bound to payment + time); the model/region report rides in <code>output_metadata</code>, unsigned by that proof and unverified. What SCRAP <i>does</i> pin is the operator-signed <b>authorization</b> — so a verifier can always show what was <i>permitted</i>, even when it cannot show what was done. Enforcement (and binding the execution report itself) is a separate, optional layer owned by the data-owner and bodies like the <b>National Earth Observation Data Council</b> — SCRAP supplies the incorruptible authorization + delivery record they adjudicate with.</p>
+      <p>SCRAP makes <b>no claim</b> about what physically happened off-chain: whether the node truly ran <code>eo-segnet-v3</code>, or whether the result stayed in Kenya. Verifying that needs a trust root SCRAP refuses to be (a TEE quote, key custody, a staking/slashing oracle). The base proof signs <b>delivery</b> (output bound to payment and time); the model/region report rides in <code>output_metadata</code>, unsigned by that proof and unverified. What SCRAP <i>does</i> pin is the operator-signed <b>authorization</b>, so a verifier can always show what was <i>permitted</i> even when it cannot show what was done. Enforcement — and cryptographically binding the execution report — is a separate optional layer owned by the data-owner and bodies like the <b>National Earth Observation Data Council</b>; SCRAP supplies the incorruptible authorization-and-delivery record they adjudicate with.</p>
     </div>
   </div>
 
@@ -185,7 +189,7 @@
       <tr><td>/conf/nodes</td><td><span class="tag req">REQUIRED</span> compute-node catalog (maps to STAPI <code>products</code>)</td></tr>
       <tr><td>/conf/tokens</td><td><span class="tag req">REQUIRED</span> <code>POST /tokens</code> — issues SAT-CAP (replaces marketplace <code>order</code>)</td></tr>
       <tr><td>/conf/receipts</td><td><span class="tag opt">OPTIONAL</span> fetch / re-verify execution receipts</td></tr>
-      <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (Dyson-operated coordination)</td></tr>
+      <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (Dyson-coordinated channel routing — non-custodial; no party holds funds)</td></tr>
     </table>
     <pre id="adapterView" style="margin-top:14px"></pre>
   </div>
@@ -587,7 +591,7 @@ function runAudit() {
     const allOk = results.every(r => r[1]);
     verdict.className = 'verdict ' + (allOk ? 'ok' : 'bad');
     verdict.textContent = allOk
-      ? '✓  VERIFIED — authorization, scope, and atomic payment-for-delivery all hold, from public keys alone. (SCRAP asserts nothing about off-chain execution.)'
+      ? '✓  VERIFIED — the authorization, its scope, and atomic payment-for-delivery all hold. SCRAP asserts nothing about off-chain execution.'
       : '✗  FAILED — a signed record is inconsistent. The break is cryptographic — not a judgment about what the executor did.';
     auditing = false;
   }, 130*items.length + 200);

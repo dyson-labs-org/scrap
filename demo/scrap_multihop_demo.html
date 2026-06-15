@@ -10,8 +10,9 @@
 
   Forward: source-routed, onion-wrapped (spec §5.5) — each hop peels one layer, sees only
   the next hop. Backward: custody/output receipts + the preimage-R settlement cascade
-  (spec §5.4, §5.7). NOTE: this receipt model is ahead of the written spec (tracked: kb-7c7062).
-  Normative-so-far: ../spec/SCRAP.md §5 · ../schemas/scrap.cddl
+  (spec §5.4, §5.7). NOTE: single-hop is normative; this multi-hop receipt chaining is
+  designed and demonstrated here, with spec §5/§6 text landing next (tracked: kb-7c7062).
+  ../spec/SCRAP.md §5 · ../schemas/scrap.cddl
 -->
 <html lang="en">
 <head>
@@ -81,8 +82,8 @@
 </head>
 <body>
 <header>
-  <h1><span>SCRAP</span> — Multi-Hop Routing &amp; Countersigned Receipts</h1>
-  <p>A customer routes one task across three operators' satellites. SCRAP carries it onion-wrapped (each hop sees only the next), and proves the whole pipeline from public keys alone — using <b>countersigned receipts</b>: every hop signs custody <i>on receipt</i>, and each hop's execution is vouched by the <i>next</i> hop's signature, never its own self-claim.</p>
+  <h1><span>SCRAP</span> — Accountability across a federated operator mesh</h1>
+  <p>This is the Satlyt marketplace at scale: one customer task crossing Operator A → B → C, each independently paid and accountable. SCRAP carries it onion-wrapped, so each hop sees only the next, and assembles end-to-end proof from the parties' public keys. The mechanism is <b>countersigned receipts</b>: every hop signs custody when it receives the bundle, and each hop's execution is vouched by the <i>next</i> hop's signature rather than its own. A governance body like Kenya's NEODC can replay the whole chain afterward.</p>
 </header>
 
 <div class="wrap">
@@ -104,7 +105,7 @@
   <!-- 3 -->
   <div class="step">
     <h2><span class="n">3</span>Countersigned receipt chain <span style="font:11px var(--mono);color:var(--dim);font-weight:400">the backward flow</span></h2>
-    <p class="sub">Two signed families flow back. <b>Custody</b>: each hop signs "I received this bundle from ⟨prev⟩" on receipt — before it acts. <b>Output-ack</b>: each hop signs "I received ⟨prev⟩'s output ⟨hash⟩" — so a hop's execution status is attested by the <i>next</i> hop, not itself. Click verify to re-derive the whole chain from public keys.</p>
+    <p class="sub">Two signed families flow back. <b>Custody</b>: each hop signs "I received this bundle from ⟨prev⟩" the moment it arrives, before it acts. <b>Output-ack</b>: each hop signs "I received ⟨prev⟩'s output ⟨hash⟩", so a hop's execution status is attested by the <i>next</i> hop in the chain. Click verify to re-derive the whole chain from the parties' public keys.</p>
     <div class="lane bwd"><div class="lane-h">Custody receipts (signed on receipt, returned to sender)</div><div class="recs" id="custody"></div></div>
     <div class="lane bwd" style="margin-top:12px"><div class="lane-h">Output acknowledgments (next hop vouches for prior hop's output)</div><div class="recs" id="outacks"></div></div>
     <div class="lane bwd" style="margin-top:12px"><div class="lane-h">Settlement</div><div class="recs" id="settle"></div></div>
@@ -467,7 +468,7 @@ function toggle(name){
 document.getElementById('btnVerify').onclick = runVerify;
 for(const n of Object.keys(TAMPERS)) document.getElementById(TAMPERS[n].btn).onclick = ()=>toggle(n);
 document.getElementById('foot').textContent =
-  'Real secp256k1 ECDSA + SHA-256 in-browser — no network. Receipt model ahead of spec (kb-7c7062). ../spec/SCRAP.md §5 · ../schemas/scrap.cddl';
+  'Real secp256k1 + SHA-256 in-browser, no network. Single-hop is normative (spec §4.4/§6.8); this multi-hop receipt chaining is designed and demonstrated here, with spec text landing next (kb-7c7062). ../spec/SCRAP.md §5';
 render();
 </script>
 </body>
