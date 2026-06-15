@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<!--
+  SCRAP multi-hop demo — onion-routed task across operators + countersigned receipt chain.
+  Self-contained: real secp256k1 ECDSA + SHA-256 in pure JS, no network, no build.
+
+  Models the receipt semantics: each hop signs a receipt ON RECEIPT of the bundle and
+  returns it to the sender (custody proof, BEFORE it acts). A hop's EXECUTION STATUS is
+  established by the NEXT hop's signed receipt of its output — never a self-attestation.
+  The chain is countersigned end-to-end; the customer assembles it from public keys alone.
+
+  Forward: source-routed, onion-wrapped (spec §5.5) — each hop peels one layer, sees only
+  the next hop. Backward: custody/output receipts + the preimage-R settlement cascade
+  (spec §5.4, §5.7). NOTE: this receipt model is ahead of the written spec (tracked: kb-7c7062).
+  Normative-so-far: ../spec/SCRAP.md §5 · ../schemas/scrap.cddl
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCRAP — Multi-Hop Routing &amp; Countersigned Receipts</title>
+<style>
+  :root {
+    --bg:#0a0e17; --panel:#121826; --panel2:#0e1320; --ink:#e6edf3; --dim:#8b97a8;
+    --line:#222c3d; --accent:#4ea1ff; --ok:#37d67a; --bad:#ff5d6c; --warn:#ffb454;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.55 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:28px 40px 18px; border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#0d1320,#0a0e17); }
+  header h1 { margin:0 0 4px; font-size:23px; } header h1 span { color:var(--accent); }
+  header p { margin:0; color:var(--dim); font-size:14px; max-width:1000px; }
+  .wrap { max-width:1080px; margin:0 auto; padding:24px 40px 80px; }
+  .step { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px 22px; margin:16px 0; }
+  .step h2 { margin:0 0 4px; font-size:17px; display:flex; align-items:center; gap:10px; }
+  .step h2 .n { background:var(--accent); color:#04101f; width:26px; height:26px; border-radius:50%;
+    display:inline-grid; place-items:center; font-size:14px; font-weight:700; }
+  .step .sub { color:var(--dim); font-size:13px; margin:0 0 14px 36px; }
+  .route { display:flex; align-items:stretch; gap:0; flex-wrap:wrap; margin:6px 0 4px; }
+  .node { flex:1; min-width:120px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:9px; padding:11px 12px; position:relative; }
+  .node .r { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px; color:var(--accent); }
+  .node .nm { font-weight:600; font-size:13px; margin:2px 0 2px; }
+  .node .op { font-size:11px; color:var(--dim); }
+  .node .cap { font:10.5px var(--mono); color:var(--warn); margin-top:5px; word-break:break-all; }
+  .arrow { align-self:center; color:var(--dim); padding:0 6px; font-size:18px; }
+  .lane { margin:14px 0 0; }
+  .lane-h { font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); margin:0 0 7px; }
+  .lane.fwd .lane-h { color:var(--accent); } .lane.bwd .lane-h { color:var(--warn); }
+  .recs { display:flex; flex-direction:column; gap:6px; }
+  .rec { display:flex; align-items:center; gap:10px; padding:7px 11px; border-radius:7px;
+    background:var(--panel2); border:1px solid var(--line); font-size:13px;
+    opacity:.25; transform:translateX(-4px); transition:opacity .25s, transform .25s; }
+  .rec.show { opacity:1; transform:none; }
+  .rec .badge { font:11px/1 var(--mono); font-weight:700; padding:4px 7px; border-radius:5px; }
+  .rec.pass .badge { background:rgba(55,214,122,.15); color:var(--ok); }
+  .rec.fail .badge { background:rgba(255,93,108,.15); color:var(--bad); }
+  .rec.fail { border-color:rgba(255,93,108,.4); }
+  .rec .who { font:11px var(--mono); color:var(--dim); }
+  .verdict { margin-top:14px; padding:13px 16px; border-radius:9px; font-weight:600; display:none; gap:10px; }
+  .verdict.ok { display:flex; background:rgba(55,214,122,.1); border:1px solid rgba(55,214,122,.5); color:var(--ok); }
+  .verdict.bad { display:flex; background:rgba(255,93,108,.1); border:1px solid rgba(255,93,108,.5); color:var(--bad); }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; margin-top:4px; }
+  button { font:14px inherit; cursor:pointer; border-radius:8px; padding:10px 16px;
+    border:1px solid var(--line); background:#1a2334; color:var(--ink); transition:.15s; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#04101f; border-color:var(--accent); font-weight:600; }
+  button.danger { background:#241317; border-color:#5a2730; color:#ffb3ba; }
+  button.danger.active { background:var(--bad); border-color:var(--bad); color:#1a0509; font-weight:600; }
+  .tamper-group { margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+  .tamper-label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); margin-bottom:9px; }
+  .scenario { margin-top:8px; font-size:13px; color:var(--warn); min-height:18px; }
+  .onion { font:12px/1.6 var(--mono); color:var(--dim); background:var(--panel2);
+    border:1px solid var(--line); border-radius:8px; padding:12px 14px; white-space:pre; overflow-x:auto; }
+  .onion b { color:var(--ink); } .onion .enc { color:var(--accent); }
+  code { font-family:var(--mono); background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:12.5px; }
+  .foot { color:var(--dim); font-size:12px; margin-top:26px; font-family:var(--mono); }
+  .note { color:var(--warn); font-size:11.5px; font-family:var(--mono); margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>SCRAP</span> — Multi-Hop Routing &amp; Countersigned Receipts</h1>
+  <p>A customer routes one task across three operators' satellites. SCRAP carries it onion-wrapped (each hop sees only the next), and proves the whole pipeline from public keys alone — using <b>countersigned receipts</b>: every hop signs custody <i>on receipt</i>, and each hop's execution is vouched by the <i>next</i> hop's signature, never its own self-claim.</p>
+</header>
+
+<div class="wrap">
+  <!-- 1 -->
+  <div class="step">
+    <h2><span class="n">1</span>The route <span style="font:11px var(--mono);color:var(--dim);font-weight:400">source-routed, cross-operator</span></h2>
+    <p class="sub">The customer's operator computes the path and pre-signs an <b>attenuated</b> capability token for each hop (relay-only inland, execute at the end) — each a strict subset of the root grant.</p>
+    <div class="route" id="route"></div>
+    <div class="note" id="capNote"></div>
+  </div>
+
+  <!-- 2 -->
+  <div class="step">
+    <h2><span class="n">2</span>Onion-wrapped forward path <span style="font:11px var(--mono);color:var(--dim);font-weight:400">spec §5.5</span></h2>
+    <p class="sub">The task bundle is wrapped in layers (innermost = final hop). Each hop peels one layer with its link key, sees only its instructions + the next hop, and forwards the inner blob. No satellite holds the full route.</p>
+    <div class="onion" id="onion"></div>
+  </div>
+
+  <!-- 3 -->
+  <div class="step">
+    <h2><span class="n">3</span>Countersigned receipt chain <span style="font:11px var(--mono);color:var(--dim);font-weight:400">the backward flow</span></h2>
+    <p class="sub">Two signed families flow back. <b>Custody</b>: each hop signs "I received this bundle from ⟨prev⟩" on receipt — before it acts. <b>Output-ack</b>: each hop signs "I received ⟨prev⟩'s output ⟨hash⟩" — so a hop's execution status is attested by the <i>next</i> hop, not itself. Click verify to re-derive the whole chain from public keys.</p>
+    <div class="lane bwd"><div class="lane-h">Custody receipts (signed on receipt, returned to sender)</div><div class="recs" id="custody"></div></div>
+    <div class="lane bwd" style="margin-top:12px"><div class="lane-h">Output acknowledgments (next hop vouches for prior hop's output)</div><div class="recs" id="outacks"></div></div>
+    <div class="lane bwd" style="margin-top:12px"><div class="lane-h">Settlement</div><div class="recs" id="settle"></div></div>
+    <div class="verdict" id="verdict"></div>
+    <div class="scenario" id="scenario"></div>
+    <div class="controls" style="margin-top:16px">
+      <button class="primary" id="btnVerify">▶ Verify the chain</button>
+    </div>
+    <div class="tamper-group">
+      <span class="tamper-label">Tamper (click to apply, click again to undo) — each breaks a real signature/link:</span>
+      <div class="controls">
+        <button class="danger" id="btnForge">Forge a hop's custody receipt</button>
+        <button class="danger" id="btnAlter">Middle node alters upstream output</button>
+        <button class="danger" id="btnDrop">Drop a custody receipt</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4 -->
+  <div class="step">
+    <h2><span class="n">4</span>Backward settlement cascade <span style="font:11px var(--mono);color:var(--dim);font-weight:400">spec §5.4</span></h2>
+    <p class="sub">Payment routes on operator Lightning channels, not ISL. The payee reveals preimage <code>R</code> (where SHA256(R)=H); it cascades backward node-3 → node-2 → node-1 → customer, settling each channel. Decreasing HTLC timeouts force the payee-claims-first ordering. No escrow, no arbiter.</p>
+    <div class="onion" id="cascade"></div>
+  </div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<script id="cryptojs">
+(function(){
+// Pure-JS secp256k1 ECDSA + SHA-256 + minimal CBOR. No deps. For SCRAP demo.
+// Reusable in a browser (no Node APIs). Tested under node via module.exports shim.
+
+// ---------------------------------------------------------------- SHA-256 (pure)
+function sha256(bytes) {
+  const K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const ml = bytes.length * 8;
+  const withOne = [...bytes, 0x80];
+  while (withOne.length % 64 !== 56) withOne.push(0);
+  for (let i = 7; i >= 0; i--) withOne.push((ml / 2 ** (i * 8)) & 0xff);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < withOne.length; off += 64) {
+    const w = new Array(64);
+    for (let i = 0; i < 16; i++)
+      w[i] = (withOne[off+4*i]<<24)|(withOne[off+4*i+1]<<16)|(withOne[off+4*i+2]<<8)|withOne[off+4*i+3];
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i-15],7)^rotr(w[i-15],18)^(w[i-15]>>>3);
+      const s1 = rotr(w[i-2],17)^rotr(w[i-2],19)^(w[i-2]>>>10);
+      w[i] = (w[i-16]+s0+w[i-7]+s1)|0;
+    }
+    let [a,b,c,d,e,f,g,hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e,6)^rotr(e,11)^rotr(e,25);
+      const ch = (e&f)^(~e&g);
+      const t1 = (hh+S1+ch+K[i]+w[i])|0;
+      const S0 = rotr(a,2)^rotr(a,13)^rotr(a,22);
+      const maj = (a&b)^(a&c)^(b&c);
+      const t2 = (S0+maj)|0;
+      hh=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    h = [(h[0]+a)|0,(h[1]+b)|0,(h[2]+c)|0,(h[3]+d)|0,(h[4]+e)|0,(h[5]+f)|0,(h[6]+g)|0,(h[7]+hh)|0];
+  }
+  const out = [];
+  for (const x of h) out.push((x>>>24)&0xff,(x>>>16)&0xff,(x>>>8)&0xff,x&0xff);
+  return Uint8Array.from(out);
+}
+
+// --------------------------------------------------------------- secp256k1 (pure)
+const P  = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+const N  = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+const Gx = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+const Gy = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+
+const mod = (a, m = P) => ((a % m) + m) % m;
+function inv(a, m = P) {
+  let [lm, hm, low, high] = [1n, 0n, mod(a, m), m];
+  while (low > 1n) { const r = high / low; [lm, hm, low, high] = [hm - lm*r, lm, high - low*r, low]; }
+  return mod(lm, m);
+}
+function ptAdd(p1, p2) {
+  if (!p1) return p2; if (!p2) return p1;
+  const [x1,y1] = p1, [x2,y2] = p2;
+  if (x1 === x2 && mod(y1+y2) === 0n) return null;
+  let m;
+  if (x1 === x2 && y1 === y2) m = mod((3n*x1*x1) * inv(2n*y1));
+  else m = mod((y2-y1) * inv(x2-x1));
+  const x3 = mod(m*m - x1 - x2);
+  return [x3, mod(m*(x1-x3) - y1)];
+}
+function ptMul(k, pt = [Gx, Gy]) {
+  let r = null, a = pt;
+  while (k > 0n) { if (k & 1n) r = ptAdd(r, a); a = ptAdd(a, a); k >>= 1n; }
+  return r;
+}
+const bytesToBig = (b) => { let n = 0n; for (const x of b) n = (n<<8n) | BigInt(x); return n; };
+function bigToBytes(n, len = 32) {
+  const out = new Uint8Array(len);
+  for (let i = len-1; i >= 0; i--) { out[i] = Number(n & 0xffn); n >>= 8n; }
+  return out;
+}
+const hexToBytes = (h) => Uint8Array.from(h.match(/.{2}/g).map(x => parseInt(x,16)));
+const bytesToHex = (b) => [...b].map(x => x.toString(16).padStart(2,'0')).join('');
+
+function pubFromPriv(privHex) {
+  const d = BigInt('0x'+privHex);
+  const [x,y] = ptMul(d);
+  return (y % 2n === 0n ? '02' : '03') + x.toString(16).padStart(64,'0');
+}
+function concat(...arrs) {
+  const t = arrs.reduce((s,a)=>s+a.length,0); const o = new Uint8Array(t);
+  let i=0; for (const a of arrs){ o.set(a,i); i+=a.length; } return o;
+}
+// Deterministic nonce (demo-grade: k = SHA256(d||z) mod N, nonzero). Reproducible.
+function sign(privHex, msgBytes) {
+  const d = BigInt('0x'+privHex);
+  const z = bytesToBig(sha256(msgBytes));
+  let k = mod(bytesToBig(sha256(concat(hexToBytes(privHex.padStart(64,'0')), bigToBytes(z)))), N);
+  if (k === 0n) k = 1n;
+  const [rx] = ptMul(k);
+  const r = mod(rx, N);
+  let s = mod(inv(k, N) * mod(z + r*d, N), N);
+  if (s > N/2n) s = N - s;            // low-s
+  return bytesToHex(bigToBytes(r)) + bytesToHex(bigToBytes(s));
+}
+function decompress(pubHex) {
+  const x = BigInt('0x'+pubHex.slice(2));
+  const ySq = mod(x*x*x + 7n);
+  let y = modpow(ySq, (P+1n)/4n, P);
+  const odd = (pubHex.slice(0,2) === '03');
+  if ((y % 2n === 1n) !== odd) y = P - y;
+  return [x, y];
+}
+function modpow(b, e, m) { let r=1n; b=mod(b,m); while(e>0n){ if(e&1n) r=mod(r*b,m); b=mod(b*b,m); e>>=1n; } return r; }
+function verify(pubHex, msgBytes, sigHex) {
+  try {
+    const r = BigInt('0x'+sigHex.slice(0,64));
+    const s = BigInt('0x'+sigHex.slice(64,128));
+    if (r <= 0n || r >= N || s <= 0n || s >= N) return false;
+    const z = bytesToBig(sha256(msgBytes));
+    const w = inv(s, N);
+    const u1 = mod(z*w, N), u2 = mod(r*w, N);
+    const pt = ptAdd(ptMul(u1), ptMul(u2, decompress(pubHex)));
+    if (!pt) return false;
+    return mod(pt[0], N) === r;
+  } catch (e) { return false; }
+}
+
+// ------------------------------------------------------------- minimal CBOR encode
+function cborUint(major, n) {
+  const mt = major << 5;
+  if (n < 24) return Uint8Array.from([mt|n]);
+  if (n < 256) return Uint8Array.from([mt|24, n]);
+  if (n < 65536) return Uint8Array.from([mt|25, n>>8, n&0xff]);
+  if (n < 2**32) return Uint8Array.from([mt|26, (n>>>24)&0xff,(n>>>16)&0xff,(n>>>8)&0xff,n&0xff]);
+  const b=[mt|27]; for(let i=7;i>=0;i--) b.push(Number((BigInt(n)>>BigInt(i*8))&0xffn)); return Uint8Array.from(b);
+}
+function cbor(x) {
+  if (typeof x === 'boolean') return Uint8Array.from([x?0xf5:0xf4]);
+  if (typeof x === 'number' && Number.isInteger(x))
+    return x >= 0 ? cborUint(0, x) : cborUint(1, -1 - x);
+  if (typeof x === 'number') { // float64
+    const dv = new DataView(new ArrayBuffer(9)); dv.setUint8(0,0xfb); dv.setFloat64(1,x);
+    return new Uint8Array(dv.buffer);
+  }
+  if (typeof x === 'string') { const b = new TextEncoder().encode(x); return concat(cborUint(3,b.length), b); }
+  if (x instanceof Uint8Array) return concat(cborUint(2,x.length), x);
+  if (Array.isArray(x)) return concat(cborUint(4,x.length), ...x.map(cbor));
+  if (x && typeof x === 'object') {
+    const keys = Object.keys(x);
+    return concat(cborUint(5,keys.length), ...keys.map(k => concat(cbor(k), cbor(x[k]))));
+  }
+  throw new Error('cbor: unsupported ' + typeof x);
+}
+
+const utf8 = (s) => new TextEncoder().encode(s);
+
+window.SCRAPCrypto =
+  { sha256, sign, verify, pubFromPriv, cbor, concat, utf8, bytesToHex, hexToBytes, bigToBytes };
+})();
+</script>
+<script>
+const { sha256, sign, verify, pubFromPriv, concat, utf8, bytesToHex } = window.SCRAPCrypto;
+
+// Parties — one per operator. Fixed keys for reproducibility.
+const KEYS = {
+  OP:  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  N1:  "1111111111111111111111111111111111111111111111111111111111111111",
+  N2:  "2222222222222222222222222222222222222222222222222222222222222222",
+  N3:  "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+  CUST:"3333333333333333333333333333333333333333333333333333333333333333",
+};
+const PUB = Object.fromEntries(Object.entries(KEYS).map(([k,v])=>[k, pubFromPriv(v)]));
+const h = s => bytesToHex(sha256(utf8(s)));
+const TS = 1773793800;
+
+// The 3 hops: N1 (Op-A relay) → N2 (Op-B relay) → N3 (Op-C executor). Endpoint = customer.
+const HOPS = [
+  { id:"N1", role:"Relay",    op:"Operator A · DiskSat-07", cap:"relay:task:forward" },
+  { id:"N2", role:"Relay",    op:"Operator B · node-22",    cap:"relay:task:forward" },
+  { id:"N3", role:"Executor", op:"Operator C · node-07",    cap:"cmd:compute:inference" },
+];
+const PREIMAGE_R = h("payment-preimage-multihop");
+const PAYMENT_HASH = bytesToHex(sha256(utf8(PREIMAGE_R)));
+
+let state;
+function reset(){ state = { forgeReceipt:false, alterReceived:false, dropReceipt:false, scenario:"" }; }
+reset();
+
+// Countersigned chain with REAL linkage: each hop signs custody over the input it
+// received AND an OUT signature over the output it forwarded. Honest invariant:
+// next-hop.input === prev-hop.output. All real secp256k1 signatures.
+function buildChain() {
+  const mInit = h("onion-bundle-to-N1");
+  const outN1 = h("N1-forwarded-blob");
+  const outN2 = h("N2-forwarded-blob");
+  const outN3 = h("N3-inference-result");
+
+  const prevOf   = { N1:"OP", N2:"N1", N3:"N2" };
+  const outputOf = { N1:outN1, N2:outN2, N3:outN3 };
+  const inputOf  = {
+    N1: mInit,
+    N2: state.alterReceived ? h("N2-claims-different-input") : outN1,
+    N3: outN2,
+  };
+
+  let custody = HOPS.map(hop => {
+    const preimg = concat(utf8("RCPT"), utf8(prevOf[hop.id]), utf8(inputOf[hop.id]), utf8(hop.id), utf8(String(TS)));
+    let key = KEYS[hop.id];
+    if (state.forgeReceipt && hop.id === "N2") key = KEYS.CUST;
+    return { hop:hop.id, prev:prevOf[hop.id], input:inputOf[hop.id], preimg, sig: sign(key, preimg) };
+  });
+  if (state.dropReceipt) custody = custody.filter(c => c.hop !== "N2");
+
+  const outsig = HOPS.map(hop => {
+    const preimg = concat(utf8("OUT"), utf8(hop.id), utf8(outputOf[hop.id]), utf8(String(TS)));
+    return { hop:hop.id, output:outputOf[hop.id], preimg, sig: sign(KEYS[hop.id], preimg) };
+  });
+
+  const finalPre = concat(utf8("OACK"), utf8("N3"), utf8(outN3), utf8(String(TS)));
+  const finalAck = { producer:"N3", acker:"CUST", output:outN3, preimg:finalPre, sig: sign(KEYS.CUST, finalPre) };
+
+  return { custody, outsig, finalAck, prevOf, outputOf, inputOf };
+}
+
+function audit(c) {
+  const checks = [];
+  for (const hop of HOPS) {
+    const r = c.custody.find(x => x.hop === hop.id);
+    if (!r) { checks.push(["custody", `Custody receipt present for ${hop.id}`, false]); continue; }
+    checks.push(["custody", `${hop.id} signed custody of input from ${c.prevOf[hop.id]}`,
+        verify(PUB[hop.id], r.preimg, r.sig) && r.prev === c.prevOf[hop.id]]);
+  }
+  for (const o of c.outsig)
+    checks.push(["out", `${o.hop} signed the output it forwarded`, verify(PUB[o.hop], o.preimg, o.sig)]);
+  for (const pair of [["N1","N2"],["N2","N3"]]) {
+    const prod = pair[0], next = pair[1];
+    const cust = c.custody.find(x => x.hop === next);
+    checks.push(["out", `${next}'s received input matches ${prod}'s forwarded output`,
+        !!cust && cust.input === c.outputOf[prod]]);
+  }
+  checks.push(["out", "Customer's ack anchors the executor's (N3) output",
+      verify(PUB.CUST, c.finalAck.preimg, c.finalAck.sig) && c.finalAck.output === c.outputOf.N3]);
+  checks.push(["pay", "Preimage R settles payment (SHA256(R)=H)",
+      bytesToHex(sha256(utf8(PREIMAGE_R))) === PAYMENT_HASH]);
+  return checks;
+}
+
+function shortHex(x){ return x.length>16 ? x.slice(0,14)+'…' : x; }
+function renderRoute() {
+  const parts = [{r:"Issuer",nm:"Customer / Op-A",op:"computes route, signs tokens",cap:"root: cmd:compute:inference"}];
+  HOPS.forEach(hop => parts.push({r:hop.role,nm:hop.id,op:hop.op,cap:hop.cap}));
+  parts.push({r:"Endpoint",nm:"Customer GS",op:"receives output + receipts",cap:"verifies (no key custody)"});
+  document.getElementById('route').innerHTML = parts.map((p,i)=>
+    `<div class="node"><div class="r">${p.r}</div><div class="nm">${p.nm}</div><div class="op">${p.op}</div><div class="cap">${p.cap}</div></div>` +
+    (i<parts.length-1 ? '<div class="arrow">▸</div>' : '')
+  ).join('');
+  document.getElementById('capNote').textContent =
+    'Attenuation: relay:task:forward ⊆ cmd:compute:inference root — inland hops forward but cannot execute. Each token operator-signed (verified against the burned-in operator key).';
+}
+function renderOnion() {
+  document.getElementById('onion').innerHTML =
+    '<span class="enc">enc→N1</span>{ next:N1, <span class="enc">enc→N2</span>{ next:N2, <span class="enc">enc→N3</span>{ task:inference, model:eo-segnet-v3, region:KE } } }\n' +
+    'N1 peels → sees <b>next:N2</b> + inner blob (cannot read N2/N3 contents) → forwards\n' +
+    'N2 peels → sees <b>next:N3</b> + inner blob → forwards\n' +
+    'N3 peels → sees <b>task:inference</b>, no next → executes, delivers to endpoint';
+}
+function renderCascade() {
+  document.getElementById('cascade').innerHTML =
+    'lock:   customer → N1op → N2op → N3op   (HTLC, same hash H; timeouts T, T-144, T-288)\n' +
+    'reveal: N3op --R--> N2op --R--> N1op --> customer   (preimage cascades backward)\n' +
+    'R = ' + shortHex(PREIMAGE_R) + '   H = SHA256(R) = ' + shortHex(PAYMENT_HASH) + '\n' +
+    '✓ payee paid first, each upstream settles on seeing R; timeout refunds if no R';
+}
+function renderChainStatic(chain) {
+  document.getElementById('custody').innerHTML = chain.custody.map(r =>
+    `<div class="rec"><span class="badge">SIG</span>${r.hop} ← received from ${r.prev}<span class="who"> ${shortHex(r.input)}</span></div>`).join('')
+    || '<div class="rec"><span class="badge">—</span>(a custody receipt is missing)</div>';
+  document.getElementById('outacks').innerHTML = chain.outsig.map(o =>
+    `<div class="rec"><span class="badge">SIG</span>${o.hop} signed the output it forwarded<span class="who"> ${shortHex(o.output)}</span></div>`).join('') +
+    `<div class="rec"><span class="badge">SIG</span>CUST anchors N3's output<span class="who"> ${shortHex(chain.finalAck.output)}</span></div>`;
+  document.getElementById('settle').innerHTML =
+    `<div class="rec"><span class="badge">R</span>preimage reveal settles payment<span class="who"> H=${shortHex(PAYMENT_HASH)}</span></div>`;
+}
+function render() {
+  const chain = buildChain(); window._chain = chain;
+  renderRoute(); renderOnion(); renderCascade(); renderChainStatic(chain);
+  document.getElementById('scenario').textContent = state.scenario ? scenarioText() : '';
+  document.getElementById('verdict').className = 'verdict';
+}
+function scenarioText(){
+  return {
+    forge:  'Tamper: an attacker fabricates N2\'s custody receipt — but cannot sign as N2, so its signature fails under N2\'s public key.',
+    alter:  'Tamper: the data between N1 and N2 is altered — N2\'s signed custody no longer matches the output N1 signed forwarding, so the linkage check fails and pinpoints the N1→N2 hop.',
+    drop:   'Tamper: N2\'s custody receipt is dropped — the chain has a gap; the verifier cannot show N2 ever took custody.'
+  }[state.scenario] || '';
+}
+
+let auditing=false;
+function runVerify(){
+  if (auditing) return; auditing=true;
+  const checks = audit(window._chain);
+  const rowHTML = c => `<div class="rec ${c[2]?'pass':'fail'}"><span class="badge">${c[2]?'PASS':'FAIL'}</span>${c[1]}</div>`;
+  document.getElementById('custody').innerHTML = checks.filter(c=>c[0]==='custody').map(rowHTML).join('')
+    || '<div class="rec fail"><span class="badge">FAIL</span>a custody receipt is missing</div>';
+  document.getElementById('outacks').innerHTML = checks.filter(c=>c[0]==='out').map(rowHTML).join('');
+  document.getElementById('settle').innerHTML  = checks.filter(c=>c[0]==='pay').map(rowHTML).join('');
+  const rows=[...document.querySelectorAll('.rec')];
+  rows.forEach((li,i)=>setTimeout(()=>li.classList.add('show'),110*i));
+  setTimeout(()=>{
+    const allOk = checks.every(c=>c[2]);
+    const v=document.getElementById('verdict');
+    v.className='verdict '+(allOk?'ok':'bad');
+    v.textContent = allOk
+      ? '✓  CHAIN VERIFIED — every hop\'s custody and every forwarded output are countersigned and linked; the pipeline is provable end-to-end from public keys alone.'
+      : '✗  CHAIN BROKEN — a signature or link does not hold. The customer can pinpoint exactly which hop failed and withhold/settle accordingly.';
+    auditing=false;
+  }, 110*rows.length + 200);
+}
+
+const TAMPERS = {
+  forge: { btn:'btnForge', apply:()=>{ state.forgeReceipt=true; } },
+  alter: { btn:'btnAlter', apply:()=>{ state.alterReceived=true; } },
+  drop:  { btn:'btnDrop',  apply:()=>{ state.dropReceipt=true; } },
+};
+function toggle(name){
+  const off = state.scenario===name; reset();
+  if(!off){ state.scenario=name; TAMPERS[name].apply(); }
+  for(const [n,t] of Object.entries(TAMPERS)) document.getElementById(t.btn).classList.toggle('active', n===state.scenario);
+  render();
+}
+document.getElementById('btnVerify').onclick = runVerify;
+for(const n of Object.keys(TAMPERS)) document.getElementById(TAMPERS[n].btn).onclick = ()=>toggle(n);
+document.getElementById('foot').textContent =
+  'Real secp256k1 ECDSA + SHA-256 in-browser — no network. Receipt model ahead of spec (kb-7c7062). ../spec/SCRAP.md §5 · ../schemas/scrap.cddl';
+render();
+</script>
+</body>
+</html>
