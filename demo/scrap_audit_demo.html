@@ -542,7 +542,7 @@ function renderSettlement(rec) {
   document.getElementById('flowTimeout').innerHTML =
     '1. customer locks payment to <b>H</b>\n' +
     '2. executor never delivers / never reveals R\n' +
-    '3. HTLC timeout (<b>'+rec.receipt.runtime_s+'s</b> job · blocks elapse)\n' +
+    '3. HTLC timeout (<b>'+rec.receipt.output_metadata.runtime_s+'s</b> job · blocks elapse)\n' +
     '4. funds <b>return to the customer</b>\n' +
     '   no escrow, no arbiter needed\n' +
     '<b style="color:var(--warn)">↩ customer refunded · executor unpaid</b>';
