@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::cbor::{encode_protected_content, decode_capability_token};
-use crate::crypto::{sign_message, verify_signature};
+use crate::crypto::{sha256, verify_signature, Signer, KeySigner};
 use crate::error::ScapError;
 use crate::types::*;
 
@@ -83,21 +83,32 @@ impl CapabilityTokenBuilder {
         self
     }
 
-    /// Build and sign the token.
+    /// Build and sign the token with any [`Signer`] — keeping the private key
+    /// outside this library (HSM, secure element, signing daemon, …).
     ///
     /// The protected content (header + payload) is encoded once; the signature is
-    /// over those exact bytes, which are retained as `protected` and carried on
-    /// the wire verbatim.
-    pub fn sign(self, private_key: &[u8]) -> Result<CapabilityToken, ScapError> {
+    /// over `SHA256(protected)`, and `protected` is retained and carried on the
+    /// wire verbatim.
+    pub fn sign_with<S: Signer + ?Sized>(self, signer: &S) -> Result<CapabilityToken, ScapError> {
         let content = ProtectedContent { header: self.header, payload: self.payload };
         let protected = encode_protected_content(&content)?;
-        let signature = sign_message(private_key, &protected)?;
+        let digest = sha256(&protected);
+        let signature = signer.sign_digest(&digest)?;
         Ok(CapabilityToken {
             header: content.header,
             payload: content.payload,
             protected,
             signature,
         })
+    }
+
+    /// Build and sign with a raw private key (in-process convenience).
+    ///
+    /// Equivalent to `sign_with(&KeySigner::from_slice(private_key)?)`. On
+    /// multi-tenant hardware, prefer [`Self::sign_with`] with an external signer.
+    pub fn sign(self, private_key: &[u8]) -> Result<CapabilityToken, ScapError> {
+        let signer = KeySigner::from_slice(private_key)?;
+        self.sign_with(&signer)
     }
 
     /// Build without signing (for testing)
@@ -322,6 +333,36 @@ mod tests {
         ).unwrap();
         let pubkey = derive_public_key(&privkey).unwrap();
         (privkey, pubkey)
+    }
+
+    // An external signer that holds no key in the library: it delegates to a
+    // closure (standing in for an HSM / secure element / signing daemon).
+    struct ExternalSigner { privkey: Vec<u8> }
+    impl Signer for ExternalSigner {
+        fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+            // In reality this call crosses to secure hardware; here we reuse the
+            // in-process primitive to prove the wiring + that the result verifies.
+            KeySigner::from_slice(&self.privkey)?.sign_digest(digest)
+        }
+    }
+
+    #[test]
+    fn test_sign_with_external_signer() {
+        let (privkey, pubkey) = test_keypair();
+        let signer = ExternalSigner { privkey };
+        let token = CapabilityTokenBuilder::new(
+            String::from("OPERATOR"), String::from("SAT-1"), String::from("SAT-2"),
+            String::from("ext-001"), vec![String::from("cmd:compute:inference")],
+        )
+        .valid_for(1705320000, 3600)
+        .sign_with(&signer)
+        .unwrap();
+
+        TokenValidator::new(&token)
+            .at_time(1705320500)
+            .with_issuer_key(&pubkey)
+            .validate()
+            .unwrap();
     }
 
     #[test]

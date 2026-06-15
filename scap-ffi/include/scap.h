@@ -51,6 +51,9 @@ typedef struct scap_task_request scap_task_request_t;
 /* Opaque handle to an execution proof */
 typedef struct scap_execution_proof scap_execution_proof_t;
 
+/* Opaque handle to a signer (in-process key or host callback) */
+typedef struct ScapSigner scap_signer_t;
+
 /* ============================================================================
  * Buffer Types
  * ============================================================================ */
@@ -121,6 +124,37 @@ scap_error_t scap_verify(
     size_t signature_len,
     bool *valid_out
 );
+
+/* ============================================================================
+ * Signer (keeps private keys out of this library when desired)
+ * ============================================================================ */
+
+/* Host signing callback. Receives a 32-byte digest, writes a DER-encoded ECDSA
+ * signature into sig_out (capacity sig_cap), sets *sig_len_out to bytes written,
+ * and returns 0 on success (nonzero = failure). ctx is the opaque pointer passed
+ * to scap_signer_from_callback. Route this to an HSM / secure element / daemon
+ * so the private key never enters this library's address space.
+ */
+typedef int32_t (*scap_sign_callback_t)(
+    void *ctx,
+    const uint8_t digest[32],
+    uint8_t *sig_out,
+    size_t sig_cap,
+    size_t *sig_len_out
+);
+
+/* Create a signer holding a raw 32-byte private key in-process (zeroized on free).
+ * @return Signer handle, or NULL on error. Free with scap_signer_free().
+ */
+scap_signer_t *scap_signer_from_key(const uint8_t private_key[32]);
+
+/* Create a signer that delegates to a host callback (key stays external).
+ * @return Signer handle (never NULL). Free with scap_signer_free().
+ */
+scap_signer_t *scap_signer_from_callback(scap_sign_callback_t cb, void *ctx);
+
+/* Free a signer */
+void scap_signer_free(scap_signer_t *signer);
 
 /* ============================================================================
  * Token Builder
@@ -197,15 +231,30 @@ scap_error_t scap_token_builder_set_delegation(
     uint32_t chain_depth
 );
 
-/* Build and sign the token
+/* Build and sign the token with a raw private key (in-process convenience).
  * @param builder Builder handle (consumed, do not use after this call)
  * @param private_key 32-byte signing key
  * @param token_out Output token handle
  * @return SCAP_OK on success
+ *
+ * On multi-tenant hardware, prefer scap_token_builder_sign_with() with a
+ * callback signer so the key never enters this library's address space.
  */
 scap_error_t scap_token_builder_sign(
     scap_token_builder_t *builder,
     const uint8_t private_key[32],
+    scap_token_t **token_out
+);
+
+/* Build and sign the token using an opaque signer (see scap_signer_*).
+ * @param builder Builder handle (consumed, do not use after this call)
+ * @param signer Signer handle (in-process key or host callback)
+ * @param token_out Output token handle
+ * @return SCAP_OK on success
+ */
+scap_error_t scap_token_builder_sign_with(
+    scap_token_builder_t *builder,
+    const scap_signer_t *signer,
     scap_token_t **token_out
 );
 

@@ -13,6 +13,45 @@ use crate::error::ScapError;
 // Signatures are RFC 6979 deterministic and low-s normalized, byte-compatible
 // with libsecp256k1 — the existing cross-implementation test vectors verify.
 
+/// Produces ECDSA signatures over a 32-byte prehash.
+///
+/// Implement this to keep private keys outside the protocol library — e.g. in a
+/// secure element, TPM, sealed store, or separate signing process. The token
+/// builder calls [`Signer::sign_digest`] with `SHA256(protected)`; the key need
+/// never enter scap-core's address space. [`KeySigner`] is the in-process impl.
+pub trait Signer {
+    /// Sign a 32-byte digest, returning a DER-encoded ECDSA signature.
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError>;
+}
+
+/// In-process signer holding a raw secp256k1 private key.
+///
+/// The key bytes are stored in a [`Zeroizing`] buffer (wiped on drop), and the
+/// transient k256 `SigningKey` is itself `ZeroizeOnDrop`. Prefer an external
+/// [`Signer`] on multi-tenant hardware.
+pub struct KeySigner {
+    key: zeroize::Zeroizing<Vec<u8>>,
+}
+
+impl KeySigner {
+    /// Construct from a 32-byte private key, validating it up front.
+    pub fn from_slice(private_key: &[u8]) -> Result<Self, ScapError> {
+        // Validate by attempting to load it; the SigningKey is dropped (zeroized).
+        SigningKey::from_slice(private_key).map_err(|_| ScapError::InvalidPrivateKey)?;
+        Ok(Self { key: zeroize::Zeroizing::new(private_key.to_vec()) })
+    }
+}
+
+impl Signer for KeySigner {
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+        let signing_key = SigningKey::from_slice(&self.key)
+            .map_err(|_| ScapError::InvalidPrivateKey)?;
+        let sig: Signature = signing_key.sign_prehash(digest)
+            .map_err(|_| ScapError::InvalidSignature)?;
+        Ok(sig.to_der().as_bytes().to_vec())
+    }
+}
+
 /// Compute SHA-256 hash of data
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();

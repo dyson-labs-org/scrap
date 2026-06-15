@@ -193,6 +193,75 @@ pub extern "C" fn scap_verify(
 }
 
 // ============================================================================
+// Signer (opaque) — keeps private keys out of this library when desired
+// ============================================================================
+
+/// Host-provided signing callback. Receives a 32-byte `digest`, writes a
+/// DER-encoded ECDSA signature into `sig_out` (capacity `sig_cap`), sets
+/// `*sig_len_out` to the bytes written, and returns 0 on success (nonzero = fail).
+/// `ctx` is the opaque pointer passed to `scap_signer_from_callback`.
+pub type ScapSignCallback = extern "C" fn(
+    ctx: *mut std::ffi::c_void,
+    digest: *const u8,
+    sig_out: *mut u8,
+    sig_cap: usize,
+    sig_len_out: *mut usize,
+) -> i32;
+
+struct CallbackSigner {
+    cb: ScapSignCallback,
+    ctx: *mut std::ffi::c_void,
+}
+
+impl scap_core::Signer for CallbackSigner {
+    fn sign_digest(&self, digest: &[u8; 32]) -> Result<Vec<u8>, ScapError> {
+        let mut buf = [0u8; 80]; // DER secp256k1 sig is <= 72 bytes
+        let mut len: usize = 0;
+        let rc = (self.cb)(self.ctx, digest.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut len);
+        if rc != 0 || len == 0 || len > buf.len() {
+            return Err(ScapError::InvalidSignature);
+        }
+        Ok(buf[..len].to_vec())
+    }
+}
+
+/// Opaque signer handle. Free with `scap_signer_free`.
+pub struct ScapSigner {
+    inner: Box<dyn scap_core::Signer>,
+}
+
+/// Create a signer that holds a raw 32-byte private key in-process (zeroized on free).
+#[no_mangle]
+pub extern "C" fn scap_signer_from_key(private_key: *const u8) -> *mut ScapSigner {
+    if private_key.is_null() {
+        return ptr::null_mut();
+    }
+    let pk = unsafe { slice::from_raw_parts(private_key, 32) };
+    match scap_core::KeySigner::from_slice(pk) {
+        Ok(s) => Box::into_raw(Box::new(ScapSigner { inner: Box::new(s) })),
+        Err(_) => ptr::null_mut(),
+    }
+}
+
+/// Create a signer that delegates to a host callback (HSM / secure element /
+/// signing daemon). The private key never enters this library's memory.
+#[no_mangle]
+pub extern "C" fn scap_signer_from_callback(
+    cb: ScapSignCallback,
+    ctx: *mut std::ffi::c_void,
+) -> *mut ScapSigner {
+    Box::into_raw(Box::new(ScapSigner { inner: Box::new(CallbackSigner { cb, ctx }) }))
+}
+
+/// Free a signer.
+#[no_mangle]
+pub extern "C" fn scap_signer_free(signer: *mut ScapSigner) {
+    if !signer.is_null() {
+        unsafe { drop(Box::from_raw(signer)); }
+    }
+}
+
+// ============================================================================
 // Token Builder
 // ============================================================================
 
@@ -364,7 +433,40 @@ pub extern "C" fn scap_token_builder_set_delegation(
     ScapErrorCode::Ok as i32
 }
 
-/// Build and sign the token
+/// Reconstruct the core builder from the FFI builder box (consumes it).
+fn core_builder_from(b: Box<ScapTokenBuilder>) -> CapabilityTokenBuilder {
+    let mut tb = CapabilityTokenBuilder::new(b.issuer, b.subject, b.audience, b.jti, b.capabilities)
+        .issued_at(b.issued_at)
+        .expires_at(b.expires_at);
+    if let Some(constraints) = b.constraints {
+        tb = tb.with_constraints(constraints);
+    }
+    if let Some(parent) = b.parent_jti {
+        tb = tb.delegated_from(parent);
+    }
+    if let Some(depth) = b.chain_depth {
+        tb = tb.chain_depth(depth);
+    }
+    tb
+}
+
+fn finish_sign(result: Result<CapabilityToken, ScapError>, token_out: *mut *mut ScapToken) -> i32 {
+    match result {
+        Ok(token) => {
+            unsafe { *token_out = Box::into_raw(Box::new(ScapToken { inner: token })); }
+            ScapErrorCode::Ok as i32
+        }
+        Err(e) => {
+            unsafe { *token_out = ptr::null_mut(); }
+            ScapErrorCode::from(e) as i32
+        }
+    }
+}
+
+/// Build and sign the token with a raw private key (in-process convenience).
+///
+/// On multi-tenant hardware, prefer `scap_token_builder_sign_with` + a callback
+/// signer so the key never enters this library's address space.
 #[no_mangle]
 pub extern "C" fn scap_token_builder_sign(
     builder: *mut ScapTokenBuilder,
@@ -374,43 +476,25 @@ pub extern "C" fn scap_token_builder_sign(
     if builder.is_null() || private_key.is_null() || token_out.is_null() {
         return ScapErrorCode::NullPointer as i32;
     }
-
     let b = unsafe { Box::from_raw(builder) };
     let privkey = unsafe { slice::from_raw_parts(private_key, 32) };
+    finish_sign(core_builder_from(b).sign(privkey), token_out)
+}
 
-    let mut token_builder = CapabilityTokenBuilder::new(
-        b.issuer,
-        b.subject,
-        b.audience,
-        b.jti,
-        b.capabilities,
-    )
-    .issued_at(b.issued_at)
-    .expires_at(b.expires_at);
-
-    if let Some(constraints) = b.constraints {
-        token_builder = token_builder.with_constraints(constraints);
+/// Build and sign the token using an opaque signer (see `scap_signer_*`).
+/// The private key never enters this library when a callback signer is used.
+#[no_mangle]
+pub extern "C" fn scap_token_builder_sign_with(
+    builder: *mut ScapTokenBuilder,
+    signer: *const ScapSigner,
+    token_out: *mut *mut ScapToken,
+) -> i32 {
+    if builder.is_null() || signer.is_null() || token_out.is_null() {
+        return ScapErrorCode::NullPointer as i32;
     }
-
-    if let Some(parent) = b.parent_jti {
-        token_builder = token_builder.delegated_from(parent);
-    }
-
-    if let Some(depth) = b.chain_depth {
-        token_builder = token_builder.chain_depth(depth);
-    }
-
-    match token_builder.sign(privkey) {
-        Ok(token) => {
-            let token_ptr = Box::into_raw(Box::new(ScapToken { inner: token }));
-            unsafe { *token_out = token_ptr; }
-            ScapErrorCode::Ok as i32
-        }
-        Err(e) => {
-            unsafe { *token_out = ptr::null_mut(); }
-            ScapErrorCode::from(e) as i32
-        }
-    }
+    let b = unsafe { Box::from_raw(builder) };
+    let signer = unsafe { &*signer };
+    finish_sign(core_builder_from(b).sign_with(signer.inner.as_ref()), token_out)
 }
 
 // ============================================================================
@@ -740,6 +824,60 @@ mod tests {
         assert!(valid);
 
         scap_buffer_free(&mut signature);
+    }
+
+    // Host callback: signs the digest with a fixed key (stands in for an HSM).
+    extern "C" fn test_sign_cb(
+        _ctx: *mut std::ffi::c_void,
+        digest: *const u8,
+        sig_out: *mut u8,
+        sig_cap: usize,
+        sig_len_out: *mut usize,
+    ) -> i32 {
+        use scap_core::Signer;
+        let d = unsafe { slice::from_raw_parts(digest, 32) };
+        let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(d);
+        let sig = scap_core::KeySigner::from_slice(&privkey).unwrap().sign_digest(&arr).unwrap();
+        if sig.len() > sig_cap { return -1; }
+        unsafe {
+            ptr::copy_nonoverlapping(sig.as_ptr(), sig_out, sig.len());
+            *sig_len_out = sig.len();
+        }
+        0
+    }
+
+    #[test]
+    fn test_callback_signer_ffi() {
+        let issuer = std::ffi::CString::new("OPERATOR").unwrap();
+        let subject = std::ffi::CString::new("SAT-1").unwrap();
+        let audience = std::ffi::CString::new("SAT-2").unwrap();
+        let jti = std::ffi::CString::new("cb-001").unwrap();
+        let cap = std::ffi::CString::new("cmd:compute:inference").unwrap();
+
+        let builder = scap_token_builder_new(issuer.as_ptr(), subject.as_ptr(), audience.as_ptr(), jti.as_ptr());
+        scap_token_builder_add_capability(builder, cap.as_ptr());
+        scap_token_builder_set_validity(builder, 1705320000, 1705406400);
+
+        let signer = scap_signer_from_callback(test_sign_cb, ptr::null_mut());
+        assert!(!signer.is_null());
+
+        let mut token: *mut ScapToken = ptr::null_mut();
+        let rc = scap_token_builder_sign_with(builder, signer, &mut token);
+        assert_eq!(rc, 0);
+        assert!(!token.is_null());
+
+        // Verify it validates against the operator pubkey derived from the same key.
+        let privkey = hex::decode("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").unwrap();
+        let mut pubkey = [0u8; 33];
+        scap_derive_public_key(privkey.as_ptr(), pubkey.as_mut_ptr());
+        let rc = scap_token_validate(token, 1705320500, pubkey.as_ptr());
+        assert_eq!(rc, 0, "callback-signed token should validate");
+
+        scap_signer_free(signer);
+        scap_token_free(token);
+        let _ = test_sign_cb; // silence unused in some cfgs
     }
 
     #[test]

@@ -56,7 +56,9 @@ pub use crypto::{
     sha256,
     derive_public_key,
     compute_binding_hash,
-    compute_proof_hash
+    compute_proof_hash,
+    Signer,
+    KeySigner,
 };
 
 // Re-export CBOR functions
