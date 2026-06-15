@@ -91,6 +91,16 @@
   .notbox p { margin:0; font-size:13.5px; color:#d7c6a8; line-height:1.5; }
   pre .attest { background:rgba(255,180,84,.16); border-radius:3px; }
   .attest-note { color:var(--warn); font-size:11px; font-family:var(--mono); margin-top:6px; }
+  .settle-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin:6px 0 4px; }
+  .settle-card { background:var(--panel2); border:1px solid var(--line); border-radius:9px; padding:14px 16px; }
+  .settle-card.ok { border-color:rgba(55,214,122,.45); }
+  .settle-card.refund { border-color:rgba(255,180,84,.45); }
+  .settle-h { font-weight:600; font-size:13px; margin-bottom:10px; }
+  .settle-card.ok .settle-h { color:var(--ok); }
+  .settle-card.refund .settle-h { color:var(--warn); }
+  .settle-flow { font:12.5px/1.7 var(--mono); color:var(--dim); }
+  .settle-flow b { color:var(--ink); font-weight:600; }
+  @media (max-width:760px){ .settle-grid { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -148,8 +158,25 @@
   </div>
 
   <!-- 4 -->
+  <div class="step">
+    <h2><span class="n">4</span>Atomic settlement <span class="tag">timeout-default fair exchange</span></h2>
+    <p class="sub">Payment and delivery are bound by one secret. The payment HTLC is locked to <code>payment_hash H</code>; the executor can only claim it by revealing the preimage <code>R</code> (where SHA256(R)=H) — and revealing R <i>is</i> delivering the receipt. No trusted escrow: either the executor delivers and is paid, or the timeout refunds the customer. SCRAP spec §6.8, "Proof Model: Delivery Only."</p>
+    <div class="settle-grid">
+      <div class="settle-card" id="settleDeliver">
+        <div class="settle-h">Executor delivers</div>
+        <div class="settle-flow" id="flowDeliver"></div>
+      </div>
+      <div class="settle-card" id="settleTimeout">
+        <div class="settle-h">Executor does nothing</div>
+        <div class="settle-flow" id="flowTimeout"></div>
+      </div>
+    </div>
+    <div class="meta" id="settleMeta"></div>
+  </div>
+
+  <!-- 5 -->
   <div class="step integration">
-    <h2><span class="n">4</span>Integration as an optional layer</h2>
+    <h2><span class="n">5</span>Integration as an optional layer</h2>
     <p class="sub">SCRAP is additive. It follows OGC-API / STAPI conformance classes — an operator advertises only what they run. An existing compute marketplace adopts it with one adapter: accepted job order → signed capability token. Settlement stays opt-in.</p>
     <table>
       <tr><td>/conf/core</td><td><span class="tag req">REQUIRED</span> landing · conformance · operator identity (pubkey)</td></tr>
@@ -159,6 +186,19 @@
       <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (Dyson-operated coordination)</td></tr>
     </table>
     <pre id="adapterView" style="margin-top:14px"></pre>
+  </div>
+
+  <!-- 6 -->
+  <div class="step">
+    <h2><span class="n">6</span>Deployment footprint <span class="tag">measured, not estimated</span></h2>
+    <p class="sub">The verifier (<code>scap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build (<code>size libscap_ffi.so</code>).</p>
+    <table>
+      <tr><td>Library text size</td><td><b>~1.5 MB</b> (libscap_ffi.so, release; dominated by bundled libsecp256k1)</td></tr>
+      <tr><td>no_std</td><td>core is <code>#![no_std]</code> + <code>alloc</code> — runs without an OS on the flight computer</td></tr>
+      <tr><td>Targets</td><td><code>aarch64-unknown-linux-gnu</code> (Jetson Orin payload) · cross-compiles to the OBC</td></tr>
+      <tr><td>Randomness</td><td><b>None required</b> — RFC 6979 deterministic ECDSA; no entropy source, reproducible (radiation-friendly)</td></tr>
+      <tr><td>Key isolation</td><td>multi-tenant nodes: signing key belongs behind an external signer / sealed store — <span class="tag opt">hardening tracked</span></td></tr>
+    </table>
   </div>
 
   <div class="foot" id="foot"></div>
@@ -471,7 +511,29 @@ function render() {
   // clear audit results until re-run
   document.getElementById('checks').innerHTML = '';
   document.getElementById('verdict').className = 'verdict';
+  renderSettlement(rec);
   renderAdapter();
+}
+
+function renderSettlement(rec) {
+  document.getElementById('settleDeliver').classList.add('ok');
+  document.getElementById('settleTimeout').classList.add('refund');
+  document.getElementById('flowDeliver').innerHTML =
+    '1. customer locks payment to <b>H</b>\n' +
+    '2. executor runs job, returns receipt\n' +
+    '3. executor reveals <b>R</b> (= preimage of H)\n' +
+    '4. revealing R <b>claims the payment</b>\n' +
+    '   → and R is the customer’s receipt\n' +
+    '<b style="color:var(--ok)">✓ executor paid · customer has proof</b>';
+  document.getElementById('flowTimeout').innerHTML =
+    '1. customer locks payment to <b>H</b>\n' +
+    '2. executor never delivers / never reveals R\n' +
+    '3. HTLC timeout (<b>'+rec.receipt.runtime_s+'s</b> job · blocks elapse)\n' +
+    '4. funds <b>return to the customer</b>\n' +
+    '   no escrow, no arbiter needed\n' +
+    '<b style="color:var(--warn)">↩ customer refunded · executor unpaid</b>';
+  document.getElementById('settleMeta').textContent =
+    'One secret R binds payment to delivery. There is no third outcome: no party can take the money without delivering, and no party can withhold a delivered payment.';
 }
 function scenarioText(){
   return {
