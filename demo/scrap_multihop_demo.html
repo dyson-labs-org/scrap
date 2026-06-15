@@ -11,7 +11,7 @@
   Forward: source-routed, onion-wrapped (spec §5.5) — each hop peels one layer, sees only
   the next hop. Backward: custody/output receipts + the preimage-R settlement cascade
   (spec §5.4, §5.7). NOTE: single-hop is normative; this multi-hop receipt chaining is
-  designed and demonstrated here, with spec §5/§6 text landing next (tracked: kb-7c7062).
+  implemented and demonstrated here, with normative spec §5/§6 text in review (tracked: kb-7c7062).
   ../spec/SCRAP.md §5 · ../schemas/scrap.cddl
 -->
 <html lang="en">
@@ -83,7 +83,7 @@
 <body>
 <header>
   <h1><span>SCRAP</span> — Accountability across a federated operator mesh</h1>
-  <p>This is the Satlyt marketplace at scale: one customer task crossing Operator A → B → C, each independently paid and accountable. SCRAP carries it onion-wrapped, so each hop sees only the next, and assembles end-to-end proof from the parties' public keys. The mechanism is <b>countersigned receipts</b>: every hop signs custody when it receives the bundle, and each hop's execution is vouched by the <i>next</i> hop's signature rather than its own. A governance body like Kenya's NEODC can replay the whole chain afterward.</p>
+  <p>This is the Satlyt marketplace at scale: one customer task crossing Operator A → B → C, each independently paid and accountable. SCRAP carries it onion-wrapped, so each hop sees only the next, and assembles end-to-end proof that anyone can re-check. The mechanism is <b>countersigned receipts</b>: every hop signs custody when it receives the bundle, and each hop's execution is vouched by the <i>next</i> hop's signature rather than its own. A governance body like Kenya's NEODC can replay the whole chain afterward.</p>
 </header>
 
 <div class="wrap">
@@ -403,7 +403,7 @@ function renderOnion() {
 }
 function renderCascade() {
   document.getElementById('cascade').innerHTML =
-    'lock:   customer → N1op → N2op → N3op   (HTLC, same hash H; timeouts T, T-144, T-288)\n' +
+    'lock:   customer → N1op → N2op → N3op   (HTLC, same hash H; block-height timeouts T, T-144, T-288 — ~144 blocks ≈ 1 day)\n' +
     'reveal: N3op --R--> N2op --R--> N1op --> customer   (preimage cascades backward)\n' +
     'R = ' + shortHex(PREIMAGE_R) + '   H = SHA256(R) = ' + shortHex(PAYMENT_HASH) + '\n' +
     '✓ payee paid first, each upstream settles on seeing R; timeout refunds if no R';
@@ -468,7 +468,7 @@ function toggle(name){
 document.getElementById('btnVerify').onclick = runVerify;
 for(const n of Object.keys(TAMPERS)) document.getElementById(TAMPERS[n].btn).onclick = ()=>toggle(n);
 document.getElementById('foot').textContent =
-  'Real secp256k1 + SHA-256 in-browser, no network. Single-hop is normative (spec §4.4/§6.8); this multi-hop receipt chaining is designed and demonstrated here, with spec text landing next (kb-7c7062). ../spec/SCRAP.md §5';
+  'Real secp256k1 + SHA-256 in-browser, no network. Single-hop is normative (spec §4.4/§6.8); this multi-hop receipt chaining is implemented and demonstrated here, with normative spec text in review (kb-7c7062). ../spec/SCRAP.md §5';
 render();
 </script>
 </body>

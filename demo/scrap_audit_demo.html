@@ -115,7 +115,7 @@
 </header>
 
 <div class="wrap">
-  <div class="banner"><b>Runs today on the host you deploy.</b> The verifier is a ~490 KB pure-Rust library — ARM64 Jetson Orin payloads or <code>no_std</code> flight computers, no C toolchain, no entropy source. Full numbers in §6.</div>
+  <div class="banner"><b>Runs today on the host you deploy.</b> The verifier is ~490 KB of text (pure-Rust) — ARM64 Jetson Orin payloads or <code>no_std</code> flight computers, no C toolchain, no entropy source. Full numbers in §6.</div>
   <div class="parties">
     <div class="party"><div class="role">Issuer</div><div class="name" id="p-op">Operator&nbsp;A — task authority</div><div class="key" id="k-op"></div></div>
     <div class="party"><div class="role">Executor</div><div class="name" id="p-ex">Satlyt node (DiskSat-07)</div><div class="key" id="k-ex"></div></div>
@@ -133,7 +133,7 @@
   <!-- 2 -->
   <div class="step">
     <h2><span class="n">2</span>Execution receipt <span class="tag">signed delivery proof + reported metadata</span></h2>
-    <p class="sub">The node returns a proof binding the <b>delivered output</b> to the payment and a timestamp under its signature (the exact preimage scrap-core's <code>compute_proof_hash</code> signs). Which model ran and in which region are <b>executor-reported <code>output_metadata</code></b> (amber): carried in the receipt but not covered by that signature and not verified by SCRAP. What is cryptographically pinned is the operator-signed <i>authorization</i> (§1) and the <i>delivery</i> (<code>output_hash</code>). <b>Need model and region cryptographically bound — to bill or to prove compliance on them?</b> That is the optional compute-profile extension (§5), not a trust root.</p>
+    <p class="sub">The node returns a proof binding the <b>delivered output</b> to the payment and a timestamp under its signature (the exact preimage scrap-core's <code>compute_proof_hash</code> signs). Which model ran and in which region are <b>executor-reported <code>output_metadata</code></b> (amber): carried in the receipt but not covered by that signature and not verified by SCRAP. What is cryptographically pinned is the operator-signed <i>authorization</i> (§1) and the <i>delivery</i> (<code>output_hash</code>). To bill or prove compliance on the model and region, bind them cryptographically with the optional compute-profile extension (§5) — an added layer, not a trust root.</p>
     <pre id="receiptView"></pre>
     <div class="meta" id="receiptMeta"></div>
   </div>
@@ -189,7 +189,7 @@
       <tr><td>/conf/nodes</td><td><span class="tag req">REQUIRED</span> compute-node catalog (maps to STAPI <code>products</code>)</td></tr>
       <tr><td>/conf/tokens</td><td><span class="tag req">REQUIRED</span> <code>POST /tokens</code> — issues SAT-CAP (replaces marketplace <code>order</code>)</td></tr>
       <tr><td>/conf/receipts</td><td><span class="tag opt">OPTIONAL</span> fetch / re-verify execution receipts</td></tr>
-      <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (Dyson-coordinated channel routing — non-custodial; no party holds funds)</td></tr>
+      <tr><td>/conf/lightning</td><td><span class="tag opt">OPTIONAL</span> payment binding &amp; settlement (non-custodial Lightning channel routing; no party holds funds)</td></tr>
     </table>
     <pre id="adapterView" style="margin-top:14px"></pre>
   </div>
@@ -467,7 +467,7 @@ function buildReceipt() {
 }
 
 // Audit (third party, public keys only) -----------------------------------------
-// Every check here is decidable from public keys alone — no trust root, no oracle.
+// Every check here verifies from signatures alone; no trust root, no oracle.
 function audit(tok, rec) {
   const okSig = state.tokenSigValid && verify(OP_PUB, tok.signingInput, tok.sig);
   const r = rec.receipt;
