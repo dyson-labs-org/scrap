@@ -8,14 +8,18 @@ repository = "https://github.com/dysonlabs/scap"
 
 [features]
 default = ["std"]
-std = ["ciborium/std", "secp256k1/std", "sha2/std"]
+std = ["ciborium/std", "k256/std", "sha2/std", "zeroize/std"]
 
 [dependencies]
 # CBOR serialization (no_std compatible)
 ciborium = { version = "0.2", default-features = false }
 
-# secp256k1 for signing/verification
-secp256k1 = { version = "0.29", default-features = false, features = ["alloc"] }
+# Pure-Rust secp256k1 (no C toolchain). ECDSA signing/verification; k256 keys are
+# ZeroizeOnDrop, so private-key material is wiped automatically on drop.
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "alloc"] }
+
+# Explicit zeroization of any raw key buffers we hold transiently.
+zeroize = { version = "1", default-features = false }
 
 # Serde for derive macros
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

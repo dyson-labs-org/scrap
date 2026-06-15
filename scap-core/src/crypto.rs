@@ -4,8 +4,14 @@
 
 use alloc::vec::Vec;
 use sha2::{Sha256, Digest};
-use secp256k1::{Secp256k1, Message, SecretKey, PublicKey as SecpPublicKey};
+use k256::ecdsa::{SigningKey, VerifyingKey, Signature};
+use k256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
 use crate::error::ScapError;
+
+// Pure-Rust secp256k1 (k256). No global context to allocate per call, and
+// SigningKey is ZeroizeOnDrop so secret material is wiped automatically.
+// Signatures are RFC 6979 deterministic and low-s normalized, byte-compatible
+// with libsecp256k1 — the existing cross-implementation test vectors verify.
 
 /// Compute SHA-256 hash of data
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -14,55 +20,46 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Sign a message with a private key
+/// Sign a message with a private key.
 ///
-/// The message is hashed with SHA-256 before signing.
-/// Returns the DER-encoded ECDSA signature.
+/// The message is hashed with SHA-256 before signing. Returns the DER-encoded
+/// ECDSA signature (RFC 6979 deterministic, low-s).
 pub fn sign_message(private_key: &[u8], message: &[u8]) -> Result<Vec<u8>, ScapError> {
-    let secp = Secp256k1::new();
-
-    let secret_key = SecretKey::from_slice(private_key)
+    let signing_key = SigningKey::from_slice(private_key)
         .map_err(|_| ScapError::InvalidPrivateKey)?;
 
     let msg_hash = sha256(message);
-    let msg = Message::from_digest(msg_hash);
+    let sig: Signature = signing_key.sign_prehash(&msg_hash)
+        .map_err(|_| ScapError::InvalidSignature)?;
 
-    let sig = secp.sign_ecdsa(&msg, &secret_key);
-    Ok(sig.serialize_der().to_vec())
+    Ok(sig.to_der().as_bytes().to_vec())
 }
 
-/// Verify a signature against a public key
+/// Verify a DER-encoded signature against a public key.
 ///
 /// The message is hashed with SHA-256 before verification.
-/// Signature should be DER-encoded.
 pub fn verify_signature(
     public_key: &[u8],
     message: &[u8],
     signature: &[u8],
 ) -> Result<bool, ScapError> {
-    let secp = Secp256k1::new();
-
-    let pubkey = SecpPublicKey::from_slice(public_key)
+    let verifying_key = VerifyingKey::from_sec1_bytes(public_key)
         .map_err(|_| ScapError::InvalidPublicKey)?;
 
-    let sig = secp256k1::ecdsa::Signature::from_der(signature)
+    let sig = Signature::from_der(signature)
         .map_err(|_| ScapError::InvalidSignature)?;
 
     let msg_hash = sha256(message);
-    let msg = Message::from_digest(msg_hash);
-
-    Ok(secp.verify_ecdsa(&msg, &sig, &pubkey).is_ok())
+    Ok(verifying_key.verify_prehash(&msg_hash, &sig).is_ok())
 }
 
-/// Derive public key from private key
+/// Derive the compressed (33-byte) public key from a private key.
 pub fn derive_public_key(private_key: &[u8]) -> Result<Vec<u8>, ScapError> {
-    let secp = Secp256k1::new();
-
-    let secret_key = SecretKey::from_slice(private_key)
+    let signing_key = SigningKey::from_slice(private_key)
         .map_err(|_| ScapError::InvalidPrivateKey)?;
 
-    let public_key = SecpPublicKey::from_secret_key(&secp, &secret_key);
-    Ok(public_key.serialize().to_vec())
+    let verifying_key = signing_key.verifying_key();
+    Ok(verifying_key.to_encoded_point(true).as_bytes().to_vec())
 }
 
 /// Compute binding hash for payment-capability binding

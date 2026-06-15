@@ -193,11 +193,12 @@
     <h2><span class="n">6</span>Deployment footprint <span class="tag">measured, not estimated</span></h2>
     <p class="sub">The verifier (<code>scap-core</code> + C FFI) is built for the host hardware Satlyt deploys onto — ARM64 Linux payload computers (NVIDIA Jetson Orin) and, in <code>no_std</code> form, radiation-tolerant FPGA/MCU flight computers. Numbers below are from an actual release build (<code>size libscap_ffi.so</code>).</p>
     <table>
-      <tr><td>Library text size</td><td><b>~1.5 MB</b> (libscap_ffi.so, release; dominated by bundled libsecp256k1)</td></tr>
+      <tr><td>Library text size</td><td><b>~490 KB</b> (libscap_ffi.so, release) — pure-Rust crypto (<code>k256</code>), no bundled C library</td></tr>
+      <tr><td>Toolchain</td><td><b>No C cross-compiler needed</b> — 100% Rust; one <code>cargo build --target …</code> for the OBC</td></tr>
       <tr><td>no_std</td><td>core is <code>#![no_std]</code> + <code>alloc</code> — runs without an OS on the flight computer</td></tr>
       <tr><td>Targets</td><td><code>aarch64-unknown-linux-gnu</code> (Jetson Orin payload) · cross-compiles to the OBC</td></tr>
       <tr><td>Randomness</td><td><b>None required</b> — RFC 6979 deterministic ECDSA; no entropy source, reproducible (radiation-friendly)</td></tr>
-      <tr><td>Key isolation</td><td>multi-tenant nodes: signing key belongs behind an external signer / sealed store — <span class="tag opt">hardening tracked</span></td></tr>
+      <tr><td>Key handling</td><td>private keys are <b>zeroized on drop</b> (<code>k256</code> ZeroizeOnDrop); external-signer / sealed-store binding <span class="tag opt">in progress</span></td></tr>
     </table>
   </div>
 
