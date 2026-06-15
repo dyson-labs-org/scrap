@@ -120,8 +120,9 @@ struct HtlcTimeoutComputed {
 
 fn load_test_vectors() -> TestVectors {
     let paths = [
-        "../test_vectors_computed.json",
-        "../../test_vectors_computed.json",
+        "../test-vectors/computed.json",
+        "../../test-vectors/computed.json",
+        "test-vectors/computed.json",
     ];
 
     for path in &paths {

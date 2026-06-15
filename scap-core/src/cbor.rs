@@ -147,6 +147,38 @@ mod tests {
     }
 
     #[test]
+    fn test_signing_input_reencode_is_deterministic() {
+        // SECURITY-CRITICAL: signature verification re-encodes header+payload and
+        // checks the signature against the RE-ENCODED bytes (token.rs validate()).
+        // That is only sound if encoding is deterministic: decode→re-encode MUST
+        // reproduce the original signed bytes exactly. This guards the property for
+        // this implementation. Cross-implementation interop additionally requires
+        // the wire format to pin canonical CBOR (tracked: C1 — sign over opaque bstr).
+        let payload = CapPayload {
+            iss: String::from("OPERATOR-A"),
+            sub: String::from("SAT-RELAY"),
+            aud: String::from("SAT-EXEC"),
+            iat: 1705320000,
+            exp: 1705406400,
+            jti: String::from("job-inf-2026-0042"),
+            cap: vec![String::from("cmd:compute:inference")],
+            cns: None,
+            prf: None,
+            cmd_pub: None,
+        };
+        let header = CapHeader::default();
+
+        let h1 = encode_header(&header).unwrap();
+        let p1 = encode_payload(&payload).unwrap();
+
+        // decode then re-encode; bytes must be identical
+        let header2: CapHeader = decode_header(&h1).unwrap();
+        let payload2: CapPayload = decode_payload(&p1).unwrap();
+        assert_eq!(h1, encode_header(&header2).unwrap(), "header re-encode not byte-identical");
+        assert_eq!(p1, encode_payload(&payload2).unwrap(), "payload re-encode not byte-identical");
+    }
+
+    #[test]
     fn test_execution_proof_roundtrip() {
         let proof = ExecutionProof {
             task_jti: String::from("test-001"),

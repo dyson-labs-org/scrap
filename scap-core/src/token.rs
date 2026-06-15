@@ -116,6 +116,7 @@ pub struct TokenValidator<'a> {
     token: &'a CapabilityToken,
     current_time: Option<Timestamp>,
     issuer_pubkey: Option<&'a [u8]>,
+    parent: Option<&'a CapabilityToken>,
 }
 
 impl<'a> TokenValidator<'a> {
@@ -125,6 +126,7 @@ impl<'a> TokenValidator<'a> {
             token,
             current_time: None,
             issuer_pubkey: None,
+            parent: None,
         }
     }
 
@@ -137,6 +139,14 @@ impl<'a> TokenValidator<'a> {
     /// Set the issuer's public key for signature verification
     pub fn with_issuer_key(mut self, pubkey: &'a [u8]) -> Self {
         self.issuer_pubkey = Some(pubkey);
+        self
+    }
+
+    /// Supply the parent token so delegation attenuation (child ⊆ parent) is
+    /// enforced. Required to validate a `SAT-CAP-DEL` token's authority — without
+    /// it, a delegation's capabilities cannot be checked against what it inherited.
+    pub fn with_parent(mut self, parent: &'a CapabilityToken) -> Self {
+        self.parent = Some(parent);
         self
     }
 
@@ -159,6 +169,43 @@ impl<'a> TokenValidator<'a> {
         // Check delegation consistency
         if self.token.header.typ == "SAT-CAP-DEL" && self.token.payload.prf.is_none() {
             return Err(ScapError::MissingField(String::from("prf (parent reference required for delegation)")));
+        }
+
+        // Enforce delegation attenuation against the parent (child ⊆ parent).
+        if self.token.header.typ == "SAT-CAP-DEL" {
+            if let Some(parent) = self.parent {
+                // prf must name the parent
+                if self.token.payload.prf.as_deref() != Some(parent.payload.jti.as_str()) {
+                    return Err(ScapError::ConstraintViolation(
+                        alloc::format!("prf does not reference parent jti: {}", parent.payload.jti)
+                    ));
+                }
+                // chain depth must increase by exactly one (root = 0)
+                let parent_depth = parent.header.chn.unwrap_or(0);
+                if let Some(child_depth) = self.token.header.chn {
+                    if child_depth != parent_depth + 1 {
+                        return Err(ScapError::ConstraintViolation(
+                            alloc::format!("chain depth {} is not parent depth {} + 1", child_depth, parent_depth)
+                        ));
+                    }
+                }
+                // every delegated capability must be authorized by the parent
+                for cap in &self.token.payload.cap {
+                    let authorized = parent.payload.cap.iter()
+                        .any(|granted| capability_matches(granted, cap));
+                    if !authorized {
+                        return Err(ScapError::InvalidCapability(
+                            alloc::format!("delegated capability exceeds parent grant: {}", cap)
+                        ));
+                    }
+                }
+                // a delegation must not outlive its parent
+                if self.token.payload.exp > parent.payload.exp {
+                    return Err(ScapError::ConstraintViolation(String::from(
+                        "delegation expiry exceeds parent expiry"
+                    )));
+                }
+            }
         }
 
         // Check time validity
@@ -413,6 +460,65 @@ mod tests {
         assert!(!capability_matches("cmd:imaging:msi", "cmd:imaging"));
         assert!(!capability_matches("cmd:propulsion", "cmd:imaging:msi"));
         assert!(!capability_matches("relay:task", "cmd:imaging:msi"));
+    }
+
+    fn parent_and_child(child_caps: Vec<String>, child_exp_secs: u64) -> (CapabilityToken, CapabilityToken) {
+        let (privkey, _) = test_keypair();
+        let parent = CapabilityTokenBuilder::new(
+            String::from("OPERATOR-A"), String::from("SAT-RELAY"), String::from("SAT-EXEC"),
+            String::from("parent-001"),
+            vec![String::from("cmd:compute:inference"), String::from("relay:task:forward")],
+        ).valid_for(1705320000, 7200).sign(&privkey).unwrap();
+
+        let child = CapabilityTokenBuilder::new(
+            String::from("SAT-RELAY"), String::from("SAT-EXEC"), String::from("SAT-EXEC-2"),
+            String::from("child-001"), child_caps,
+        )
+        .delegated_from(String::from("parent-001"))
+        .chain_depth(1)
+        .valid_for(1705320000, child_exp_secs)
+        .sign(&privkey).unwrap();
+        (parent, child)
+    }
+
+    #[test]
+    fn test_delegation_attenuation_ok() {
+        // child requests a subset of the parent's grant
+        let (parent, child) = parent_and_child(vec![String::from("cmd:compute:inference")], 3600);
+        TokenValidator::new(&child)
+            .at_time(1705320500)
+            .with_parent(&parent)
+            .validate()
+            .unwrap();
+    }
+
+    #[test]
+    fn test_delegation_exceeds_parent() {
+        // child claims a capability the parent never granted
+        let (parent, child) = parent_and_child(vec![String::from("cmd:propulsion:burn")], 3600);
+        let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&parent).validate();
+        assert!(matches!(result, Err(ScapError::InvalidCapability(_))));
+    }
+
+    #[test]
+    fn test_delegation_outlives_parent() {
+        // child expires after the parent
+        let (parent, child) = parent_and_child(vec![String::from("cmd:compute:inference")], 999999);
+        let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&parent).validate();
+        assert!(matches!(result, Err(ScapError::ConstraintViolation(_))));
+    }
+
+    #[test]
+    fn test_delegation_wrong_parent() {
+        // prf does not reference the supplied parent
+        let (privkey, _) = test_keypair();
+        let (_, child) = parent_and_child(vec![String::from("cmd:compute:inference")], 3600);
+        let other_parent = CapabilityTokenBuilder::new(
+            String::from("OPERATOR-A"), String::from("X"), String::from("Y"),
+            String::from("some-other-jti"), vec![String::from("cmd:compute:inference")],
+        ).valid_for(1705320000, 7200).sign(&privkey).unwrap();
+        let result = TokenValidator::new(&child).at_time(1705320500).with_parent(&other_parent).validate();
+        assert!(matches!(result, Err(ScapError::ConstraintViolation(_))));
     }
 
     #[test]
