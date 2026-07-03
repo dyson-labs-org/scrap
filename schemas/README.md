@@ -30,6 +30,13 @@ CDDL (Concise Data Definition Language, RFC 8610) schemas for SCRAP protocol mes
 | `lightning-wrapper` | BOLT message encapsulation |
 | `heartbeat` | Keepalive with channel state |
 
+### Settlement Extensions
+
+| Type | Description | Schema Reference |
+|------|-------------|------------------|
+| `fee-bearing-settlement-record` | Optional signed fee terms for recognized transactions; not part of the core ISL payload union unless a future profile adopts it | Optional fee-bearing settlement record |
+
+
 ### Auction (Optional)
 
 | Type | Description |

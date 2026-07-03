@@ -162,6 +162,49 @@ dispute-evidence = {
 }
 
 ; =============================================================================
+; OPTIONAL FEE-BEARING SETTLEMENT RECORD
+; =============================================================================
+
+; Additive settlement-term record for recognized transactions. This record is
+; not referenced by the core ISL payload union unless a future profile adopts it.
+; It binds fee terms to signed transaction or receipt hashes and does not prove
+; off-chain payment, delivery, legal finality, or service success by itself.
+fee-mode = "connected" / "accrued" / "prepaid_credit" / "federation_required"
+
+fee-status =
+    "not_applicable" /
+    "quoted" /
+    "accrued" /
+    "invoiced" /
+    "paid" /
+    "prepaid_credit_reserved" /
+    "prepaid_credit_burned" /
+    "exported_for_true_up" /
+    "disputed" /
+    "voided"
+
+fee-amount = {
+    amount: uint,
+    currency: tstr .size (3..8)
+}
+
+fee-bearing-settlement-record = {
+    recognized_transaction: bool,
+    settlement_record_hash: sha256-hash,
+    fee_bps: uint,
+    fee_amount: fee-amount,
+    ? fee_receiver: tstr,
+    fee_mode: fee-mode,
+    fee_status: fee-status,
+    ? fee_receipt_hash: sha256-hash,
+    ? fee_settlement_hash: sha256-hash,
+    ? fee_credit_id: tstr,
+    ? fee_credit_burn_hash: sha256-hash,
+    signatures: [+ ecdsa-signature],
+    * tstr => any
+}
+
+; =============================================================================
 ; TASK RESPONSE MESSAGES
 ; =============================================================================
 
