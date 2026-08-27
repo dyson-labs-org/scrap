@@ -2989,6 +2989,54 @@ SISL sessions have limited duration (ISL contact window). SCRAP must complete wi
 
 ---
 
+## Optional Fee-Bearing Settlement Records
+
+SCRAP can carry optional fee-bearing settlement records for recognized
+transactions without changing the core receipt verification model. A
+fee-bearing record binds fee terms to a quote, order, receipt, or settlement
+event by signatures and content hashes. It is additive: existing capability
+tokens, bound task requests, execution proofs, and dispute messages remain
+verifiable without a network call.
+
+Design constraints:
+
+- No new trust root is introduced. Verifiers check the signing keys and trust
+  policy they already accept for the related transaction.
+- Receipt verification must remain local and offline-capable.
+- Payload data remains off-protocol; records should carry hashes and references,
+  not raw payloads.
+- A fee-bearing record does not prove off-chain payment, delivery, provider
+  success, legal finality, or service success by itself.
+- A fee-bearing record does not prevent stripped or private forks from removing
+  fee logic.
+
+Suggested fields for additive records include `recognized_transaction`,
+`fee_bps`, `fee_amount`, `fee_receiver`, `fee_mode`, `fee_status`,
+`fee_receipt_hash`, `fee_settlement_hash`, `fee_credit_id`,
+`fee_credit_burn_hash`, `settlement_record_hash`, and `signatures`.
+
+Fee modes use these labels unless a transport profile explicitly maps them:
+
+- `connected`: fee is collected through a connected settlement rail.
+- `accrued`: fee accrues offline for later true-up.
+- `prepaid_credit`: fee consumes a prepaid credit record.
+- `federation_required`: counterparties require a fee-bearing receipt for
+  recognized participation.
+
+Fee statuses should be conservative. Initial status vocabulary is
+`not_applicable`, `quoted`, `accrued`, `invoiced`, `paid`,
+`prepaid_credit_reserved`, `prepaid_credit_burned`, `exported_for_true_up`,
+`disputed`, and `voided`.
+
+For Dyson-recognized transactions, a 1% fee can be represented as
+`fee_bps = 100`. That value is a signed settlement term for recognized
+participation, support, federation, insurance or audit workflows, certified
+adapters, and other official participation paths. It is not SaaS telemetry or a
+cryptographic guarantee against private forks.
+
+---
+
+
 ## 17. References
 
 ### Standards
