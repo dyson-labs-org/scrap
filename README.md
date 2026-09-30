@@ -10,7 +10,7 @@ SCRAP complements **SISL** (Secure Inter-Satellite Link) at the link layer.
 
 **Target**: Flight demonstration in orbit with ISL capability
 
-**TRL**: 4 (Technology validated in the lab)
+**TRL**: 5 (Technology validated in relevant environment, AWS downlink)
 
 ## Overview
 
