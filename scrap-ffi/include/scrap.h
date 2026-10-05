@@ -383,6 +383,22 @@ scrap_error_t scrap_compute_proof_hash(
  * Version Information
  * ============================================================================ */
 
+/* Verify a root online-operation token against mandatory trusted expectations.
+ * issuer_key must contain 33 bytes. All identity strings are NUL-terminated UTF-8.
+ * Current ownership, revocation, resource scope and budgets remain caller duties.
+ */
+scrap_error_t scrap_verify_operation(
+    const uint8_t *data,
+    size_t data_len,
+    const uint8_t issuer_key[33],
+    const char *issuer,
+    const char *subject,
+    const char *audience,
+    const char *capability,
+    const char *grant_digest,
+    uint64_t now
+);
+
 /* Get library version string */
 const char *scrap_version(void);
 

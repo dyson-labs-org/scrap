@@ -921,3 +921,63 @@ mod tests {
         scrap_token_free(token);
     }
 }
+
+/// Strict online-grant verification; all expected identities and the key are mandatory.
+///
+/// C callers must supply valid buffers of the declared lengths and NUL-terminated
+/// UTF-8 identity strings. No application authorization or usage ledger is owned here.
+#[no_mangle]
+pub extern "C" fn scrap_verify_operation(
+    data: *const u8,
+    data_len: usize,
+    issuer_key: *const u8,
+    issuer: *const c_char,
+    subject: *const c_char,
+    audience: *const c_char,
+    capability: *const c_char,
+    grant_digest: *const c_char,
+    now: u64,
+) -> i32 {
+    if data.is_null()
+        || issuer_key.is_null()
+        || issuer.is_null()
+        || subject.is_null()
+        || audience.is_null()
+        || capability.is_null()
+        || grant_digest.is_null()
+    {
+        return ScrapErrorCode::NullPointer as i32;
+    }
+    if data_len == 0 || data_len > 16_384 {
+        return ScrapErrorCode::CborDecode as i32;
+    }
+    let strings = unsafe {
+        [issuer, subject, audience, capability, grant_digest]
+            .iter()
+            .map(|p| CStr::from_ptr(*p).to_str())
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let strings = match strings {
+        Ok(strings) => strings,
+        Err(_) => return ScrapErrorCode::InvalidCapability as i32,
+    };
+    let authority = scrap_core::authority::OperationAuthority {
+        issuer: strings[0],
+        subject: strings[1],
+        audience: strings[2],
+        capability: strings[3],
+        grant_digest: strings[4],
+        now,
+    };
+    let result = unsafe {
+        scrap_core::authority::verify_operation(
+            slice::from_raw_parts(data, data_len),
+            slice::from_raw_parts(issuer_key, 33),
+            &authority,
+        )
+    };
+    match result {
+        Ok(_) => ScrapErrorCode::Ok as i32,
+        Err(e) => ScrapErrorCode::from(e) as i32,
+    }
+}
