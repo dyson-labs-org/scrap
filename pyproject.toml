@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scrap-authority"
+version = "0.1.0"
+description = "SCRAP root operation authority through the upstream Rust implementation"
+requires-python = ">=3.11"
+license = "MIT"
+
+[tool.setuptools.packages.find]
+where = ["bindings/python"]

@@ -1,0 +1,4 @@
+include Cargo.toml Cargo.lock
+recursive-include scrap-core *.toml *.rs
+recursive-include scrap-ffi *.toml *.rs *.h
+recursive-include scrap-lightning *.toml *.rs

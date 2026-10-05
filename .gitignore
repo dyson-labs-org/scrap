@@ -42,3 +42,8 @@ Thumbs.db
 .dolt/
 *.db
 tmp/
+
+# Python distribution artifacts
+build/
+dist/
+*.egg-info/
